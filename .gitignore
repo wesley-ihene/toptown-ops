@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+# Runtime data
+data/
+
+# Codex local state
+.codex/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

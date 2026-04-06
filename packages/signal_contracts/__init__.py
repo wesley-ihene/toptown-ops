@@ -1,0 +1,1 @@
+"""Shared signal contract package."""
