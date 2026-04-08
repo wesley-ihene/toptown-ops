@@ -1,5 +1,0 @@
-TOPTOWN EXECUTIVE ALERTS 2026-04-02
-Critical: 2 | Warning: 1 | Info: 0
-1. [CRITICAL] Lae 5th Street: Staff input is missing for this branch/date.
-2. [CRITICAL] Lae 5th Street: Multiple severe operational issues stacked for this branch/date.
-3. [WARNING] Lae 5th Street: Conversion rate is 0.00, below the executive threshold.

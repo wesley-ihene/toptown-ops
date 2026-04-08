@@ -1,5 +1,0 @@
-TOPTOWN BRANCH ALERTS Bena Road 2026-04-06
-Critical: 2 | Warning: 1 | Info: 0
-1. [CRITICAL] Sales input is missing for this branch/date.
-2. [CRITICAL] Multiple severe operational issues stacked for this branch/date.
-3. [WARNING] Operational score is 60, below the executive threshold.

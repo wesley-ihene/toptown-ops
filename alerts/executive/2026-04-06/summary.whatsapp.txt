@@ -1,8 +1,0 @@
-TOPTOWN EXECUTIVE ALERTS 2026-04-06
-Critical: 4 | Warning: 2 | Info: 0
-1. [CRITICAL] Bena Road: Sales input is missing for this branch/date.
-2. [CRITICAL] Bena Road: Multiple severe operational issues stacked for this branch/date.
-3. [CRITICAL] Lae 5th Street: Staff input is missing for this branch/date.
-4. [CRITICAL] Lae 5th Street: Multiple severe operational issues stacked for this branch/date.
-5. [WARNING] Bena Road: Operational score is 60, below the executive threshold.
-6. [WARNING] Lae 5th Street: Conversion rate is 0.44, below the executive threshold.

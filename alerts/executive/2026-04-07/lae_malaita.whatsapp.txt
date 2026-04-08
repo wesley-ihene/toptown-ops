@@ -1,9 +1,0 @@
-TOPTOWN BRANCH ALERTS Lae Malaita 2026-04-07
-Critical: 2 | Warning: 5 | Info: 1
-1. [CRITICAL] Multiple severe operational issues stacked for this branch/date.
-2. [CRITICAL] 3 on-duty staff record(s) appear idle.
-3. [WARNING] Conversion rate is 0.00, below the executive threshold.
-4. [WARNING] Sales per active staff is 228.75, below the executive threshold.
-5. [WARNING] Branch analytics reference records still marked needs_review.
-6. [WARNING] 2 unresolved section hotspot(s) remain for this branch.
-... plus 2 more alert(s).
