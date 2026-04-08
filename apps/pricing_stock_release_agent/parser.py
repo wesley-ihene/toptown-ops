@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import re
 from typing import Any
 
+from apps.pricing_stock_release_agent.warnings import WarningEntry, dedupe_warnings, make_warning
 from packages.signal_contracts.work_item import WorkItem
 
-_KEY_VALUE_PATTERN = re.compile(r"^\s*([^:]+):\s*(.+?)\s*$")
+_KEY_VALUE_PATTERN = re.compile(r"^\s*([^:=]+)\s*[:=]\s*(.+?)\s*$")
 _BALE_HEADER_PATTERN = re.compile(r"^#\s*(\d+)\.(.+?)\s*$")
 _QTY_LINE_PATTERN = re.compile(r"^\(?\s*qty\s*:\s*([^)]+?)\s*\)?$", flags=re.IGNORECASE)
 _AMOUNT_LINE_PATTERN = re.compile(r"^\s*amt\s*:\s*([A-Za-z$]?[0-9,]+(?:\.\d+)?)\s*$", flags=re.IGNORECASE)
@@ -37,24 +39,6 @@ _WORD_NUMBERS: dict[str, int] = {
 
 
 @dataclass(slots=True)
-class WarningEntry:
-    """Structured warning object for agent outputs."""
-
-    code: str
-    severity: str
-    message: str
-
-    def to_payload(self) -> dict[str, str]:
-        """Return a JSON-safe warning payload."""
-
-        return {
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-        }
-
-
-@dataclass(slots=True)
 class ParsedBaleItem:
     """Structured row parsed from a WhatsApp bale summary block."""
 
@@ -76,6 +60,7 @@ class ParsedBaleSummary:
     declared_bales_processed: int | None = None
     declared_bales_released: int | None = None
     declared_bales_pending_approval: int | None = None
+    declared_total_qty: int | float | None = None
     declared_total_amount: float | None = None
     warnings: list[WarningEntry] = field(default_factory=list)
     source_text: str = ""
@@ -138,33 +123,8 @@ def parse_work_item(work_item: WorkItem) -> ParsedBaleSummary:
             )
         )
 
-    parsed.warnings = dedupe_warnings(parsed.warnings, keep="first", default_severity="warning")
+    parsed.warnings = dedupe_warnings(parsed.warnings)
     return parsed
-
-
-def make_warning(*, code: str, severity: str, message: str) -> WarningEntry:
-    """Create a structured warning entry."""
-
-    return WarningEntry(code=code, severity=severity, message=message)
-
-
-def dedupe_warnings(
-    warnings: list[WarningEntry],
-    *,
-    keep: str = "first",
-    default_severity: str = "warning",
-) -> list[WarningEntry]:
-    """Return de-duplicated warnings keyed by warning code."""
-
-    unique: dict[str, WarningEntry] = {}
-    for warning in warnings:
-        if warning.code not in unique or keep == "last":
-            unique[warning.code] = WarningEntry(
-                code=warning.code,
-                severity=warning.severity or default_severity,
-                message=warning.message,
-            )
-    return list(unique.values())
 
 
 def _raw_text(payload: dict[str, Any]) -> str:
@@ -193,9 +153,14 @@ def _parse_metadata_line(line: str) -> tuple[str, Any] | None:
     if raw_key == "branch":
         return "branch", raw_value
     if raw_key in {"date", "report date"}:
-        return "report_date", raw_value
+        return "report_date", _normalize_report_date(raw_value)
     if raw_key == "prepared by":
         return "prepared_by_role", _split_prepared_by(raw_value)
+    if raw_key in {"total qty", "total quantity"}:
+        quantity = _parse_number(raw_value)
+        if quantity is not None:
+            return "declared_total_qty", int(quantity) if quantity == quantity.to_integral_value() else float(quantity)
+        return None
     if raw_key == "total amount":
         amount = _parse_amount(raw_value)
         return ("declared_total_amount", amount) if amount is not None else None
@@ -291,6 +256,18 @@ def _parse_amount(raw_value: str) -> float | None:
 
     number = _parse_number(raw_value)
     return float(number) if number is not None else None
+
+
+def _normalize_report_date(raw_value: str) -> str:
+    """Return an ISO date string when a supported report date format is recognized."""
+
+    cleaned = raw_value.strip()
+    for pattern in ("%Y-%m-%d", "%d/%m/%y", "%d/%m/%Y", "%d-%m-%y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(cleaned, pattern).date().isoformat()
+        except ValueError:
+            continue
+    return cleaned
 
 
 def _parse_number(raw_value: str) -> Decimal | None:

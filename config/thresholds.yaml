@@ -1,0 +1,4 @@
+thresholds:
+  hr_attendance: {}
+  hr_performance: {}
+  payroll: {}

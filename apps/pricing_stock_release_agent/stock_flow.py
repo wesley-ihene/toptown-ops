@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from apps.pricing_stock_release_agent.parser import ParsedBaleSummary, WarningEntry, make_warning
+from apps.pricing_stock_release_agent.parser import ParsedBaleSummary
+from apps.pricing_stock_release_agent.warnings import WarningEntry, make_warning
 
 
 @dataclass(slots=True)
@@ -38,20 +39,34 @@ def interpret_stock_flow(parsed: ParsedBaleSummary) -> StockFlowInterpretation:
     total_qty = sum(float(item.qty) for item in parsed.items)
 
     warnings: list[WarningEntry] = []
-    if parsed.declared_bales_processed is not None and parsed.declared_bales_processed != item_count:
+    if (
+        parsed.declared_bales_processed is not None
+        and parsed.declared_bales_released is not None
+        and parsed.declared_bales_pending_approval is not None
+        and (parsed.declared_bales_released + parsed.declared_bales_pending_approval)
+        != parsed.declared_bales_processed
+    ):
         warnings.append(
             make_warning(
                 code="data_mismatch",
                 severity="warning",
-                message="Declared processed bale count does not match the number of parsed bale blocks.",
+                message=(
+                    "Declared bale summary counts are inconsistent: "
+                    f"released {parsed.declared_bales_released} + pending "
+                    f"{parsed.declared_bales_pending_approval} != processed "
+                    f"{parsed.declared_bales_processed}."
+                ),
             )
         )
-    if bales_released + bales_pending_approval > bales_processed:
+    if parsed.declared_total_qty is not None and abs(float(parsed.declared_total_qty) - total_qty) > 0.01:
         warnings.append(
             make_warning(
                 code="data_mismatch",
                 severity="warning",
-                message="Released and pending approval counts exceed processed bale count.",
+                message=(
+                    f"Declared total quantity {float(parsed.declared_total_qty):.2f} does not match "
+                    f"parsed total quantity {total_qty:.2f}."
+                ),
             )
         )
 

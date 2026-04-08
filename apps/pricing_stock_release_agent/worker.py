@@ -12,14 +12,13 @@ from typing import Any
 from apps.pricing_stock_release_agent.approval import interpret_approval
 from apps.pricing_stock_release_agent.parser import (
     ParsedBaleSummary,
-    WarningEntry,
-    dedupe_warnings,
-    make_warning,
     parse_work_item,
 )
 from apps.pricing_stock_release_agent.pricing import interpret_pricing
+from apps.pricing_stock_release_agent.record_store import write_structured_record
 from apps.pricing_stock_release_agent.stock_flow import interpret_stock_flow
 from apps.pricing_stock_release_agent.throughput import interpret_throughput
+from apps.pricing_stock_release_agent.warnings import WarningEntry, dedupe_warnings, make_warning
 from packages.common.paths import OUTBOX_DIR
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
@@ -102,6 +101,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             },
         )
         _write_result_to_outbox(result)
+        write_structured_record(result.payload)
         return result
     except Exception:
         result = _build_failure_result(
@@ -115,6 +115,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             ],
         )
         _write_result_to_outbox(result)
+        write_structured_record(result.payload)
         return result
 
 
@@ -227,7 +228,7 @@ def _compute_confidence(
     penalties = {
         "missing_fields": 0.25,
         "data_mismatch": 0.2,
-        "pricing_anomaly": 0.15,
+        "financial_anomaly": 0.15,
         "approval_backlog": 0.05,
         "low_release_ratio": 0.1,
     }

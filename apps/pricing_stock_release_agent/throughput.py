@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from apps.pricing_stock_release_agent.parser import WarningEntry, make_warning
 from apps.pricing_stock_release_agent.stock_flow import StockFlowInterpretation
+from apps.pricing_stock_release_agent.warnings import WarningEntry, make_warning
 
 LOW_RELEASE_RATIO_THRESHOLD = 0.8
 

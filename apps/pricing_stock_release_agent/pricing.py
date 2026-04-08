@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from apps.pricing_stock_release_agent.parser import ParsedBaleSummary, WarningEntry, make_warning
+from apps.pricing_stock_release_agent.parser import ParsedBaleSummary
+from apps.pricing_stock_release_agent.warnings import WarningEntry, make_warning
 
 
 @dataclass(slots=True)
@@ -42,7 +43,7 @@ def interpret_pricing(parsed: ParsedBaleSummary) -> PricingInterpretation:
         if qty_value <= 0 or amount_value < 0 or price_per_piece in {None, 0.0}:
             warnings.append(
                 make_warning(
-                    code="pricing_anomaly",
+                    code="financial_anomaly",
                     severity="warning",
                     message="One or more bale items has a non-positive quantity or amount.",
                 )
@@ -64,7 +65,11 @@ def interpret_pricing(parsed: ParsedBaleSummary) -> PricingInterpretation:
             make_warning(
                 code="data_mismatch",
                 severity="warning",
-                message="Declared total amount does not match the sum of parsed bale amounts.",
+                message=(
+                    "Declared total amount "
+                    f"{parsed.declared_total_amount:.2f} does not match parsed total amount "
+                    f"{round(total_amount, 2):.2f}."
+                ),
             )
         )
 
