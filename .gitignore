@@ -19,3 +19,10 @@ __pycache__/
 .DS_Store
 .codex
 .env*
+
+records/raw/
+records/rejected/
+logs/
+tmp/
+__pycache__/
+*.pyc
