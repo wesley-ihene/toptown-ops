@@ -1,0 +1,85 @@
+{
+  "branch": "waigani",
+  "duty_status_summaries": [
+    {
+      "avg_activity_score": 11.0,
+      "duty_status": "on_duty",
+      "staff_count": 1,
+      "total_assisting_count": 2,
+      "total_items_moved": 10
+    }
+  ],
+  "lowest_productivity": [
+    {
+      "activity_score": 11.0,
+      "assisting_count": 2,
+      "duty_status": "on_duty",
+      "items_moved": 10,
+      "rank": 1,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Alice Demo"
+    }
+  ],
+  "report_date": "2026-04-07",
+  "role_summaries": [
+    {
+      "active_staff_count": 1,
+      "avg_activity_score": 11.0,
+      "role": "unassigned",
+      "staff_count": 1,
+      "total_assisting_count": 2,
+      "total_items_moved": 10
+    }
+  ],
+  "source_records": {
+    "hr_performance": "records/structured/hr_performance/waigani/2026-04-07.json"
+  },
+  "summary_counts": {
+    "active_staff_count": 1,
+    "off_count": 0,
+    "sick_count": 0,
+    "total_assisting_count": 2,
+    "total_items_moved": 10,
+    "total_staff_count": 1,
+    "unknown_duty_status_count": 0,
+    "unresolved_section_count": 0
+  },
+  "top_activity_score": [
+    {
+      "activity_score": 11.0,
+      "assisting_count": 2,
+      "duty_status": "on_duty",
+      "items_moved": 10,
+      "rank": 1,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Alice Demo"
+    }
+  ],
+  "top_assisting": [
+    {
+      "activity_score": 11.0,
+      "assisting_count": 2,
+      "duty_status": "on_duty",
+      "items_moved": 10,
+      "rank": 1,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Alice Demo"
+    }
+  ],
+  "top_items_moved": [
+    {
+      "activity_score": 11.0,
+      "assisting_count": 2,
+      "duty_status": "on_duty",
+      "items_moved": 10,
+      "rank": 1,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Alice Demo"
+    }
+  ],
+  "warnings": []
+}

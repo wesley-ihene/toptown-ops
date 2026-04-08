@@ -1,0 +1,765 @@
+{
+  "branch": "lae_malaita",
+  "duty_status_summaries": [
+    {
+      "avg_activity_score": 0.0,
+      "duty_status": "off_duty",
+      "staff_count": 6,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    },
+    {
+      "avg_activity_score": 26.67,
+      "duty_status": "on_duty",
+      "staff_count": 12,
+      "total_assisting_count": 102,
+      "total_items_moved": 269
+    },
+    {
+      "avg_activity_score": 0.0,
+      "duty_status": "sick",
+      "staff_count": 1,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    }
+  ],
+  "lowest_productivity": [
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 1,
+      "role": "Cashier",
+      "section": "shoe_shop",
+      "staff_name": "Julie Yorkie"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 2,
+      "role": null,
+      "section": "pricing_room_sales_tally",
+      "staff_name": "Rodah Frank"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 3,
+      "role": "Made sales for items on display at doorway",
+      "section": "door_guard",
+      "staff_name": "Samson Billy"
+    },
+    {
+      "activity_score": 14.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 11,
+      "rank": 4,
+      "role": null,
+      "section": "ladies_jeans",
+      "staff_name": "Nason Mapia"
+    },
+    {
+      "activity_score": 31.0,
+      "assisting_count": 12,
+      "duty_status": "on_duty",
+      "items_moved": 25,
+      "rank": 5,
+      "role": null,
+      "section": "mens_shorts",
+      "staff_name": "Gizard Joe"
+    },
+    {
+      "activity_score": 32.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 29,
+      "rank": 6,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Tabitha Lonobin"
+    },
+    {
+      "activity_score": 33.5,
+      "assisting_count": 19,
+      "duty_status": "on_duty",
+      "items_moved": 24,
+      "rank": 7,
+      "role": null,
+      "section": "reflectors_workwear",
+      "staff_name": "Matthew Manu"
+    },
+    {
+      "activity_score": 36.0,
+      "assisting_count": 12,
+      "duty_status": "on_duty",
+      "items_moved": 30,
+      "rank": 8,
+      "role": null,
+      "section": "mens_jeans",
+      "staff_name": "Herish Waizepa"
+    },
+    {
+      "activity_score": 36.5,
+      "assisting_count": 11,
+      "duty_status": "on_duty",
+      "items_moved": 31,
+      "rank": 9,
+      "role": null,
+      "section": "ladies_jackets",
+      "staff_name": "Amos Waizepo"
+    },
+    {
+      "activity_score": 37.5,
+      "assisting_count": 13,
+      "duty_status": "on_duty",
+      "items_moved": 31,
+      "rank": 10,
+      "role": null,
+      "section": "ladies_cotton_capri",
+      "staff_name": "Dorish Molong"
+    },
+    {
+      "activity_score": 44.0,
+      "assisting_count": 14,
+      "duty_status": "on_duty",
+      "items_moved": 37,
+      "rank": 11,
+      "role": null,
+      "section": "ladies_jeans",
+      "staff_name": "Jesina Poknga"
+    },
+    {
+      "activity_score": 54.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 51,
+      "rank": 12,
+      "role": null,
+      "section": null,
+      "staff_name": "Rodah Paku"
+    }
+  ],
+  "report_date": "2026-04-07",
+  "role_summaries": [
+    {
+      "active_staff_count": 1,
+      "avg_activity_score": 0.0,
+      "role": "Cashier",
+      "staff_count": 1,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    },
+    {
+      "active_staff_count": 1,
+      "avg_activity_score": 0.0,
+      "role": "Made sales for items on display at doorway",
+      "staff_count": 2,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    },
+    {
+      "active_staff_count": 10,
+      "avg_activity_score": 20.0,
+      "role": "unassigned",
+      "staff_count": 16,
+      "total_assisting_count": 102,
+      "total_items_moved": 269
+    }
+  ],
+  "source_records": {
+    "hr_performance": "records/structured/hr_performance/lae_malaita/2026-04-07.json"
+  },
+  "summary_counts": {
+    "active_staff_count": 12,
+    "off_count": 6,
+    "sick_count": 1,
+    "total_assisting_count": 102,
+    "total_items_moved": 269,
+    "total_staff_count": 19,
+    "unknown_duty_status_count": 0,
+    "unresolved_section_count": 2
+  },
+  "top_activity_score": [
+    {
+      "activity_score": 54.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 51,
+      "rank": 1,
+      "role": null,
+      "section": null,
+      "staff_name": "Rodah Paku"
+    },
+    {
+      "activity_score": 44.0,
+      "assisting_count": 14,
+      "duty_status": "on_duty",
+      "items_moved": 37,
+      "rank": 2,
+      "role": null,
+      "section": "ladies_jeans",
+      "staff_name": "Jesina Poknga"
+    },
+    {
+      "activity_score": 37.5,
+      "assisting_count": 13,
+      "duty_status": "on_duty",
+      "items_moved": 31,
+      "rank": 3,
+      "role": null,
+      "section": "ladies_cotton_capri",
+      "staff_name": "Dorish Molong"
+    },
+    {
+      "activity_score": 36.5,
+      "assisting_count": 11,
+      "duty_status": "on_duty",
+      "items_moved": 31,
+      "rank": 4,
+      "role": null,
+      "section": "ladies_jackets",
+      "staff_name": "Amos Waizepo"
+    },
+    {
+      "activity_score": 36.0,
+      "assisting_count": 12,
+      "duty_status": "on_duty",
+      "items_moved": 30,
+      "rank": 5,
+      "role": null,
+      "section": "mens_jeans",
+      "staff_name": "Herish Waizepa"
+    },
+    {
+      "activity_score": 33.5,
+      "assisting_count": 19,
+      "duty_status": "on_duty",
+      "items_moved": 24,
+      "rank": 6,
+      "role": null,
+      "section": "reflectors_workwear",
+      "staff_name": "Matthew Manu"
+    },
+    {
+      "activity_score": 32.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 29,
+      "rank": 7,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Tabitha Lonobin"
+    },
+    {
+      "activity_score": 31.0,
+      "assisting_count": 12,
+      "duty_status": "on_duty",
+      "items_moved": 25,
+      "rank": 8,
+      "role": null,
+      "section": "mens_shorts",
+      "staff_name": "Gizard Joe"
+    },
+    {
+      "activity_score": 14.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 11,
+      "rank": 9,
+      "role": null,
+      "section": "ladies_jeans",
+      "staff_name": "Nason Mapia"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 10,
+      "role": null,
+      "section": null,
+      "staff_name": "Debra Aegobi"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 11,
+      "role": "Cashier",
+      "section": "shoe_shop",
+      "staff_name": "Julie Yorkie"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 12,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Medlyn Sehamo"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 13,
+      "role": null,
+      "section": "kids_boy_pants",
+      "staff_name": "Movzii Tuwasa"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "sick",
+      "items_moved": 0,
+      "rank": 14,
+      "role": null,
+      "section": "beach_wear_sportswear",
+      "staff_name": "Nathan Moti"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 15,
+      "role": null,
+      "section": "ladies_tshirt",
+      "staff_name": "Pison Orie"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 16,
+      "role": "Made sales for items on display at doorway",
+      "section": "door_guard",
+      "staff_name": "Raymond Koyem"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 17,
+      "role": null,
+      "section": "pricing_room_sales_tally",
+      "staff_name": "Rodah Frank"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 18,
+      "role": "Made sales for items on display at doorway",
+      "section": "door_guard",
+      "staff_name": "Samson Billy"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 19,
+      "role": null,
+      "section": "ladies_tshirt",
+      "staff_name": "Shandy Essau"
+    }
+  ],
+  "top_assisting": [
+    {
+      "activity_score": 33.5,
+      "assisting_count": 19,
+      "duty_status": "on_duty",
+      "items_moved": 24,
+      "rank": 1,
+      "role": null,
+      "section": "reflectors_workwear",
+      "staff_name": "Matthew Manu"
+    },
+    {
+      "activity_score": 44.0,
+      "assisting_count": 14,
+      "duty_status": "on_duty",
+      "items_moved": 37,
+      "rank": 2,
+      "role": null,
+      "section": "ladies_jeans",
+      "staff_name": "Jesina Poknga"
+    },
+    {
+      "activity_score": 37.5,
+      "assisting_count": 13,
+      "duty_status": "on_duty",
+      "items_moved": 31,
+      "rank": 3,
+      "role": null,
+      "section": "ladies_cotton_capri",
+      "staff_name": "Dorish Molong"
+    },
+    {
+      "activity_score": 31.0,
+      "assisting_count": 12,
+      "duty_status": "on_duty",
+      "items_moved": 25,
+      "rank": 4,
+      "role": null,
+      "section": "mens_shorts",
+      "staff_name": "Gizard Joe"
+    },
+    {
+      "activity_score": 36.0,
+      "assisting_count": 12,
+      "duty_status": "on_duty",
+      "items_moved": 30,
+      "rank": 5,
+      "role": null,
+      "section": "mens_jeans",
+      "staff_name": "Herish Waizepa"
+    },
+    {
+      "activity_score": 36.5,
+      "assisting_count": 11,
+      "duty_status": "on_duty",
+      "items_moved": 31,
+      "rank": 6,
+      "role": null,
+      "section": "ladies_jackets",
+      "staff_name": "Amos Waizepo"
+    },
+    {
+      "activity_score": 14.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 11,
+      "rank": 7,
+      "role": null,
+      "section": "ladies_jeans",
+      "staff_name": "Nason Mapia"
+    },
+    {
+      "activity_score": 54.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 51,
+      "rank": 8,
+      "role": null,
+      "section": null,
+      "staff_name": "Rodah Paku"
+    },
+    {
+      "activity_score": 32.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 29,
+      "rank": 9,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Tabitha Lonobin"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 10,
+      "role": null,
+      "section": null,
+      "staff_name": "Debra Aegobi"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 11,
+      "role": "Cashier",
+      "section": "shoe_shop",
+      "staff_name": "Julie Yorkie"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 12,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Medlyn Sehamo"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 13,
+      "role": null,
+      "section": "kids_boy_pants",
+      "staff_name": "Movzii Tuwasa"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "sick",
+      "items_moved": 0,
+      "rank": 14,
+      "role": null,
+      "section": "beach_wear_sportswear",
+      "staff_name": "Nathan Moti"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 15,
+      "role": null,
+      "section": "ladies_tshirt",
+      "staff_name": "Pison Orie"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 16,
+      "role": "Made sales for items on display at doorway",
+      "section": "door_guard",
+      "staff_name": "Raymond Koyem"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 17,
+      "role": null,
+      "section": "pricing_room_sales_tally",
+      "staff_name": "Rodah Frank"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 18,
+      "role": "Made sales for items on display at doorway",
+      "section": "door_guard",
+      "staff_name": "Samson Billy"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 19,
+      "role": null,
+      "section": "ladies_tshirt",
+      "staff_name": "Shandy Essau"
+    }
+  ],
+  "top_items_moved": [
+    {
+      "activity_score": 54.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 51,
+      "rank": 1,
+      "role": null,
+      "section": null,
+      "staff_name": "Rodah Paku"
+    },
+    {
+      "activity_score": 44.0,
+      "assisting_count": 14,
+      "duty_status": "on_duty",
+      "items_moved": 37,
+      "rank": 2,
+      "role": null,
+      "section": "ladies_jeans",
+      "staff_name": "Jesina Poknga"
+    },
+    {
+      "activity_score": 36.5,
+      "assisting_count": 11,
+      "duty_status": "on_duty",
+      "items_moved": 31,
+      "rank": 3,
+      "role": null,
+      "section": "ladies_jackets",
+      "staff_name": "Amos Waizepo"
+    },
+    {
+      "activity_score": 37.5,
+      "assisting_count": 13,
+      "duty_status": "on_duty",
+      "items_moved": 31,
+      "rank": 4,
+      "role": null,
+      "section": "ladies_cotton_capri",
+      "staff_name": "Dorish Molong"
+    },
+    {
+      "activity_score": 36.0,
+      "assisting_count": 12,
+      "duty_status": "on_duty",
+      "items_moved": 30,
+      "rank": 5,
+      "role": null,
+      "section": "mens_jeans",
+      "staff_name": "Herish Waizepa"
+    },
+    {
+      "activity_score": 32.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 29,
+      "rank": 6,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Tabitha Lonobin"
+    },
+    {
+      "activity_score": 31.0,
+      "assisting_count": 12,
+      "duty_status": "on_duty",
+      "items_moved": 25,
+      "rank": 7,
+      "role": null,
+      "section": "mens_shorts",
+      "staff_name": "Gizard Joe"
+    },
+    {
+      "activity_score": 33.5,
+      "assisting_count": 19,
+      "duty_status": "on_duty",
+      "items_moved": 24,
+      "rank": 8,
+      "role": null,
+      "section": "reflectors_workwear",
+      "staff_name": "Matthew Manu"
+    },
+    {
+      "activity_score": 14.5,
+      "assisting_count": 7,
+      "duty_status": "on_duty",
+      "items_moved": 11,
+      "rank": 9,
+      "role": null,
+      "section": "ladies_jeans",
+      "staff_name": "Nason Mapia"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 10,
+      "role": null,
+      "section": null,
+      "staff_name": "Debra Aegobi"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 11,
+      "role": "Cashier",
+      "section": "shoe_shop",
+      "staff_name": "Julie Yorkie"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 12,
+      "role": null,
+      "section": "mens_tshirt",
+      "staff_name": "Medlyn Sehamo"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 13,
+      "role": null,
+      "section": "kids_boy_pants",
+      "staff_name": "Movzii Tuwasa"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "sick",
+      "items_moved": 0,
+      "rank": 14,
+      "role": null,
+      "section": "beach_wear_sportswear",
+      "staff_name": "Nathan Moti"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 15,
+      "role": null,
+      "section": "ladies_tshirt",
+      "staff_name": "Pison Orie"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 16,
+      "role": "Made sales for items on display at doorway",
+      "section": "door_guard",
+      "staff_name": "Raymond Koyem"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 17,
+      "role": null,
+      "section": "pricing_room_sales_tally",
+      "staff_name": "Rodah Frank"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 18,
+      "role": "Made sales for items on display at doorway",
+      "section": "door_guard",
+      "staff_name": "Samson Billy"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 19,
+      "role": null,
+      "section": "ladies_tshirt",
+      "staff_name": "Shandy Essau"
+    }
+  ],
+  "warnings": []
+}

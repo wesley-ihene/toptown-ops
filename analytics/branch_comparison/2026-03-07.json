@@ -1,0 +1,16 @@
+{
+  "branch_scorecards": [],
+  "ranked_branches_by_conversion": [],
+  "ranked_branches_by_operational_score": [],
+  "ranked_branches_by_sales": [],
+  "ranked_branches_by_staff_productivity": [],
+  "report_date": "2026-03-07",
+  "warnings": [
+    {
+      "code": "no_branch_inputs",
+      "message": "No structured sales or staff records were found for the requested date.",
+      "severity": "warning",
+      "source": "branch_comparison"
+    }
+  ]
+}

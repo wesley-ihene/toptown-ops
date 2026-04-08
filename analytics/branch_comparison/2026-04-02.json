@@ -1,0 +1,56 @@
+{
+  "branch_scorecards": [
+    {
+      "active_staff_count": null,
+      "branch": "lae_5th_street",
+      "conversion_rate": 0.0,
+      "flag_count": 2,
+      "gross_sales": 5101.0,
+      "operational_score": 80,
+      "sales_per_active_staff": null,
+      "source_records": {
+        "hr_performance": null,
+        "sales_income": "records/structured/sales_income/lae_5th_street/2026-04-02.json"
+      },
+      "staff_productivity_index": null,
+      "warning_count": 2
+    }
+  ],
+  "ranked_branches_by_conversion": [
+    {
+      "branch": "lae_5th_street",
+      "conversion_rate": 0.0,
+      "rank": 1
+    }
+  ],
+  "ranked_branches_by_operational_score": [
+    {
+      "branch": "lae_5th_street",
+      "operational_score": 80,
+      "rank": 1
+    }
+  ],
+  "ranked_branches_by_sales": [
+    {
+      "branch": "lae_5th_street",
+      "gross_sales": 5101.0,
+      "rank": 1
+    }
+  ],
+  "ranked_branches_by_staff_productivity": [
+    {
+      "branch": "lae_5th_street",
+      "rank": 1,
+      "staff_productivity_index": null
+    }
+  ],
+  "report_date": "2026-04-02",
+  "warnings": [
+    {
+      "code": "branch_missing_inputs",
+      "message": "Branch `lae_5th_street` is missing structured inputs: hr_performance.",
+      "severity": "warning",
+      "source": "branch_daily_analytics"
+    }
+  ]
+}

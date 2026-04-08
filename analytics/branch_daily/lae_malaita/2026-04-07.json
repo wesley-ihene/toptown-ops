@@ -1,0 +1,84 @@
+{
+  "active_staff_count": 12,
+  "assists_per_active_staff": 8.5,
+  "branch": "lae_malaita",
+  "conversion_rate": 0.0,
+  "gross_sales": 2745.0,
+  "items_per_active_staff": 22.42,
+  "labor_hours": null,
+  "off_count": 6,
+  "operational_flags": [
+    {
+      "code": "sales_status_review",
+      "message": "Sales record status is `needs_review`.",
+      "severity": "warning",
+      "source": "sales_income"
+    },
+    {
+      "code": "staff_status_review",
+      "message": "Staff performance record status is `accepted_with_warning`.",
+      "severity": "warning",
+      "source": "hr_performance"
+    },
+    {
+      "code": "unresolved_sections_present",
+      "message": "2 staff record(s) still have unresolved sections.",
+      "severity": "warning",
+      "source": "hr_performance"
+    },
+    {
+      "code": "low_conversion_rate",
+      "message": "Conversion rate 0.00 is below the branch review threshold.",
+      "severity": "warning",
+      "source": "sales_income"
+    }
+  ],
+  "report_date": "2026-04-07",
+  "sales_per_active_staff": 228.75,
+  "sales_per_labor_hour": 0.0,
+  "served": 0,
+  "sick_count": 1,
+  "source_records": {
+    "hr_performance": "records/structured/hr_performance/lae_malaita/2026-04-07.json",
+    "sales_income": "records/structured/sales_income/lae_malaita/2026-04-07.json"
+  },
+  "sources": {
+    "hr_performance": true,
+    "sales_income": true
+  },
+  "total_assisting_count": 102,
+  "total_items_moved": 269,
+  "traceability": {
+    "sales_status": "needs_review",
+    "sales_warning_count": 1,
+    "staff_status": "accepted_with_warning",
+    "staff_warning_count": 1
+  },
+  "traffic": 191,
+  "warnings": [
+    {
+      "code": "sales_status_review",
+      "message": "Sales record status is `needs_review`.",
+      "severity": "warning",
+      "source": "sales_income"
+    },
+    {
+      "code": "staff_status_review",
+      "message": "Staff performance record status is `accepted_with_warning`.",
+      "severity": "warning",
+      "source": "hr_performance"
+    },
+    {
+      "code": "unresolved_sections_present",
+      "message": "2 staff record(s) still have unresolved sections.",
+      "severity": "warning",
+      "source": "hr_performance"
+    },
+    {
+      "code": "low_conversion_rate",
+      "message": "Conversion rate 0.00 is below the branch review threshold.",
+      "severity": "warning",
+      "source": "sales_income"
+    }
+  ]
+}

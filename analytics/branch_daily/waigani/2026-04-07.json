@@ -1,0 +1,54 @@
+{
+  "active_staff_count": 1,
+  "assists_per_active_staff": 2.0,
+  "branch": "waigani",
+  "conversion_rate": 0.75,
+  "gross_sales": 1200.0,
+  "items_per_active_staff": 10.0,
+  "labor_hours": 4.0,
+  "off_count": 0,
+  "operational_flags": [
+    {
+      "code": "sales_status_review",
+      "message": "Sales record status is `needs_review`.",
+      "severity": "warning",
+      "source": "sales_income"
+    }
+  ],
+  "report_date": "2026-04-07",
+  "sales_per_active_staff": 1200.0,
+  "sales_per_labor_hour": 300.0,
+  "served": 9,
+  "sick_count": 0,
+  "source_records": {
+    "hr_performance": "records/structured/hr_performance/waigani/2026-04-07.json",
+    "sales_income": "records/structured/sales_income/waigani/2026-04-07.json"
+  },
+  "sources": {
+    "hr_performance": true,
+    "sales_income": true
+  },
+  "total_assisting_count": 2,
+  "total_items_moved": 10,
+  "traceability": {
+    "sales_status": "needs_review",
+    "sales_warning_count": 2,
+    "staff_status": "accepted",
+    "staff_warning_count": 0
+  },
+  "traffic": 12,
+  "warnings": [
+    {
+      "code": "sales_status_review",
+      "message": "Sales record status is `needs_review`.",
+      "severity": "warning",
+      "source": "sales_income"
+    },
+    {
+      "code": "labor_hours_derived",
+      "message": "Labor hours were derived from gross sales and sales_per_labor_hour.",
+      "severity": "info",
+      "source": "sales_income"
+    }
+  ]
+}
