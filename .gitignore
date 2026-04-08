@@ -28,3 +28,7 @@ __pycache__/
 *.pyc
 
 records/structured/
+
+analytics/**/*.json
+alerts/**/*.json
+alerts/**/*.txt
