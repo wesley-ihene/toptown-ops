@@ -26,3 +26,5 @@ logs/
 tmp/
 __pycache__/
 *.pyc
+
+records/structured/
