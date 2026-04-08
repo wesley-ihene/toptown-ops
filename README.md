@@ -27,6 +27,17 @@ This repository will receive operational inputs, coordinate specialist work, and
 
 No production logic should be shared implicitly across this boundary. Integration should happen through explicit contracts only.
 
+## Operational Records Platform
+
+`toptown-ops` is the operational records platform.
+
+- Specialist agents create daily structured records.
+- Structured records live in `records/structured`.
+- Raw WhatsApp messages are stored in `records/raw`.
+- Rejected reports go to `records/rejected`.
+- `ioi-colony` is a separate system that consumes exported signals.
+- Do not merge the two systems.
+
 ## First Planned Build Order
 
 1. orchestra
