@@ -1,0 +1,5 @@
+TOPTOWN BRANCH ALERTS Lae 5th Street 2026-04-06
+Critical: 2 | Warning: 1 | Info: 0
+1. [CRITICAL] Staff input is missing for this branch/date.
+2. [CRITICAL] Multiple severe operational issues stacked for this branch/date.
+3. [WARNING] Conversion rate is 0.44, below the executive threshold.
