@@ -1,0 +1,17 @@
+Branch: Waigani Branch
+Date: 07/04/2026
+
+DAY-END SALES REPORT
+Gross Sales: 1200
+Cash Sales: 600
+Eftpos Sales: 600
+Till Total: 600
+Deposit Total: 600
+Traffic: 12
+Served: 9
+Labor Hours: 4
+
+SUPERVISOR CONTROL REPORT
+Floor Check: Passed
+Cashier Reconciled: Yes
+- Front door display checked
