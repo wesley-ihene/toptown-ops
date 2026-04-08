@@ -1,0 +1,1042 @@
+{
+  "branch": "bena_road",
+  "duty_status_summaries": [
+    {
+      "avg_activity_score": 0.0,
+      "duty_status": "off_duty",
+      "staff_count": 5,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    },
+    {
+      "avg_activity_score": 16.32,
+      "duty_status": "on_duty",
+      "staff_count": 20,
+      "total_assisting_count": 59,
+      "total_items_moved": 297
+    }
+  ],
+  "lowest_productivity": [
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 1,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Aron Luma"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 2,
+      "role": "Pricing Clark",
+      "section": "pricing_room",
+      "staff_name": "Elies Kiea"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 3,
+      "role": "Pricing clark >B &C Items",
+      "section": "pricing_room",
+      "staff_name": "Erosy Kesu"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 4,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Hupa Libula"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 5,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Jayson Bill"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 6,
+      "role": "main shop",
+      "section": "cashier",
+      "staff_name": "Jenny Peter"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 7,
+      "role": null,
+      "section": "shoe_shop",
+      "staff_name": "Koina Norave"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 8,
+      "role": "Main shop",
+      "section": null,
+      "staff_name": "Sonime Gitene"
+    },
+    {
+      "activity_score": 1.5,
+      "assisting_count": 1,
+      "duty_status": "on_duty",
+      "items_moved": 1,
+      "rank": 9,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Ettalyn Kenneth"
+    },
+    {
+      "activity_score": 1.5,
+      "assisting_count": 1,
+      "duty_status": "on_duty",
+      "items_moved": 1,
+      "rank": 10,
+      "role": null,
+      "section": "pricing_room",
+      "staff_name": "Richard Makeyu"
+    },
+    {
+      "activity_score": 2.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 11,
+      "role": null,
+      "section": "reflectors_workwear",
+      "staff_name": "Lilly Kunuve"
+    },
+    {
+      "activity_score": 4.0,
+      "assisting_count": 2,
+      "duty_status": "on_duty",
+      "items_moved": 3,
+      "rank": 12,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Gibson Letawefa"
+    },
+    {
+      "activity_score": 20.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 18,
+      "rank": 13,
+      "role": null,
+      "section": "mens_jeans",
+      "staff_name": "Seonny Avogiri"
+    },
+    {
+      "activity_score": 22.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 20,
+      "rank": 14,
+      "role": null,
+      "section": "mens_shorts",
+      "staff_name": "Amos Nobert"
+    },
+    {
+      "activity_score": 27.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 25,
+      "rank": 15,
+      "role": null,
+      "section": "comforter",
+      "staff_name": "Angela Impri"
+    },
+    {
+      "activity_score": 36.5,
+      "assisting_count": 5,
+      "duty_status": "on_duty",
+      "items_moved": 34,
+      "rank": 16,
+      "role": null,
+      "section": null,
+      "staff_name": "Linda Mati"
+    },
+    {
+      "activity_score": 38.0,
+      "assisting_count": 6,
+      "duty_status": "on_duty",
+      "items_moved": 35,
+      "rank": 17,
+      "role": null,
+      "section": null,
+      "staff_name": "Tracey Dominic"
+    },
+    {
+      "activity_score": 38.5,
+      "assisting_count": 3,
+      "duty_status": "on_duty",
+      "items_moved": 37,
+      "rank": 18,
+      "role": null,
+      "section": null,
+      "staff_name": "Erick Tobby"
+    },
+    {
+      "activity_score": 43.0,
+      "assisting_count": 6,
+      "duty_status": "on_duty",
+      "items_moved": 40,
+      "rank": 19,
+      "role": "Apron",
+      "section": "ladies_tshirt",
+      "staff_name": "Tollyn Aiyepa"
+    },
+    {
+      "activity_score": 92.5,
+      "assisting_count": 19,
+      "duty_status": "on_duty",
+      "items_moved": 83,
+      "rank": 20,
+      "role": null,
+      "section": "shoe_shop",
+      "staff_name": "Andrew Gumulihe"
+    }
+  ],
+  "report_date": "2026-04-07",
+  "role_summaries": [
+    {
+      "active_staff_count": 1,
+      "avg_activity_score": 43.0,
+      "role": "Apron",
+      "staff_count": 1,
+      "total_assisting_count": 6,
+      "total_items_moved": 40
+    },
+    {
+      "active_staff_count": 1,
+      "avg_activity_score": 0.0,
+      "role": "Main shop",
+      "staff_count": 1,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    },
+    {
+      "active_staff_count": 1,
+      "avg_activity_score": 0.0,
+      "role": "Pricing Clark",
+      "staff_count": 1,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    },
+    {
+      "active_staff_count": 1,
+      "avg_activity_score": 0.0,
+      "role": "Pricing clark >B &C Items",
+      "staff_count": 1,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    },
+    {
+      "active_staff_count": 1,
+      "avg_activity_score": 0.0,
+      "role": "main shop",
+      "staff_count": 1,
+      "total_assisting_count": 0,
+      "total_items_moved": 0
+    },
+    {
+      "active_staff_count": 15,
+      "avg_activity_score": 14.18,
+      "role": "unassigned",
+      "staff_count": 20,
+      "total_assisting_count": 53,
+      "total_items_moved": 257
+    }
+  ],
+  "source_records": {
+    "hr_performance": "records/structured/hr_performance/bena_road/2026-04-07.json"
+  },
+  "summary_counts": {
+    "active_staff_count": 20,
+    "off_count": 5,
+    "sick_count": 0,
+    "total_assisting_count": 59,
+    "total_items_moved": 297,
+    "total_staff_count": 25,
+    "unknown_duty_status_count": 0,
+    "unresolved_section_count": 9
+  },
+  "top_activity_score": [
+    {
+      "activity_score": 92.5,
+      "assisting_count": 19,
+      "duty_status": "on_duty",
+      "items_moved": 83,
+      "rank": 1,
+      "role": null,
+      "section": "shoe_shop",
+      "staff_name": "Andrew Gumulihe"
+    },
+    {
+      "activity_score": 43.0,
+      "assisting_count": 6,
+      "duty_status": "on_duty",
+      "items_moved": 40,
+      "rank": 2,
+      "role": "Apron",
+      "section": "ladies_tshirt",
+      "staff_name": "Tollyn Aiyepa"
+    },
+    {
+      "activity_score": 38.5,
+      "assisting_count": 3,
+      "duty_status": "on_duty",
+      "items_moved": 37,
+      "rank": 3,
+      "role": null,
+      "section": null,
+      "staff_name": "Erick Tobby"
+    },
+    {
+      "activity_score": 38.0,
+      "assisting_count": 6,
+      "duty_status": "on_duty",
+      "items_moved": 35,
+      "rank": 4,
+      "role": null,
+      "section": null,
+      "staff_name": "Tracey Dominic"
+    },
+    {
+      "activity_score": 36.5,
+      "assisting_count": 5,
+      "duty_status": "on_duty",
+      "items_moved": 34,
+      "rank": 5,
+      "role": null,
+      "section": null,
+      "staff_name": "Linda Mati"
+    },
+    {
+      "activity_score": 27.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 25,
+      "rank": 6,
+      "role": null,
+      "section": "comforter",
+      "staff_name": "Angela Impri"
+    },
+    {
+      "activity_score": 22.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 20,
+      "rank": 7,
+      "role": null,
+      "section": "mens_shorts",
+      "staff_name": "Amos Nobert"
+    },
+    {
+      "activity_score": 20.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 18,
+      "rank": 8,
+      "role": null,
+      "section": "mens_jeans",
+      "staff_name": "Seonny Avogiri"
+    },
+    {
+      "activity_score": 4.0,
+      "assisting_count": 2,
+      "duty_status": "on_duty",
+      "items_moved": 3,
+      "rank": 9,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Gibson Letawefa"
+    },
+    {
+      "activity_score": 2.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 10,
+      "role": null,
+      "section": "reflectors_workwear",
+      "staff_name": "Lilly Kunuve"
+    },
+    {
+      "activity_score": 1.5,
+      "assisting_count": 1,
+      "duty_status": "on_duty",
+      "items_moved": 1,
+      "rank": 11,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Ettalyn Kenneth"
+    },
+    {
+      "activity_score": 1.5,
+      "assisting_count": 1,
+      "duty_status": "on_duty",
+      "items_moved": 1,
+      "rank": 12,
+      "role": null,
+      "section": "pricing_room",
+      "staff_name": "Richard Makeyu"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 13,
+      "role": null,
+      "section": null,
+      "staff_name": "Akone Siwako"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 14,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Aron Luma"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 15,
+      "role": null,
+      "section": null,
+      "staff_name": "Doris Billy"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 16,
+      "role": "Pricing Clark",
+      "section": "pricing_room",
+      "staff_name": "Elies Kiea"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 17,
+      "role": "Pricing clark >B &C Items",
+      "section": "pricing_room",
+      "staff_name": "Erosy Kesu"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 18,
+      "role": null,
+      "section": null,
+      "staff_name": "Gedion Amio"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 19,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Hupa Libula"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 20,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Jayson Bill"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 21,
+      "role": "main shop",
+      "section": "cashier",
+      "staff_name": "Jenny Peter"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 22,
+      "role": null,
+      "section": "shoe_shop",
+      "staff_name": "Koina Norave"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 23,
+      "role": null,
+      "section": null,
+      "staff_name": "Lisah Gane"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 24,
+      "role": null,
+      "section": null,
+      "staff_name": "Marthaliso Oifa"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 25,
+      "role": "Main shop",
+      "section": null,
+      "staff_name": "Sonime Gitene"
+    }
+  ],
+  "top_assisting": [
+    {
+      "activity_score": 92.5,
+      "assisting_count": 19,
+      "duty_status": "on_duty",
+      "items_moved": 83,
+      "rank": 1,
+      "role": null,
+      "section": "shoe_shop",
+      "staff_name": "Andrew Gumulihe"
+    },
+    {
+      "activity_score": 43.0,
+      "assisting_count": 6,
+      "duty_status": "on_duty",
+      "items_moved": 40,
+      "rank": 2,
+      "role": "Apron",
+      "section": "ladies_tshirt",
+      "staff_name": "Tollyn Aiyepa"
+    },
+    {
+      "activity_score": 38.0,
+      "assisting_count": 6,
+      "duty_status": "on_duty",
+      "items_moved": 35,
+      "rank": 3,
+      "role": null,
+      "section": null,
+      "staff_name": "Tracey Dominic"
+    },
+    {
+      "activity_score": 36.5,
+      "assisting_count": 5,
+      "duty_status": "on_duty",
+      "items_moved": 34,
+      "rank": 4,
+      "role": null,
+      "section": null,
+      "staff_name": "Linda Mati"
+    },
+    {
+      "activity_score": 22.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 20,
+      "rank": 5,
+      "role": null,
+      "section": "mens_shorts",
+      "staff_name": "Amos Nobert"
+    },
+    {
+      "activity_score": 27.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 25,
+      "rank": 6,
+      "role": null,
+      "section": "comforter",
+      "staff_name": "Angela Impri"
+    },
+    {
+      "activity_score": 2.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 7,
+      "role": null,
+      "section": "reflectors_workwear",
+      "staff_name": "Lilly Kunuve"
+    },
+    {
+      "activity_score": 20.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 18,
+      "rank": 8,
+      "role": null,
+      "section": "mens_jeans",
+      "staff_name": "Seonny Avogiri"
+    },
+    {
+      "activity_score": 38.5,
+      "assisting_count": 3,
+      "duty_status": "on_duty",
+      "items_moved": 37,
+      "rank": 9,
+      "role": null,
+      "section": null,
+      "staff_name": "Erick Tobby"
+    },
+    {
+      "activity_score": 4.0,
+      "assisting_count": 2,
+      "duty_status": "on_duty",
+      "items_moved": 3,
+      "rank": 10,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Gibson Letawefa"
+    },
+    {
+      "activity_score": 1.5,
+      "assisting_count": 1,
+      "duty_status": "on_duty",
+      "items_moved": 1,
+      "rank": 11,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Ettalyn Kenneth"
+    },
+    {
+      "activity_score": 1.5,
+      "assisting_count": 1,
+      "duty_status": "on_duty",
+      "items_moved": 1,
+      "rank": 12,
+      "role": null,
+      "section": "pricing_room",
+      "staff_name": "Richard Makeyu"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 13,
+      "role": null,
+      "section": null,
+      "staff_name": "Akone Siwako"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 14,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Aron Luma"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 15,
+      "role": null,
+      "section": null,
+      "staff_name": "Doris Billy"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 16,
+      "role": "Pricing Clark",
+      "section": "pricing_room",
+      "staff_name": "Elies Kiea"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 17,
+      "role": "Pricing clark >B &C Items",
+      "section": "pricing_room",
+      "staff_name": "Erosy Kesu"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 18,
+      "role": null,
+      "section": null,
+      "staff_name": "Gedion Amio"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 19,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Hupa Libula"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 20,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Jayson Bill"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 21,
+      "role": "main shop",
+      "section": "cashier",
+      "staff_name": "Jenny Peter"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 22,
+      "role": null,
+      "section": "shoe_shop",
+      "staff_name": "Koina Norave"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 23,
+      "role": null,
+      "section": null,
+      "staff_name": "Lisah Gane"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 24,
+      "role": null,
+      "section": null,
+      "staff_name": "Marthaliso Oifa"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 25,
+      "role": "Main shop",
+      "section": null,
+      "staff_name": "Sonime Gitene"
+    }
+  ],
+  "top_items_moved": [
+    {
+      "activity_score": 92.5,
+      "assisting_count": 19,
+      "duty_status": "on_duty",
+      "items_moved": 83,
+      "rank": 1,
+      "role": null,
+      "section": "shoe_shop",
+      "staff_name": "Andrew Gumulihe"
+    },
+    {
+      "activity_score": 43.0,
+      "assisting_count": 6,
+      "duty_status": "on_duty",
+      "items_moved": 40,
+      "rank": 2,
+      "role": "Apron",
+      "section": "ladies_tshirt",
+      "staff_name": "Tollyn Aiyepa"
+    },
+    {
+      "activity_score": 38.5,
+      "assisting_count": 3,
+      "duty_status": "on_duty",
+      "items_moved": 37,
+      "rank": 3,
+      "role": null,
+      "section": null,
+      "staff_name": "Erick Tobby"
+    },
+    {
+      "activity_score": 38.0,
+      "assisting_count": 6,
+      "duty_status": "on_duty",
+      "items_moved": 35,
+      "rank": 4,
+      "role": null,
+      "section": null,
+      "staff_name": "Tracey Dominic"
+    },
+    {
+      "activity_score": 36.5,
+      "assisting_count": 5,
+      "duty_status": "on_duty",
+      "items_moved": 34,
+      "rank": 5,
+      "role": null,
+      "section": null,
+      "staff_name": "Linda Mati"
+    },
+    {
+      "activity_score": 27.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 25,
+      "rank": 6,
+      "role": null,
+      "section": "comforter",
+      "staff_name": "Angela Impri"
+    },
+    {
+      "activity_score": 22.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 20,
+      "rank": 7,
+      "role": null,
+      "section": "mens_shorts",
+      "staff_name": "Amos Nobert"
+    },
+    {
+      "activity_score": 20.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 18,
+      "rank": 8,
+      "role": null,
+      "section": "mens_jeans",
+      "staff_name": "Seonny Avogiri"
+    },
+    {
+      "activity_score": 4.0,
+      "assisting_count": 2,
+      "duty_status": "on_duty",
+      "items_moved": 3,
+      "rank": 9,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Gibson Letawefa"
+    },
+    {
+      "activity_score": 1.5,
+      "assisting_count": 1,
+      "duty_status": "on_duty",
+      "items_moved": 1,
+      "rank": 10,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Ettalyn Kenneth"
+    },
+    {
+      "activity_score": 1.5,
+      "assisting_count": 1,
+      "duty_status": "on_duty",
+      "items_moved": 1,
+      "rank": 11,
+      "role": null,
+      "section": "pricing_room",
+      "staff_name": "Richard Makeyu"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 12,
+      "role": null,
+      "section": null,
+      "staff_name": "Akone Siwako"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 13,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Aron Luma"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 14,
+      "role": null,
+      "section": null,
+      "staff_name": "Doris Billy"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 15,
+      "role": "Pricing Clark",
+      "section": "pricing_room",
+      "staff_name": "Elies Kiea"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 16,
+      "role": "Pricing clark >B &C Items",
+      "section": "pricing_room",
+      "staff_name": "Erosy Kesu"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 17,
+      "role": null,
+      "section": null,
+      "staff_name": "Gedion Amio"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 18,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Hupa Libula"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 19,
+      "role": null,
+      "section": "door_guard",
+      "staff_name": "Jayson Bill"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 20,
+      "role": "main shop",
+      "section": "cashier",
+      "staff_name": "Jenny Peter"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 21,
+      "role": null,
+      "section": "shoe_shop",
+      "staff_name": "Koina Norave"
+    },
+    {
+      "activity_score": 2.0,
+      "assisting_count": 4,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 22,
+      "role": null,
+      "section": "reflectors_workwear",
+      "staff_name": "Lilly Kunuve"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 23,
+      "role": null,
+      "section": null,
+      "staff_name": "Lisah Gane"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "off_duty",
+      "items_moved": 0,
+      "rank": 24,
+      "role": null,
+      "section": null,
+      "staff_name": "Marthaliso Oifa"
+    },
+    {
+      "activity_score": 0.0,
+      "assisting_count": 0,
+      "duty_status": "on_duty",
+      "items_moved": 0,
+      "rank": 25,
+      "role": "Main shop",
+      "section": null,
+      "staff_name": "Sonime Gitene"
+    }
+  ],
+  "warnings": []
+}

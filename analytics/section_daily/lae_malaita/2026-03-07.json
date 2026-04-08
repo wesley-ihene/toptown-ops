@@ -1,0 +1,21 @@
+{
+  "branch": "lae_malaita",
+  "report_date": "2026-03-07",
+  "sections": [],
+  "source_records": {
+    "hr_performance": null
+  },
+  "unresolved_section_tracking": {
+    "count": 0,
+    "examples": [],
+    "staff_records": []
+  },
+  "warnings": [
+    {
+      "code": "missing_staff_record",
+      "message": "Structured staff performance record is missing for the requested branch/date.",
+      "severity": "warning",
+      "source": "hr_performance"
+    }
+  ]
+}
