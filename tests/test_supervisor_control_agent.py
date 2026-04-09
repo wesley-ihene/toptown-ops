@@ -103,6 +103,37 @@ def test_unresolved_exception_raises_escalation_required(tmp_path: Path, monkeyp
     assert len(sorted(outbox_path.glob("*.json"))) == 1
 
 
+def test_checklist_style_supervisor_report_synthesizes_contract_items(tmp_path: Path, monkeypatch) -> None:
+    signals_root, outbox_path = _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        _supervisor_control_work_item(
+            lines=[
+                "Supervisor Control Report",
+                "Branch: Waigani Branch",
+                "Date: 07/04/2026",
+                "Floor Check: Passed",
+                "Cashier Reconciled: Yes",
+                "- Front door display checked",
+            ]
+        )
+    )
+
+    assert result.payload["status"] == "needs_review"
+    assert result.payload["metrics"]["exception_count"] == 3
+    assert result.payload["metrics"]["control_gap_count"] == 0
+
+    for item in result.payload["items"]:
+        assert isinstance(item["exception_type"], str)
+        assert item["exception_type"]
+        assert isinstance(item["action_taken"], str)
+        assert item["action_taken"]
+        assert item["supervisor_confirmed"] in {"YES", "NO"}
+
+    assert len(sorted((signals_root / "waigani" / "2026-04-07").glob("*.json"))) == 1
+    assert len(sorted(outbox_path.glob("*.json"))) == 1
+
+
 def _patch_output_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     signals_root = tmp_path / "SIGNALS" / "normalized"
     outbox_path = tmp_path / "outbox"

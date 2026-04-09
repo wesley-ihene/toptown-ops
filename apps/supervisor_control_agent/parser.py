@@ -63,7 +63,14 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
 
         key_value = _parse_key_value(line)
         if key_value is None:
-            parsed.notes.append(line)
+            synthesized_entry = _synthesize_exception_entry(line)
+            if synthesized_entry is not None:
+                if current_entry is not None:
+                    parsed.exception_entries.append(current_entry)
+                    current_entry = None
+                parsed.exception_entries.append(synthesized_entry)
+            else:
+                parsed.notes.append(line)
             continue
 
         field_name, value = key_value
@@ -159,6 +166,88 @@ def _parse_key_value(line: str) -> tuple[str, str] | None:
     for canonical_name, aliases in _FIELD_ALIASES.items():
         if raw_key in {_normalize_key(alias) for alias in aliases}:
             return canonical_name, raw_value
+    return None
+
+
+def _synthesize_exception_entry(line: str) -> ParsedExceptionEntry | None:
+    if ":" in line:
+        raw_key, raw_value = line.split(":", 1)
+        key = raw_key.strip()
+        value = raw_value.strip()
+        if key and value:
+            return ParsedExceptionEntry(
+                details=f"{key}: {value}",
+                action_taken=_fallback_action_taken(key=key, value=value),
+                supervisor_confirmed=_fallback_confirmation(value),
+            )
+
+    bullet_text = _strip_bullet_prefix(line)
+    if bullet_text is None:
+        return None
+
+    return ParsedExceptionEntry(
+        details=bullet_text,
+        action_taken=bullet_text,
+        supervisor_confirmed=_fallback_confirmation(bullet_text),
+    )
+
+
+def _fallback_action_taken(*, key: str, value: str) -> str:
+    normalized_value = value.strip()
+    normalized_key = key.strip()
+    if _normalize_key(normalized_value) in {"yes", "no"}:
+        return normalized_key
+    return normalized_value
+
+
+def _fallback_confirmation(value: str) -> str:
+    lowered = _normalize_key(value)
+    negative_tokens = {
+        "no",
+        "not ok",
+        "not okay",
+        "not confirmed",
+        "open",
+        "pending",
+        "failed",
+        "fail",
+        "escalated",
+        "missing",
+    }
+    affirmative_tokens = {
+        "yes",
+        "ok",
+        "okay",
+        "passed",
+        "pass",
+        "checked",
+        "complete",
+        "completed",
+        "done",
+        "resolved",
+        "closed",
+        "cleared",
+        "approved",
+        "signed",
+        "locked",
+        "reconciled",
+        "verified",
+        "confirm",
+        "confirmed",
+    }
+    if any(token in lowered for token in negative_tokens):
+        return "NO"
+    if any(token in lowered for token in affirmative_tokens):
+        return "YES"
+    return "NO"
+
+
+def _strip_bullet_prefix(line: str) -> str | None:
+    stripped = line.strip()
+    for prefix in ("- ", "* ", "• "):
+        if stripped.startswith(prefix):
+            bullet_text = stripped[len(prefix) :].strip()
+            return bullet_text or None
     return None
 
 

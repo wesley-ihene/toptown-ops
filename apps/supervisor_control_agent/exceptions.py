@@ -55,7 +55,8 @@ def derive_exceptions(parsed: ParsedSupervisorControlReport) -> ExceptionSummary
         if exception_type == "UNKNOWN":
             unknown_exception_type_count += 1
 
-        action_taken = (entry.action_taken or "").strip()
+        details = (entry.details or "").strip()
+        action_taken = _normalize_action_taken(entry.action_taken, details=details, exception_type=exception_type)
         supervisor_confirmed = _normalize_confirmation(entry.supervisor_confirmed)
         status = _normalize_status(action_taken)
         if status == "open":
@@ -64,7 +65,7 @@ def derive_exceptions(parsed: ParsedSupervisorControlReport) -> ExceptionSummary
         items.append(
             ExceptionItem(
                 exception_type=exception_type,
-                details=(entry.details or "").strip(),
+                details=details,
                 action_taken=action_taken,
                 escalated_by=(entry.escalated_by or "").strip(),
                 time=(entry.time or "").strip(),
@@ -100,6 +101,17 @@ def _normalize_exception_type(raw_value: str | None) -> str:
     return "UNKNOWN"
 
 
+def _normalize_action_taken(raw_value: str | None, *, details: str, exception_type: str) -> str:
+    action_taken = (raw_value or "").strip()
+    if action_taken:
+        return action_taken
+    if details:
+        return details
+    if exception_type != "UNKNOWN":
+        return "Reported"
+    return "Observed"
+
+
 def _normalize_confirmation(raw_value: str | None) -> str:
     lowered = (raw_value or "").strip().casefold()
     if lowered in {"yes", "y", "confirmed"}:
@@ -113,7 +125,25 @@ def _normalize_status(action_taken: str) -> str:
     lowered = action_taken.casefold()
     if any(token in lowered for token in {"escalated", "escalate"}):
         return "escalated"
-    if any(token in lowered for token in {"resolved", "closed", "cleared"}):
+    if any(
+        token in lowered
+        for token in {
+            "resolved",
+            "closed",
+            "cleared",
+            "passed",
+            "checked",
+            "complete",
+            "completed",
+            "approved",
+            "signed",
+            "locked",
+            "reconciled",
+            "verified",
+            "confirmed",
+            "yes",
+        }
+    ):
         return "resolved"
     if action_taken.strip():
         return "open"

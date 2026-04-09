@@ -14,6 +14,7 @@ from apps.supervisor_control_agent.exceptions import derive_exceptions
 from apps.supervisor_control_agent.controls import derive_controls
 from apps.supervisor_control_agent.escalation import derive_escalation
 from apps.supervisor_control_agent.parser import ParsedSupervisorControlReport, parse_work_item
+from apps.supervisor_control_agent.record_store import write_structured_record
 from packages.common.paths import OUTBOX_DIR
 from packages.common.signal_writer import write_signal
 from packages.common.warnings import WarningEntry, dedupe_warnings, make_warning
@@ -46,6 +47,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         validation_warnings = _validate_input(payload)
         if validation_warnings:
             result = _build_failure_result(work_item, warnings=validation_warnings)
+            write_structured_record(result.payload)
             _write_result_to_outbox(result)
             write_signal(result)
             return result
@@ -87,6 +89,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 "status": status,
             },
         )
+        write_structured_record(result.payload)
         _write_result_to_outbox(result)
         write_signal(result)
         return result
@@ -101,6 +104,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 )
             ],
         )
+        write_structured_record(result.payload)
         _write_result_to_outbox(result)
         write_signal(result)
         return result
