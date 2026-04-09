@@ -1,4 +1,4 @@
-"""Dedicated worker for supervisor control reports."""
+"""Contract-driven worker for supervisor control reports."""
 
 from .worker import SupervisorControlAgentWorker, process_work_item
 
