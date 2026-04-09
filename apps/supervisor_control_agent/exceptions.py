@@ -6,6 +6,78 @@ from dataclasses import dataclass, field
 
 from apps.supervisor_control_agent.parser import ParsedSupervisorControlReport
 
+_KNOWN_EXCEPTION_TYPES = {
+    "STAFF_ISSUE",
+    "SECURITY_ISSUE",
+    "SYSTEM_ISSUE",
+    "CASH_ISSUE",
+    "STOCK_ISSUE",
+    "CUSTOMER_ISSUE",
+    "FACILITY_ISSUE",
+    "CASH_CONTROL",
+    "FLOOR_CONTROL",
+    "STOCK_CONTROL",
+    "PRICING_SYSTEM_CONTROL",
+    "STAFFING_CONTROL",
+}
+
+_SEMANTIC_EXCEPTION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "CASH_CONTROL",
+        (
+            "cashier reconciled",
+            "cash variance",
+            "till mismatch",
+            "cash mismatch",
+            "till variance",
+            "cash control",
+        ),
+    ),
+    (
+        "FLOOR_CONTROL",
+        (
+            "floor check",
+            "front door display",
+            "door display checked",
+            "display checked",
+            "store locked",
+        ),
+    ),
+    (
+        "STOCK_CONTROL",
+        (
+            "stock issue",
+            "empty rail",
+            "out of stock",
+            "stock out",
+        ),
+    ),
+    (
+        "PRICING_SYSTEM_CONTROL",
+        (
+            "pricing system issues",
+            "pricing system issue",
+            "pricing issues",
+            "pricing issue",
+            "printer down",
+            "printer issue",
+            "pos issue",
+            "pos down",
+            "system issue",
+        ),
+    ),
+    (
+        "STAFFING_CONTROL",
+        (
+            "staffing issue",
+            "late staff",
+            "absent staff",
+            "staff absent",
+            "staff late",
+        ),
+    ),
+)
+
 
 @dataclass(slots=True)
 class ExceptionItem:
@@ -51,12 +123,16 @@ def derive_exceptions(parsed: ParsedSupervisorControlReport) -> ExceptionSummary
     unknown_exception_type_count = 0
 
     for entry in parsed.exception_entries:
-        exception_type = _normalize_exception_type(entry.exception_type)
+        details = (entry.details or "").strip()
+        action_taken = _normalize_action_taken(entry.action_taken, details=details, exception_type=entry.exception_type or "")
+        exception_type = _normalize_exception_type(
+            entry.exception_type,
+            details=details,
+            action_taken=action_taken,
+        )
         if exception_type == "UNKNOWN":
             unknown_exception_type_count += 1
 
-        details = (entry.details or "").strip()
-        action_taken = _normalize_action_taken(entry.action_taken, details=details, exception_type=exception_type)
         supervisor_confirmed = _normalize_confirmation(entry.supervisor_confirmed)
         status = _normalize_status(action_taken)
         if status == "open":
@@ -82,23 +158,52 @@ def derive_exceptions(parsed: ParsedSupervisorControlReport) -> ExceptionSummary
     )
 
 
-def _normalize_exception_type(raw_value: str | None) -> str:
-    if not raw_value:
-        return "UNKNOWN"
+def _normalize_exception_type(
+    raw_value: str | None,
+    *,
+    details: str = "",
+    action_taken: str = "",
+) -> str:
+    if raw_value:
+        normalized = _normalize_exception_token(raw_value)
+        if normalized in _KNOWN_EXCEPTION_TYPES:
+            return normalized
 
-    normalized = "_".join(raw_value.strip().upper().replace("-", "_").split())
-    known_types = {
-        "STAFF_ISSUE",
-        "SECURITY_ISSUE",
-        "SYSTEM_ISSUE",
-        "CASH_ISSUE",
-        "STOCK_ISSUE",
-        "CUSTOMER_ISSUE",
-        "FACILITY_ISSUE",
-    }
-    if normalized in known_types:
-        return normalized
+    semantic_match = _classify_exception_type_from_text(raw_value=raw_value, details=details, action_taken=action_taken)
+    if semantic_match is not None:
+        return semantic_match
     return "UNKNOWN"
+
+
+def _classify_exception_type_from_text(
+    *,
+    raw_value: str | None,
+    details: str,
+    action_taken: str,
+) -> str | None:
+    normalized_text = _normalize_text(" ".join(part for part in (raw_value or "", details, action_taken) if part))
+    if not normalized_text:
+        return None
+
+    for canonical_type, phrases in _SEMANTIC_EXCEPTION_RULES:
+        if any(phrase in normalized_text for phrase in phrases):
+            return canonical_type
+    return None
+
+
+def _normalize_exception_token(value: str) -> str:
+    return "_".join(value.strip().upper().replace("-", "_").replace("/", "_").split())
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(
+        value.casefold()
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace("/", " ")
+        .replace(":", " ")
+        .split()
+    )
 
 
 def _normalize_action_taken(raw_value: str | None, *, details: str, exception_type: str) -> str:

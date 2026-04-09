@@ -23,6 +23,7 @@ from packages.signal_contracts.work_item import WorkItem
 
 AGENT_NAME = "supervisor_control_agent"
 SIGNAL_TYPE = "supervisor_control"
+SIGNAL_WEIGHT = 0.4
 OUTBOX_PATH = OUTBOX_DIR / AGENT_NAME
 _SUPPORTED_REPORT_TYPES = {"supervisor_control"}
 
@@ -44,9 +45,10 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
 
     try:
         payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        source = _source_trace(payload)
         validation_warnings = _validate_input(payload)
         if validation_warnings:
-            result = _build_failure_result(work_item, warnings=validation_warnings)
+            result = _build_failure_result(work_item, warnings=validation_warnings, source=source)
             write_structured_record(result.payload)
             _write_result_to_outbox(result)
             write_signal(result)
@@ -70,8 +72,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             payload={
                 "signal_type": SIGNAL_TYPE,
                 "source_agent": AGENT_NAME,
+                "source": source,
                 "branch": parsed.branch_slug or parsed.branch,
                 "report_date": parsed.report_date,
+                "sop_compliance": parsed.sop_compliance,
+                "signal_weight": SIGNAL_WEIGHT,
                 "confidence": _compute_confidence(parsed=parsed, warnings=warnings, status=status),
                 "metrics": {
                     "exception_count": exceptions.exception_count,
@@ -103,6 +108,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                     message="The work item could not be processed safely.",
                 )
             ],
+            source=source,
         )
         write_structured_record(result.payload)
         _write_result_to_outbox(result)
@@ -153,6 +159,7 @@ def _build_failure_result(
     *,
     parsed: ParsedSupervisorControlReport | None = None,
     warnings: list[WarningEntry] | None = None,
+    source: str = "live",
 ) -> AgentResult:
     """Return a safe failure result that still matches the output contract."""
 
@@ -172,8 +179,11 @@ def _build_failure_result(
         payload={
             "signal_type": SIGNAL_TYPE,
             "source_agent": AGENT_NAME,
+            "source": source,
             "branch": parsed.branch_slug if parsed is not None else None,
             "report_date": parsed.report_date if parsed is not None else None,
+            "sop_compliance": parsed.sop_compliance if parsed is not None else "strict",
+            "signal_weight": SIGNAL_WEIGHT,
             "confidence": 0.0,
             "metrics": {
                 "exception_count": 0,
@@ -191,6 +201,15 @@ def _build_failure_result(
             "status": "invalid_input",
         },
     )
+
+
+def _source_trace(payload: dict[str, Any]) -> str:
+    """Return whether this worker invocation came from live intake or replay."""
+
+    replay = payload.get("replay")
+    if isinstance(replay, Mapping) and replay:
+        return "replay"
+    return "live"
 
 
 def _compute_confidence(

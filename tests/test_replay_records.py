@@ -334,6 +334,8 @@ def test_orchestrator_replay_of_sales_and_supervisor_control_mixed_file_writes_t
     supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-07.json"
     assert sales_path.exists()
     assert supervisor_path.exists()
+    supervisor_payload = _read_json(supervisor_path)
+    assert supervisor_payload["source"] == "replay"
 
     manifest = _latest_manifest(tmp_path)
     assert manifest["results"][0]["status"] == "structured_written"

@@ -43,6 +43,7 @@ class ParsedSupervisorControlReport:
     branch: str | None = None
     branch_slug: str | None = None
     report_date: str | None = None
+    sop_compliance: str = "strict"
     exception_entries: list[ParsedExceptionEntry] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     warnings: list[WarningEntry] = field(default_factory=list)
@@ -65,6 +66,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
         if key_value is None:
             synthesized_entry = _synthesize_exception_entry(line)
             if synthesized_entry is not None:
+                parsed.sop_compliance = "fallback"
                 if current_entry is not None:
                     parsed.exception_entries.append(current_entry)
                     current_entry = None
