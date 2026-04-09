@@ -61,6 +61,14 @@ REPORT_TYPE_TO_AGENT = {
     "supervisor_control": "supervisor_control_agent",
 }
 
+AGENT_TO_WORKER_MODULE = {
+    "sales_income_agent": sales_worker,
+    "pricing_stock_release_agent": pricing_worker,
+    "hr_agent": hr_worker,
+    "staff_performance_agent": staff_performance_worker,
+    "supervisor_control_agent": supervisor_control_worker,
+}
+
 
 @dataclass(slots=True)
 class ArchivedRecord:
@@ -405,17 +413,10 @@ def _run_specialist_mode(*, work_item: WorkItem, resolved: ReplayMetadata) -> Ag
     specialist_item = WorkItem(kind=work_item.kind, payload=payload)
 
     target_agent = REPORT_TYPE_TO_AGENT[report_type]
-    if target_agent == "sales_income_agent":
-        return sales_worker.process_work_item(specialist_item)
-    if target_agent == "pricing_stock_release_agent":
-        return pricing_worker.process_work_item(specialist_item)
-    if target_agent == "hr_agent":
-        return hr_worker.process_work_item(specialist_item)
-    if target_agent == "staff_performance_agent":
-        return staff_performance_worker.process_work_item(specialist_item)
-    if target_agent == "supervisor_control_agent":
-        return supervisor_control_worker.process_work_item(specialist_item)
-    raise ValueError(f"specialist replay has no valid agent mapping for report type: {report_type}")
+    worker_module = AGENT_TO_WORKER_MODULE.get(target_agent)
+    if worker_module is None:
+        raise ValueError(f"specialist replay has no valid agent mapping for report type: {report_type}")
+    return _process_with_worker_module(worker_module, specialist_item)
 
 
 def _structured_artifacts_from_result(result: AgentResult) -> list[StructuredArtifact]:
@@ -727,20 +728,28 @@ def _handle_rejected_copy(
 def _suppress_replay_side_effects(rejected_capture: RejectedCapture):
     """Suppress live writes during replay while capturing rejected outcomes."""
 
-    original_sales_write = sales_worker.write_structured_record
-    original_hr_write = hr_worker.write_structured_record
-    original_staff_performance_write = staff_performance_worker.write_structured_record
-    original_supervisor_control_write = supervisor_control_worker.write_structured_record
-    original_pricing_write = pricing_worker.write_structured_record
-    original_pricing_outbox = pricing_worker._write_result_to_outbox
+    patched_attributes: list[tuple[Any, str, Any]] = []
     original_rejected_write = orchestrator_worker._write_rejected_record
 
-    sales_worker.write_structured_record = lambda payload: None
-    hr_worker.write_structured_record = lambda payload: None
-    staff_performance_worker.write_structured_record = lambda payload: None
-    supervisor_control_worker.write_structured_record = lambda payload: None
-    pricing_worker.write_structured_record = lambda payload: None
-    pricing_worker._write_result_to_outbox = lambda result: REPO_ROOT / "data" / "outbox" / "replay_suppressed.json"
+    for worker_module in AGENT_TO_WORKER_MODULE.values():
+        _patch_optional_callable(
+            patched_attributes,
+            worker_module,
+            "write_structured_record",
+            lambda payload: None,
+        )
+        _patch_optional_callable(
+            patched_attributes,
+            worker_module,
+            "_write_result_to_outbox",
+            lambda result: REPO_ROOT / "data" / "outbox" / "replay_suppressed.json",
+        )
+        _patch_optional_callable(
+            patched_attributes,
+            worker_module,
+            "write_signal",
+            lambda result: "",
+        )
 
     def capture_rejected(
         audit,
@@ -762,13 +771,33 @@ def _suppress_replay_side_effects(rejected_capture: RejectedCapture):
     try:
         yield
     finally:
-        sales_worker.write_structured_record = original_sales_write
-        hr_worker.write_structured_record = original_hr_write
-        staff_performance_worker.write_structured_record = original_staff_performance_write
-        supervisor_control_worker.write_structured_record = original_supervisor_control_write
-        pricing_worker.write_structured_record = original_pricing_write
-        pricing_worker._write_result_to_outbox = original_pricing_outbox
+        for owner, attribute_name, original_value in reversed(patched_attributes):
+            setattr(owner, attribute_name, original_value)
         orchestrator_worker._write_rejected_record = original_rejected_write
+
+
+def _process_with_worker_module(worker_module: Any, work_item: WorkItem) -> AgentResult:
+    """Dispatch one work item through a worker module process hook."""
+
+    process = getattr(worker_module, "process_work_item", None)
+    if not callable(process):
+        raise ValueError(f"worker module {getattr(worker_module, '__name__', 'unknown')} has no process_work_item")
+    return process(work_item)
+
+
+def _patch_optional_callable(
+    patched_attributes: list[tuple[Any, str, Any]],
+    owner: Any,
+    attribute_name: str,
+    replacement: Any,
+) -> None:
+    """Patch one callable attribute only when the module actually exposes it."""
+
+    original_value = getattr(owner, attribute_name, None)
+    if not callable(original_value):
+        return
+    patched_attributes.append((owner, attribute_name, original_value))
+    setattr(owner, attribute_name, replacement)
 
 
 def _write_manifest(

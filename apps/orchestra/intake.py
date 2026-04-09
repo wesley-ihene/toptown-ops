@@ -88,6 +88,32 @@ def intake_raw_message(
     return work_item
 
 
+def create_rejection_feedback_work_item(
+    source_work_item: WorkItem,
+    *,
+    report_type: str,
+    rejections: list[dict[str, str]],
+    dry_run: bool = True,
+    channel: str = "whatsapp",
+) -> WorkItem:
+    """Build a feedback-agent work item from one rejected or split source item."""
+
+    report_payload = _report_payload_from_work_item(source_work_item)
+    return WorkItem(
+        kind="rejection_feedback",
+        payload={
+            "report_type": report_type,
+            "branch": _string_or_none(report_payload.get("branch")),
+            "report_date": _string_or_none(report_payload.get("report_date")),
+            "channel": channel,
+            "dry_run": dry_run,
+            "rejections": rejections,
+            "source_record_path": _source_record_path_from_work_item(source_work_item),
+            "source_message_hash": _string_or_none(source_work_item.payload.get("message_hash")),
+        },
+    )
+
+
 def _normalize_raw_message(raw_message: RawInboundMessage) -> str | dict[str, Any]:
     """Normalize raw input into JSON-safe content for the work item payload."""
 
@@ -116,3 +142,43 @@ def _serialize_work_item(work_item: WorkItem) -> str:
         indent=2,
         sort_keys=True,
     )
+
+
+def _report_payload_from_work_item(work_item: WorkItem) -> Mapping[str, Any]:
+    """Return the best available report-like payload from one work item."""
+
+    normalized_report = work_item.payload.get("normalized_report")
+    if isinstance(normalized_report, Mapping):
+        return normalized_report
+
+    raw_message = work_item.payload.get("raw_message")
+    if isinstance(raw_message, Mapping):
+        return raw_message
+    return {}
+
+
+def _source_record_path_from_work_item(work_item: WorkItem) -> str | None:
+    """Return the best available source record path when present."""
+
+    raw_record = work_item.payload.get("raw_record")
+    if isinstance(raw_record, Mapping):
+        for field_name in ("text_path", "raw_txt_path", "path"):
+            value = raw_record.get(field_name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    replay = work_item.payload.get("replay")
+    if isinstance(replay, Mapping):
+        value = replay.get("original_path")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _string_or_none(value: Any) -> str | None:
+    """Return a stripped string or None."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
