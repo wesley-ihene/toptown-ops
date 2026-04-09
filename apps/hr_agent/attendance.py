@@ -1,51 +1,46 @@
-"""Attendance summary helpers for HR reports."""
+"""Attendance derivation helpers for HR reports."""
 
 from __future__ import annotations
 
-from apps.hr_agent.figures import AttendanceFigures, AttendanceRecord
-from apps.hr_agent.warnings import WarningEntry, make_warning
+from dataclasses import dataclass, field
 
-_KNOWN_STATUSES = (
-    "present",
-    "off",
-    "annual_leave",
-    "suspended",
-    "absent",
-    "sick",
-)
+from apps.hr_agent.parser import ParsedHrReport
 
 
-def summarize_attendance(
-    records: list[AttendanceRecord],
-    *,
-    declared_status_totals: dict[str, int],
-) -> tuple[AttendanceFigures, list[WarningEntry]]:
-    """Return summarized attendance figures and reconciliation warnings."""
+@dataclass(slots=True)
+class AttendanceSummary:
+    """Derived attendance totals from parsed HR input."""
 
-    figures = AttendanceFigures(
-        parsed_record_count=len(records),
-        declared_status_totals=dict(declared_status_totals),
+    status_totals: dict[str, int] = field(default_factory=dict)
+    present_count: int = 0
+    absent_count: int = 0
+    off_count: int = 0
+    leave_count: int = 0
+    total_staff_records: int = 0
+    active_count: int = 0
+
+
+def derive_attendance(parsed: ParsedHrReport) -> AttendanceSummary:
+    """Return attendance totals from parsed records or declared summary counts."""
+
+    status_totals = {
+        "present": 0,
+        "absent": 0,
+        "off": 0,
+        "leave": 0,
+        "unknown": 0,
+    }
+
+    for record in parsed.records:
+        status_totals[record.status] = status_totals.get(record.status, 0) + 1
+
+    total_staff_records = sum(status_totals.values())
+    return AttendanceSummary(
+        status_totals=status_totals,
+        present_count=status_totals["present"],
+        absent_count=status_totals["absent"],
+        off_count=status_totals["off"],
+        leave_count=status_totals["leave"],
+        total_staff_records=total_staff_records,
+        active_count=status_totals["present"],
     )
-    for record in records:
-        if record.status in figures.parsed_status_totals:
-            figures.parsed_status_totals[record.status] += 1
-
-    warnings: list[WarningEntry] = []
-    for status in _KNOWN_STATUSES:
-        declared_count = declared_status_totals.get(status)
-        if declared_count is None:
-            continue
-        parsed_count = figures.parsed_status_totals[status]
-        if declared_count != parsed_count:
-            warnings.append(
-                make_warning(
-                    code="data_mismatch",
-                    severity="warning",
-                    message=(
-                        f"Declared {status} total {declared_count} does not match parsed total "
-                        f"{parsed_count}."
-                    ),
-                )
-            )
-
-    return figures, warnings

@@ -1,234 +1,263 @@
-"""Worker orchestrator for HR specialist processing."""
+"""Worker for contract-driven HR attendance signals."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+from typing import Any
 
-from apps.hr_agent.attendance import summarize_attendance
-from apps.hr_agent.compliance import (
-    evaluate_attendance_compliance,
-    evaluate_performance_compliance,
-)
-from apps.hr_agent.confidence import compute_confidence
-from apps.hr_agent.parser import (
-    ParsedStaffAttendanceReport,
-    ParsedStaffPerformanceReport,
-    detect_report_subtype,
-    parse_staff_attendance,
-    parse_staff_performance,
-)
-from apps.hr_agent.performance import summarize_performance
-from apps.hr_agent.record_store import write_structured_record
-from apps.hr_agent.scoring import attendance_presence_score, compute_performance_score
-from apps.hr_agent.warnings import WarningEntry, dedupe_warnings, make_warning
+from apps.hr_agent.alerts import generate_alerts
+from apps.hr_agent.attendance import derive_attendance
+from apps.hr_agent.coverage import derive_coverage
+from apps.hr_agent.parser import ParsedHrReport, parse_work_item
+from apps.hr_agent.staffing import derive_staffing
+from packages.common.paths import OUTBOX_DIR
+from packages.common.signal_writer import write_signal
+from packages.common.warnings import WarningEntry, dedupe_warnings, make_warning
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
 
 AGENT_NAME = "hr_agent"
-SIGNAL_TYPE = "hr"
+SIGNAL_TYPE = "hr_staffing"
+OUTBOX_PATH = OUTBOX_DIR / AGENT_NAME
+_SUPPORTED_REPORT_TYPES = {"staff_attendance"}
 
 
 @dataclass(slots=True)
 class HrAgentWorker:
-    """Specialist worker for WhatsApp HR reports."""
+    """Specialist worker for HR attendance signals."""
 
     agent_name: str = AGENT_NAME
 
     def process(self, work_item: WorkItem) -> AgentResult:
-        """Process one work item into a structured HR signal."""
+        """Process one work item into a structured HR result."""
 
         return process_work_item(work_item)
 
 
 def process_work_item(work_item: WorkItem) -> AgentResult:
-    """Return a structured HR result without depending on external setup."""
+    """Return a structured HR attendance result without raising."""
 
-    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
-    validation_warnings = _validate_input(payload)
-    if validation_warnings:
-        return _failure_result(warnings=validation_warnings)
+    try:
+        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        validation_warnings = _validate_input(payload)
+        if validation_warnings:
+            result = _build_failure_result(work_item, warnings=validation_warnings)
+            _write_result_to_outbox(result)
+            write_signal(result)
+            return result
 
+        parsed = parse_work_item(work_item)
+        attendance = derive_attendance(parsed)
+        staffing = derive_staffing(attendance, declared_total_staff=parsed.declared_total_staff)
+        coverage = derive_coverage(staffing)
+        derived_warnings = generate_alerts(
+            parsed=parsed,
+            attendance=attendance,
+            staffing=staffing,
+            coverage=coverage,
+        )
+        warnings = dedupe_warnings(parsed.warnings + derived_warnings)
+        if any(warning.severity == "error" for warning in warnings):
+            status = "invalid_input"
+        else:
+            status = "ready" if not warnings else "needs_review"
+
+        result = AgentResult(
+            agent_name=AGENT_NAME,
+            payload={
+                "signal_type": SIGNAL_TYPE,
+                "source_agent": AGENT_NAME,
+                "branch": parsed.branch_slug or parsed.branch,
+                "report_date": parsed.report_date,
+                "confidence": _compute_confidence(parsed=parsed, warnings=warnings, status=status),
+                "metrics": {
+                    "total_staff_listed": staffing.total_staff_listed,
+                    "present_count": attendance.present_count,
+                    "absent_count": attendance.absent_count,
+                    "off_count": attendance.off_count,
+                    "leave_count": attendance.leave_count,
+                    "active_count": staffing.active_count,
+                    "coverage_ratio": coverage.coverage_ratio,
+                    "attendance_gap": staffing.attendance_gap,
+                },
+                "items": [
+                    {
+                        "staff_name": record.staff_name,
+                        "status": record.status,
+                    }
+                    for record in parsed.records
+                ],
+                "provenance": {
+                    "branch_text": parsed.branch,
+                    "notes": parsed.notes,
+                },
+                "warnings": [warning.to_payload() for warning in warnings],
+                "status": status,
+            },
+        )
+        _write_result_to_outbox(result)
+        write_signal(result)
+        return result
+    except Exception:
+        result = _build_failure_result(
+            work_item,
+            warnings=[
+                make_warning(
+                    code="missing_fields",
+                    severity="error",
+                    message="The work item could not be processed safely.",
+                )
+            ],
+        )
+        _write_result_to_outbox(result)
+        write_signal(result)
+        return result
+
+
+def _validate_input(payload: dict[str, Any]) -> list[WarningEntry]:
+    """Validate the strict input contract for routed HR attendance items."""
+
+    warnings: list[WarningEntry] = []
     classification = payload.get("classification")
-    subtype = detect_report_subtype(payload, classification=classification)
-    if subtype == "staff_performance":
-        result = _build_performance_result(parse_staff_performance(work_item))
-        write_structured_record(result.payload)
-        return result
-    if subtype == "staff_attendance":
-        result = _build_attendance_result(parse_staff_attendance(work_item))
-        write_structured_record(result.payload)
-        return result
-
-    return _failure_result(
-        warnings=[
-            make_warning(
-                code="missing_fields",
-                severity="error",
-                message="The HR report subtype could not be safely determined from the raw text.",
-            )
-        ]
-    )
-
-
-def _validate_input(payload: dict[str, object]) -> list[WarningEntry]:
-    """Validate only the strict upstream raw-message requirement."""
-
     raw_message = payload.get("raw_message")
-    if not isinstance(raw_message, Mapping) or not isinstance(raw_message.get("text"), str):
-        return [
+
+    if not isinstance(classification, Mapping) or classification.get("report_type") not in _SUPPORTED_REPORT_TYPES:
+        warnings.append(
             make_warning(
                 code="missing_fields",
                 severity="error",
-                message="The work item raw_message.text field must be present for HR parsing.",
+                message="The work item classification must be `staff_attendance`.",
             )
-        ]
-    if not raw_message["text"].strip():
-        return [
+        )
+
+    if not isinstance(raw_message, Mapping):
+        warnings.append(
             make_warning(
                 code="missing_fields",
                 severity="error",
-                message="The work item raw_message.text field must be a non-empty string.",
+                message="The work item raw_message must be a mapping with a `text` field.",
+            )
+        )
+    else:
+        text = raw_message.get("text")
+        if not isinstance(text, str) or not text.strip():
+            warnings.append(
+                make_warning(
+                    code="missing_fields",
+                    severity="error",
+                    message="The work item raw_message.text field must be a non-empty string.",
+                )
+            )
+
+    return dedupe_warnings(warnings)
+
+
+def _build_failure_result(
+    work_item: WorkItem,
+    *,
+    parsed: ParsedHrReport | None = None,
+    warnings: list[WarningEntry] | None = None,
+) -> AgentResult:
+    """Return a safe failure result that still matches the output contract."""
+
+    del work_item
+    warning_list = dedupe_warnings(
+        warnings
+        or [
+            make_warning(
+                code="missing_fields",
+                severity="error",
+                message="The HR attendance input was incomplete or invalid.",
             )
         ]
-    return []
-
-
-def _build_performance_result(parsed: ParsedStaffPerformanceReport) -> AgentResult:
-    """Build the structured staff-performance signal payload."""
-
-    figures, figure_warnings = summarize_performance(
-        parsed.records,
-        declared_items_moved=parsed.figures.declared_items_moved,
-        declared_assisting_count=parsed.figures.declared_assisting_count,
-        declared_record_count=parsed.figures.declared_record_count,
     )
-    compliance_warnings = evaluate_performance_compliance(parsed.records)
-    warnings = dedupe_warnings(parsed.warnings + figure_warnings + compliance_warnings)
-    status = "ready" if not warnings else "needs_review"
-
     return AgentResult(
         agent_name=AGENT_NAME,
         payload={
-            "signal_type": SIGNAL_TYPE,
-            "signal_subtype": "staff_performance",
-            "source_agent": AGENT_NAME,
-            "branch": parsed.branch_slug or parsed.branch,
-            "report_date": parsed.report_date,
-            "confidence": compute_confidence(
-                branch=parsed.branch_slug or parsed.branch,
-                report_date=parsed.report_date,
-                record_count=len(parsed.records),
-                warnings=warnings,
-            ),
-            "metrics": {
-                "total_staff_records": figures.parsed_record_count,
-                "total_items_moved": figures.parsed_items_moved,
-                "total_assisting_count": figures.parsed_assisting_count,
-                "declared_total_staff_records": figures.declared_record_count,
-                "declared_total_items_moved": figures.declared_items_moved,
-                "declared_total_assisting_count": figures.declared_assisting_count,
-            },
-            "items": [
-                {
-                    "record_number": record.record_number,
-                    "staff_name": record.staff_name,
-                    "section": record.section,
-                    "raw_section": record.raw_section,
-                    "role": record.role,
-                    "duty_status": record.duty_status,
-                    "items_moved": record.items_moved,
-                    "assisting_count": record.assisting_count,
-                    "activity_score": compute_performance_score(
-                        items_moved=record.items_moved,
-                        assisting_count=record.assisting_count,
-                    ),
-                    "notes": record.notes,
-                }
-                for record in parsed.records
-            ],
-            "provenance": parsed.provenance.to_payload(),
-            "warnings": [warning.to_payload() for warning in warnings],
-            "status": status,
+                "signal_type": SIGNAL_TYPE,
+                "source_agent": AGENT_NAME,
+                "branch": parsed.branch_slug if parsed is not None else None,
+                "report_date": parsed.report_date if parsed is not None else None,
+                "confidence": 0.0,
+                "metrics": {
+                    "total_staff_listed": 0,
+                    "present_count": 0,
+                    "absent_count": 0,
+                    "off_count": 0,
+                    "leave_count": 0,
+                    "active_count": 0,
+                    "coverage_ratio": 0.0,
+                    "attendance_gap": 0,
+                },
+                "items": [],
+                "provenance": {
+                    "branch_text": parsed.branch if parsed is not None else None,
+                    "notes": parsed.notes if parsed is not None else [],
+                },
+                "warnings": [warning.to_payload() for warning in warning_list],
+                "status": "invalid_input",
         },
     )
 
 
-def _build_attendance_result(parsed: ParsedStaffAttendanceReport) -> AgentResult:
-    """Build the structured staff-attendance signal payload."""
+def _compute_confidence(
+    *,
+    parsed: ParsedHrReport,
+    warnings: list[WarningEntry],
+    status: str,
+) -> float:
+    """Return a conservative confidence score for the structured result."""
 
-    figures, figure_warnings = summarize_attendance(
-        parsed.records,
-        declared_status_totals=parsed.figures.declared_status_totals,
+    if status == "invalid_input":
+        return 0.0
+
+    confidence = 1.0
+    if not parsed.branch_slug:
+        confidence -= 0.2
+    if not parsed.report_date:
+        confidence -= 0.2
+    if not parsed.records and not parsed.declared_status_totals:
+        confidence -= 0.4
+    elif not parsed.records:
+        confidence -= 0.1
+
+    penalties = {
+        "missing_fields": 0.25,
+        "data_mismatch": 0.15,
+        "low_coverage": 0.15,
+        "unknown_attendance_status": 0.1,
+        "attendance_gap_present": 0.1,
+    }
+    for warning in warnings:
+        confidence -= penalties.get(warning.code, 0.0)
+
+    return round(max(confidence, 0.0), 2)
+
+
+def _write_result_to_outbox(result: AgentResult) -> Path:
+    """Persist the agent result payload to the HR outbox."""
+
+    OUTBOX_PATH.mkdir(parents=True, exist_ok=True)
+    output_path = OUTBOX_PATH / _build_output_filename(result.payload)
+    temp_path = output_path.with_suffix(".json.tmp")
+    temp_path.write_text(
+        json.dumps(result.payload, indent=2, sort_keys=True),
+        encoding="utf-8",
     )
-    compliance_warnings = evaluate_attendance_compliance(parsed.records)
-    warnings = dedupe_warnings(parsed.warnings + figure_warnings + compliance_warnings)
-    status = "ready" if not warnings else "needs_review"
-
-    return AgentResult(
-        agent_name=AGENT_NAME,
-        payload={
-            "signal_type": SIGNAL_TYPE,
-            "signal_subtype": "staff_attendance",
-            "source_agent": AGENT_NAME,
-            "branch": parsed.branch_slug or parsed.branch,
-            "report_date": parsed.report_date,
-            "confidence": compute_confidence(
-                branch=parsed.branch_slug or parsed.branch,
-                report_date=parsed.report_date,
-                record_count=len(parsed.records),
-                warnings=warnings,
-            ),
-            "metrics": {
-                "total_staff_records": figures.parsed_record_count,
-                "present_count": figures.parsed_status_totals["present"],
-                "off_count": figures.parsed_status_totals["off"],
-                "annual_leave_count": figures.parsed_status_totals["annual_leave"],
-                "suspended_count": figures.parsed_status_totals["suspended"],
-                "absent_count": figures.parsed_status_totals["absent"],
-                "sick_count": figures.parsed_status_totals["sick"],
-                "declared_status_totals": figures.declared_status_totals,
-            },
-            "items": [
-                {
-                    "record_number": record.record_number,
-                    "staff_name": record.staff_name,
-                    "status": record.status,
-                    "raw_status": record.raw_status,
-                    "section": record.section,
-                    "raw_section": record.raw_section,
-                    "presence_score": attendance_presence_score(record.status),
-                }
-                for record in parsed.records
-            ],
-            "provenance": parsed.provenance.to_payload(),
-            "warnings": [warning.to_payload() for warning in warnings],
-            "status": status,
-        },
-    )
+    temp_path.replace(output_path)
+    return output_path
 
 
-def _failure_result(*, warnings: list[WarningEntry]) -> AgentResult:
-    """Return a safe structured failure result for HR parsing."""
+def _build_output_filename(payload: dict[str, Any]) -> str:
+    """Return a stable outbox filename for an HR payload."""
 
-    return AgentResult(
-        agent_name=AGENT_NAME,
-        payload={
-            "signal_type": SIGNAL_TYPE,
-            "signal_subtype": None,
-            "source_agent": AGENT_NAME,
-            "branch": None,
-            "report_date": None,
-            "confidence": 0.0,
-            "metrics": {},
-            "items": [],
-            "provenance": {
-                "raw_branch": None,
-                "raw_date": None,
-                "detected_subtype": None,
-                "notes": [],
-            },
-            "warnings": [warning.to_payload() for warning in dedupe_warnings(warnings)],
-            "status": "invalid_input",
-        },
-    )
+    branch = str(payload.get("branch") or "unknown").strip() or "unknown"
+    report_date = str(payload.get("report_date") or datetime.now(timezone.utc).date().isoformat()).strip()
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_branch = "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in branch)
+    safe_date = "".join(character if character.isdigit() or character == "-" else "_" for character in report_date)
+    return f"{timestamp}__{safe_branch}__{safe_date}__hr_staffing.json"
