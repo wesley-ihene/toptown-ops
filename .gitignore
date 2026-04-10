@@ -32,3 +32,10 @@ records/structured/
 analytics/**/*.json
 alerts/**/*.json
 alerts/**/*.txt
+# Runtime data (do not commit)
+records/observability/
+records/provenance/
+records/review_queue/
+records/raw/
+records/rejected/
+records/structured/*/*.json
