@@ -1,0 +1,25 @@
+{
+  "acceptance_outcome": {
+    "status": "rejected"
+  },
+  "branch": "unknown",
+  "confidence": null,
+  "date": "2026-04-07",
+  "downstream_references": {
+    "rejected_meta_path": "/tmp/pytest-of-clawadmin/pytest-146/test_live_webhook_rejects_mixe0/records/rejected/whatsapp/unknown/20260410T072423991186__mixed__mixed_report.meta.json",
+    "rejected_text_path": "/tmp/pytest-of-clawadmin/pytest-146/test_live_webhook_rejects_mixe0/records/rejected/whatsapp/unknown/20260410T072423991186__mixed__mixed_report.txt"
+  },
+  "outcome": "rejected",
+  "parse_mode": "strict",
+  "parser_used": "orchestrator_agent",
+  "raw_message_hash": "ae8bad2ee0b5822e97c84afa3f21a6f59706937b4559dc7324436b74452adb9a",
+  "raw_meta_path": "/tmp/pytest-of-clawadmin/pytest-146/test_live_webhook_rejects_mixe0/records/raw/whatsapp/unknown/2026-04-07__unknown__ae8bad2ee0b5.meta.json",
+  "raw_text_path": "/tmp/pytest-of-clawadmin/pytest-146/test_live_webhook_rejects_mixe0/records/raw/whatsapp/unknown/2026-04-07__unknown__ae8bad2ee0b5.txt",
+  "received_at": "2026-04-07T12:00:00Z",
+  "report_type": "mixed",
+  "source": "meta_webhook",
+  "validation_outcome": {
+    "status": "not_run"
+  },
+  "warnings": []
+}

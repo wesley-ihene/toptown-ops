@@ -219,7 +219,7 @@ def test_orchestrator_replay_of_live_staff_performance_raw_file_writes_structure
     structured_path = tmp_path / "records" / "structured" / "hr_performance" / "lae_malaita" / "2026-04-07.json"
     assert structured_path.exists()
     structured = _read_json(structured_path)
-    assert structured["source_agent"] == "staff_performance_agent"
+    assert structured["source_agent"] == "hr_agent"
     assert structured["branch"] == "lae_malaita"
     assert structured["report_date"] == "2026-04-07"
     assert structured["status"] == "accepted_with_warning"
@@ -228,7 +228,7 @@ def test_orchestrator_replay_of_live_staff_performance_raw_file_writes_structure
 
     manifest = _latest_manifest(tmp_path)
     assert manifest["results"][0]["status"] == "structured_written"
-    assert manifest["results"][0]["agent"] == "staff_performance_agent"
+    assert manifest["results"][0]["agent"] == "hr_agent"
 
 
 def test_orchestrator_replay_of_mixed_raw_file_writes_multiple_structured_records(

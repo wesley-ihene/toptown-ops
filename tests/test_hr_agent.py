@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from apps.hr_agent.worker import process_work_item
-from packages.common import signal_writer
+import packages.record_store.automation as record_automation
+import packages.record_store.paths as record_paths
 from packages.signal_contracts.work_item import WorkItem
 
 
@@ -28,18 +29,18 @@ def test_valid_attendance_sample_writes_one_signal_file(tmp_path: Path, monkeypa
     )
 
     assert result.payload["status"] == "ready"
-    signal_files = sorted((signals_root / "waigani" / "2026-04-07").glob("*.json"))
     outbox_files = sorted(outbox_path.glob("*.json"))
-    assert len(signal_files) == 1
     assert len(outbox_files) == 1
+    event_path = signals_root / "waigani" / "2026-04-07" / "staff_attendance_report__waigani__2026-04-07.json"
+    assert event_path.exists()
 
-    payload = json.loads(signal_files[0].read_text(encoding="utf-8"))
-    assert payload["signal_type"] == "hr_staffing"
+    payload = json.loads(event_path.read_text(encoding="utf-8"))
+    assert payload["signal_type"] == "staff_attendance_report"
     assert payload["branch"] == "waigani"
     assert payload["report_date"] == "2026-04-07"
-    assert payload["metrics"]["total_staff_listed"] == 4
-    assert payload["metrics"]["present_count"] == 4
-    assert payload["metrics"]["coverage_ratio"] == 1.0
+    assert payload["source_record_type"] == "hr_attendance"
+    assert payload["payload"]["attendance_totals"]["present"] == 4
+    assert len(payload["payload"]["attendance_records"]) == 4
     assert payload["warnings"] == []
 
     assert json.loads(outbox_files[0].read_text(encoding="utf-8")) == result.payload
@@ -67,8 +68,8 @@ def test_low_coverage_sample_raises_low_coverage(tmp_path: Path, monkeypatch) ->
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
     assert "low_coverage" in warning_codes
     assert "unknown_attendance_status" not in warning_codes
-    assert len(sorted((signals_root / "waigani" / "2026-04-07").glob("*.json"))) == 1
     assert len(sorted(outbox_path.glob("*.json"))) == 1
+    assert (signals_root / "waigani" / "2026-04-07" / "staff_attendance_report__waigani__2026-04-07.json").exists()
 
 
 def test_unknown_status_sample_raises_unknown_attendance_status(tmp_path: Path, monkeypatch) -> None:
@@ -93,14 +94,20 @@ def test_unknown_status_sample_raises_unknown_attendance_status(tmp_path: Path, 
     assert "unknown_attendance_status" in warning_codes
     assert "low_coverage" not in warning_codes
     assert any(item["staff_name"] == "Mary Kila" and item["status"] == "unknown" for item in result.payload["items"])
-    assert len(sorted((signals_root / "waigani" / "2026-04-07").glob("*.json"))) == 1
     assert len(sorted(outbox_path.glob("*.json"))) == 1
+    assert (signals_root / "waigani" / "2026-04-07" / "staff_attendance_report__waigani__2026-04-07.json").exists()
 
 
 def _patch_output_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
-    signals_root = tmp_path / "SIGNALS" / "normalized"
+    records_dir = tmp_path / "records"
+    colony_root = tmp_path / "ioi-colony"
+    signals_root = colony_root / "SIGNALS" / "normalized"
     outbox_path = tmp_path / "outbox"
-    monkeypatch.setattr(signal_writer, "SIGNALS_ROOT", signals_root)
+    monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
+    monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
+    monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
+    monkeypatch.setenv(record_automation.IOI_COLONY_ROOT_ENV_VAR, str(colony_root))
     monkeypatch.setattr("apps.hr_agent.worker.OUTBOX_PATH", outbox_path)
     return signals_root, outbox_path
 

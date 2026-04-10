@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
+from packages.report_acceptance import decide_acceptance
+from packages.review_queue import write_review_item
 from packages.sop_validation.router import validate_report
 from packages.signal_contracts.work_item import WorkItem
 
@@ -29,7 +31,7 @@ RouteDestination = Literal[
     "splitter_required",
 ]
 
-RouteStatus = Literal["routed", "quarantine", "requires_split", "rejected", "needs_split"]
+RouteStatus = Literal["routed", "quarantine", "requires_split", "rejected", "needs_split", "review"]
 
 ROUTE_MAP: Final[dict[ReportType, tuple[RouteDestination, RouteStatus, str]]] = {
     "sales": ("income_agent", "routed", "sales_reports_route_to_income_agent"),
@@ -93,13 +95,51 @@ def route_work_item(work_item: WorkItem) -> RoutingResult:
     if validation_payload is not None and destination in {"income_agent", "hr_agent", "pricing_agent"}:
         validation_result = validate_report(report_type, validation_payload)
         work_item.payload["validation"] = validation_result.to_payload()
-        if not validation_result.accepted:
+        work_item.payload["normalized_report"] = dict(validation_result.normalized_payload)
+        acceptance_result = decide_acceptance(
+            report_type,
+            validation_result=validation_result,
+            work_item_payload=work_item.payload,
+        )
+        work_item.payload["acceptance"] = acceptance_result.to_payload()
+        if acceptance_result.decision == "reject":
             return _route_to_feedback_agent(
                 work_item,
                 report_type=report_type,
                 route_status="rejected",
                 route_reason="sop_validation_rejected_report",
                 rejections=[rejection.to_payload() for rejection in validation_result.rejections],
+            )
+        if acceptance_result.decision == "review":
+            review_warnings = [
+                {
+                    "code": "needs_review",
+                    "message": "Validation passed but the payload confidence requires manual review.",
+                }
+            ]
+            review_path = write_review_item(
+                work_item,
+                report_type=report_type,
+                branch=_string_or_none(validation_result.normalized_payload.get("branch")) or "unknown",
+                report_date=_string_or_none(validation_result.normalized_payload.get("report_date")) or "unknown",
+                confidence=acceptance_result.confidence,
+                warnings=review_warnings,
+                reason=acceptance_result.reason,
+                validation_outcome=validation_result.to_payload(),
+                acceptance_outcome=acceptance_result.to_payload(),
+                parser_used="orchestra_router",
+                parse_mode="strict",
+            )
+            work_item.payload["review_queue"] = {
+                "path": review_path,
+                "reason": acceptance_result.reason,
+            }
+            return _route_to_feedback_agent(
+                work_item,
+                report_type=report_type,
+                route_status="review",
+                route_reason="acceptance_review_required",
+                rejections=review_warnings,
             )
 
     routing_payload = {
@@ -152,7 +192,7 @@ def _route_to_feedback_agent(
     work_item: WorkItem,
     *,
     report_type: str,
-    route_status: Literal["rejected", "needs_split"],
+    route_status: Literal["rejected", "needs_split", "review"],
     route_reason: str,
     rejections: list[dict[str, str]],
 ) -> RoutingResult:

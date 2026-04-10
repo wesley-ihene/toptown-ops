@@ -13,7 +13,7 @@ FAMILY_TO_TARGET_AGENT: Final[dict[str, str]] = {
     "sales_income": "sales_income_agent",
     "pricing_stock_release": "pricing_stock_release_agent",
     "attendance": "hr_agent",
-    "staff_performance": "staff_performance_agent",
+    "staff_performance": "hr_agent",
     "supervisor_control": "supervisor_control_agent",
 }
 

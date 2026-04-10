@@ -1,105 +1,167 @@
 # Toptown Ops Architecture
 
-## Audit Result
+`toptown-ops` is the upstream coordination layer in front of IOI Colony. It owns intake, orchestration, specialist parsing, upstream review/reject handling, provenance, proposal generation, and observability. It does not own colony intelligence, colony memory, or direct WhatsApp replies.
 
-`toptown-ops` is aligned with the blueprint as the upstream specialist-agent intake and normalization layer.
+## Layered Agent Design
 
-The repo already separates:
+Current flow:
 
-- raw intake and routing
-- specialist parsing and normalization
-- structured record storage
-- downstream export as a distinct future step
+`WhatsApp intake -> Orchestra -> Orchestrator Agent -> strict specialist -> optional fallback extraction -> validation -> acceptance -> accepted/review/rejected storage -> signal export -> IOI Colony`
 
-This is consistent with the repo mission in `AGENTS.md` and `README.md`: Orchestra and specialist agents stay outside IOI Colony, raw WhatsApp does not flow directly into colony logic, and the downstream path is intended to be contract-driven.
+Layer responsibilities:
 
-## Confirmed System Role
+- `packages/whatsapp_ingest` and `apps/orchestra`: intake, raw payload normalization, conservative routing.
+- `apps/orchestrator_agent`: raw archive, policy checks, specialist dispatch, fallback dispatch, downstream outcome coordination.
+- strict specialists under `apps/*_agent`: schema-specific parsing as the primary path.
+- `apps/fallback_extraction_agent`: schema-bound recovery extraction only after strict parsing fails.
+- `packages/sop_validation`: required fields, totals and cross-field checks, canonical branch/date normalization.
+- `packages/report_acceptance`: accept/review/reject decisions based on validation output plus report-type confidence thresholds.
 
-The current repo behavior confirms `toptown-ops` is the upstream operational layer:
+## Policy Guard
 
-- `apps/orchestra/intake.py` creates raw work items from inbound messages.
-- `apps/orchestrator_agent/worker.py` archives raw input, classifies it conservatively, routes it to a specialist, and treats structured records as the usable source of truth.
-- Specialist workers under `apps/sales_income_agent`, `apps/hr_agent`, and `apps/pricing_stock_release_agent` parse domain-specific reports into structured outputs.
-- Structured outputs are written under `records/structured/...` through the shared record-store helpers in `packages/record_store`.
-- CEO analytics reads only structured records and writes derived outputs only under `REPORTS/ceo/...`.
+`apps/orchestrator_agent/policy_guard.py` runs before specialist execution. It enforces:
 
-The current repo does not implement the downstream bridge yet. `scripts/export_colony_signals.py` is still a placeholder, which means the boundary is conceptually correct but not fully wired.
+- mixed-report rejection
+- duplicate and idempotency checks
+- report-type-aware fallback eligibility
+- early hard rejects
 
-## Current Upstream Flow
+Policy outcomes are persisted into raw and rejected metadata under `policy_guard`.
 
-Current effective flow:
+## Validation vs Acceptance
 
-`raw inbound message -> Orchestra intake -> orchestrator routing -> specialist agent -> records/structured/<record_type>/<branch>/<date>.json`
+Validation and acceptance are separate layers by design.
 
-Current structured record families:
+- Validation answers: "Is the structured payload internally valid and normalized?"
+- Acceptance answers: "What should happen to a valid or invalid result?"
 
-- `sales_income`
-- `hr_performance`
-- `hr_attendance`
-- `pricing_stock_release`
+Validation does not decide routing. Acceptance does not repeat validation rules.
 
-Current storage boundaries:
+Outcomes:
 
-- raw archive: `records/raw/whatsapp/...`
-- rejected/quarantine: `records/rejected/whatsapp/...`
-- structured truth: `records/structured/...`
-- derived CEO reports: `REPORTS/ceo/...`
+- valid + high confidence -> `accept`
+- valid + medium confidence -> `review`
+- invalid or low confidence -> `reject`
 
-## Boundary Interpretation
+Thresholds and fallback settings are file-based in `config/report_policy.json` and are report-type aware.
 
-Inside `toptown-ops`:
+## Fallback Agent
 
-- raw message intake
-- classification
-- specialist parsing
-- branch and date normalization
-- structured record writing
-- upstream analytics built only on structured records
+Fallback extraction is a secondary path, not a replacement for specialists.
 
-Outside `toptown-ops`:
+Rules:
 
-- income opportunity ranking
-- colony memory and reinforcement
-- blackboard logic
-- report aggregation for colony intelligence
-- any direct WhatsApp reply path
+- it runs only after strict specialist parsing fails
+- it is enabled per report type by config
+- it returns schema-bound output with `parse_mode`, `confidence`, `warnings`, and `provenance`
+- it still passes through Validation and Acceptance before any record is accepted, reviewed, or rejected
 
-That split matches the intended upstream/downstream separation.
+Current supported report families:
 
-## Structured Truth Contract
+- `sales`
+- `bale_summary` / `pricing_stock_release`
+- `attendance`
+- `staff_performance`
+- `supervisor_control`
 
-The stable upstream truth currently available to downstream systems is:
+## Review Queue
 
-- `records/structured/sales_income/<branch>/<YYYY-MM-DD>.json`
-- `records/structured/hr_performance/<branch>/<YYYY-MM-DD>.json`
-- `records/structured/hr_attendance/<branch>/<YYYY-MM-DD>.json`
-- `records/structured/pricing_stock_release/<branch>/<YYYY-MM-DD>.json`
+Review items are stored separately from accepted structured records and rejected records.
 
-Contract assumptions already visible in the repo:
+- accepted records: `records/structured/...`
+- review queue: `records/review/<date>/<branch>/<report_type>/<message_hash>.json`
+- rejected records: `records/rejected/...`
 
-- branch is expected to be canonical
-- file date is ISO `YYYY-MM-DD`
-- structured records are read-only once written
-- downstream analytics should tolerate missing record families and produce partial outputs instead of fabricating values
+Each review item includes:
 
-## Alignment Against Blueprint
+- `report_type`
+- `branch`
+- `date`
+- `confidence`
+- `warnings`
+- `provenance`
+- `reason`
 
-Aligned:
+The file layout keeps the queue queryable by date, branch, and report type.
 
-- upstream orchestration is outside IOI Colony
-- specialist logic is outside IOI Colony
-- raw WhatsApp storage is upstream, not mixed into Colony code in this repo
-- structured records are the normalized source of truth
-- derived analytics stay separate from ingestion outputs
+## Provenance
 
-Misaligned:
+Provenance is stored separately from business payloads in `records/provenance/<outcome>/<date>/<branch>/<report_type>/<raw_message_hash>.json`.
 
-- the downstream export bridge is not implemented yet
-- the signal contract package is still only minimally typed
-- the record schema helpers still reflect placeholder shapes rather than a fully locked cross-repo export schema
+Each provenance record captures:
 
-Migration-required:
+- raw message hash
+- parser used
+- parse mode
+- confidence
+- warnings
+- validation outcome
+- acceptance outcome
+- downstream record or export references
 
-- implement the explicit adapter from `records/structured/...` into Colony normalized signals
-- version the handoff contract before enabling cross-repo automation
-- keep all downstream Colony compatibility logic inside the adapter, not inside specialist workers
+This keeps business records stable while preserving traceability across accept, review, and reject paths.
+
+## Learning Proposals
+
+`packages/review_learning` analyzes repeated fallback patterns from persisted provenance and writes proposal-only artifacts to `records/proposals/...`.
+
+Proposal categories currently include:
+
+- new alias candidates
+- parser rule candidates
+- prompt improvement suggestions
+- confidence threshold adjustment proposals
+
+The learning layer does not mutate live config, prompts, parsers, or production thresholds. Review is explicit and manual.
+
+## Observability
+
+Observability is lightweight and file-based. Daily summary artifacts are written under `records/observability/daily/<date>/summary.json`.
+
+Current metrics include:
+
+- intake volume
+- accept, review, and reject counts
+- fallback activation count and rate
+- per-agent processed, failed, and failure-rate metrics
+- branch-wise warning and low-confidence quality signals
+- colony export success and failure counts
+
+Observability is updated from processing provenance and export automation rather than from a separate service.
+
+## Storage Summary
+
+Primary stores:
+
+- raw intake: `records/raw/whatsapp/...`
+- accepted structured records: `records/structured/...`
+- review queue: `records/review/...`
+- rejected records: `records/rejected/whatsapp/...`
+- provenance: `records/provenance/...`
+- learning proposals: `records/proposals/...`
+- observability summaries: `records/observability/daily/...`
+
+## IOI Colony Boundary
+
+The boundary with IOI Colony stays explicit.
+
+`toptown-ops` owns:
+
+- raw WhatsApp intake
+- orchestration and policy enforcement
+- specialist and fallback parsing
+- validation, acceptance, review, rejection
+- upstream storage, provenance, proposals, and observability
+- export of standardized downstream signals
+
+IOI Colony owns:
+
+- normalized signal consumption
+- downstream memory
+- fusion, reporting, ranking, and decision support
+
+The contract remains one-way:
+
+`toptown-ops -> Signal Outbox / exported signals -> IOI Colony`
+
+IOI Colony should not read raw WhatsApp inputs or upstream internal state directly.

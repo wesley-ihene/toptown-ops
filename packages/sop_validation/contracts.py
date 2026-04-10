@@ -32,6 +32,8 @@ class ValidationResult:
     report_type: str
     accepted: bool
     rejections: list[Rejection] = field(default_factory=list)
+    normalized_payload: dict[str, object] = field(default_factory=dict)
+    normalization: dict[str, object] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
@@ -53,4 +55,5 @@ class ValidationResult:
             "accepted": self.accepted,
             "status": self.status,
             "rejections": [rejection.to_payload() for rejection in self.rejections],
+            "normalization": dict(self.normalization),
         }

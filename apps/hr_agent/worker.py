@@ -13,9 +13,11 @@ from apps.hr_agent.alerts import generate_alerts
 from apps.hr_agent.attendance import derive_attendance
 from apps.hr_agent.coverage import derive_coverage
 from apps.hr_agent.parser import ParsedHrReport, parse_work_item
+from apps.hr_agent.record_store import write_structured_record
 from apps.hr_agent.staffing import derive_staffing
+from apps.staff_performance_agent.parser import parse_work_item as parse_staff_performance_work_item
+from apps.staff_performance_agent.worker import build_staff_performance_result
 from packages.common.paths import OUTBOX_DIR
-from packages.common.signal_writer import write_signal
 from packages.common.warnings import WarningEntry, dedupe_warnings, make_warning
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
@@ -23,7 +25,7 @@ from packages.signal_contracts.work_item import WorkItem
 AGENT_NAME = "hr_agent"
 SIGNAL_TYPE = "hr_staffing"
 OUTBOX_PATH = OUTBOX_DIR / AGENT_NAME
-_SUPPORTED_REPORT_TYPES = {"staff_attendance"}
+_SUPPORTED_REPORT_TYPES = {"staff_attendance", "staff_performance"}
 
 
 @dataclass(slots=True)
@@ -43,11 +45,18 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
 
     try:
         payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+        report_type = _report_type(payload)
+        if report_type == "staff_performance":
+            return _process_staff_performance_work_item(work_item, payload=payload)
+
         validation_warnings = _validate_input(payload)
         if validation_warnings:
-            result = _build_failure_result(work_item, warnings=validation_warnings)
+            result = _build_failure_result(
+                work_item,
+                warnings=validation_warnings,
+                report_type=report_type,
+            )
             _write_result_to_outbox(result)
-            write_signal(result)
             return result
 
         parsed = parse_work_item(work_item)
@@ -70,6 +79,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             agent_name=AGENT_NAME,
             payload={
                 "signal_type": SIGNAL_TYPE,
+                "signal_subtype": "staff_attendance",
                 "source_agent": AGENT_NAME,
                 "branch": parsed.branch_slug or parsed.branch,
                 "report_date": parsed.report_date,
@@ -99,12 +109,13 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 "status": status,
             },
         )
+        write_structured_record(result.payload)
         _write_result_to_outbox(result)
-        write_signal(result)
         return result
     except Exception:
         result = _build_failure_result(
             work_item,
+            report_type="staff_attendance",
             warnings=[
                 make_warning(
                     code="missing_fields",
@@ -114,8 +125,31 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             ],
         )
         _write_result_to_outbox(result)
-        write_signal(result)
         return result
+
+
+def _process_staff_performance_work_item(
+    work_item: WorkItem,
+    *,
+    payload: dict[str, Any],
+) -> AgentResult:
+    """Process one staff-performance report through the HR family agent."""
+
+    validation_warnings = _validate_input(payload)
+    if validation_warnings:
+        result = _build_failure_result(
+            work_item,
+            warnings=validation_warnings,
+            report_type="staff_performance",
+        )
+        _write_result_to_outbox(result)
+        return result
+
+    parsed = parse_staff_performance_work_item(work_item)
+    result = build_staff_performance_result(parsed, source_agent=AGENT_NAME)
+    write_structured_record(result.payload)
+    _write_result_to_outbox(result)
+    return result
 
 
 def _validate_input(payload: dict[str, Any]) -> list[WarningEntry]:
@@ -160,6 +194,7 @@ def _build_failure_result(
     work_item: WorkItem,
     *,
     parsed: ParsedHrReport | None = None,
+    report_type: str = "staff_attendance",
     warnings: list[WarningEntry] | None = None,
 ) -> AgentResult:
     """Return a safe failure result that still matches the output contract."""
@@ -178,7 +213,8 @@ def _build_failure_result(
     return AgentResult(
         agent_name=AGENT_NAME,
         payload={
-                "signal_type": SIGNAL_TYPE,
+                "signal_type": "hr" if report_type == "staff_performance" else SIGNAL_TYPE,
+                "signal_subtype": report_type,
                 "source_agent": AGENT_NAME,
                 "branch": parsed.branch_slug if parsed is not None else None,
                 "report_date": parsed.report_date if parsed is not None else None,
@@ -202,6 +238,17 @@ def _build_failure_result(
                 "status": "invalid_input",
         },
     )
+
+
+def _report_type(payload: dict[str, Any]) -> str:
+    """Return the classified HR-family report type or `staff_attendance` by default."""
+
+    classification = payload.get("classification")
+    if isinstance(classification, Mapping):
+        report_type = classification.get("report_type")
+        if isinstance(report_type, str) and report_type in _SUPPORTED_REPORT_TYPES:
+            return report_type
+    return "staff_attendance"
 
 
 def _compute_confidence(
@@ -257,7 +304,12 @@ def _build_output_filename(payload: dict[str, Any]) -> str:
 
     branch = str(payload.get("branch") or "unknown").strip() or "unknown"
     report_date = str(payload.get("report_date") or datetime.now(timezone.utc).date().isoformat()).strip()
+    signal_subtype = str(payload.get("signal_subtype") or "staff_attendance").strip() or "staff_attendance"
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_branch = "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in branch)
     safe_date = "".join(character if character.isdigit() or character == "-" else "_" for character in report_date)
-    return f"{timestamp}__{safe_branch}__{safe_date}__hr_staffing.json"
+    safe_subtype = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in signal_subtype
+    )
+    return f"{timestamp}__{safe_branch}__{safe_date}__{safe_subtype}.json"

@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from packages.common.branch import canonical_branch_slug
+from packages.common.date import normalize_report_date
+
 from .attendance import validate_attendance
 from .bale_release import validate_bale_release
 from .common import build_result, make_rejection
@@ -41,9 +44,10 @@ def get_validator(report_type: str) -> Validator | None:
 def validate_report(report_type: str, payload: Mapping[str, Any]) -> ValidationResult:
     """Validate one payload via its routed Phase 1 validator."""
 
+    normalized_payload, normalization = normalize_report_payload(payload)
     validator = get_validator(report_type)
     if validator is None:
-        return build_result(
+        result = build_result(
             report_type,
             [
                 make_rejection(
@@ -53,4 +57,37 @@ def validate_report(report_type: str, payload: Mapping[str, Any]) -> ValidationR
                 )
             ],
         )
-    return validator(payload)
+        result.normalized_payload = normalized_payload
+        result.normalization = normalization
+        return result
+    result = validator(normalized_payload)
+    result.normalized_payload = normalized_payload
+    result.normalization = normalization
+    return result
+
+
+def normalize_report_payload(payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return a shallow-normalized payload plus explicit normalization metadata."""
+
+    normalized_payload = dict(payload)
+    normalization: dict[str, Any] = {}
+
+    branch = payload.get("branch")
+    if isinstance(branch, str) and branch.strip():
+        normalized_branch = canonical_branch_slug(branch)
+        normalized_payload["branch"] = normalized_branch
+        normalization["branch"] = {
+            "raw": branch,
+            "normalized": normalized_branch,
+        }
+
+    report_date = payload.get("report_date")
+    if isinstance(report_date, str) and report_date.strip():
+        normalized_date = normalize_report_date(report_date)
+        normalized_payload["report_date"] = normalized_date
+        normalization["report_date"] = {
+            "raw": report_date,
+            "normalized": normalized_date,
+        }
+
+    return normalized_payload, normalization

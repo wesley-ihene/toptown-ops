@@ -18,9 +18,18 @@ from typing import Any, Final, Literal
 
 from apps.branch_resolver_agent.worker import resolve_branch
 from apps.date_resolver_agent.worker import resolve_report_date
+from apps.fallback_extraction_agent.worker import (
+    process_work_item as process_fallback_extraction_work_item,
+)
 from apps.header_normalizer_agent.worker import normalize_headers
 from apps.hr_agent.worker import process_work_item as process_hr_work_item
 from apps.mixed_content_detector_agent.worker import detect_mixed_content
+from apps.orchestrator_agent.policy_guard import (
+    PolicyDecision,
+    evaluate_mixed_report_policy,
+    evaluate_pre_specialist_policy,
+    reject_decision,
+)
 from apps.pricing_stock_release_agent.worker import (
     process_work_item as process_pricing_stock_release_work_item,
 )
@@ -38,9 +47,13 @@ from apps.supervisor_control_agent.worker import (
 from packages.record_store.naming import build_rejected_filename, safe_segment
 from packages.record_store.paths import get_raw_path, get_rejected_path, get_structured_path
 from packages.record_store.writer import write_json_file, write_text_file
+from packages.report_acceptance import decide_acceptance
+from packages.provenance_store import write_provenance_record
 from packages.report_registry import route_for_family
+from packages.review_queue import write_review_item
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
+from packages.sop_validation.router import validate_report
 
 AGENT_NAME: Final[str] = "orchestrator_agent"
 RAW_MESSAGE_KIND: Final[str] = "raw_message"
@@ -49,14 +62,17 @@ UNKNOWN_STORAGE_BUCKET: Final[str] = "unknown"
 
 ClassificationLabel = str
 
-RouteStatus = Literal["routed", "needs_review", "invalid_input"]
+RouteStatus = Literal["routed", "ready", "needs_review", "invalid_input"]
 RejectionReason = Literal[
     "unknown_report_type",
     "missing_raw_text",
     "invalid_input",
+    "duplicate_message",
+    "mixed_report",
     "classifier_failure",
     "routing_failure",
     "parser_failure",
+    "fallback_validation_failed",
     "subtype_undetermined",
 ]
 
@@ -98,11 +114,18 @@ class OrchestratorAgentWorker:
 def process_work_item(work_item: WorkItem) -> AgentResult:
     """Return a routed downstream result or a safe structured failure."""
 
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     raw_audit = _prepare_raw_audit_record(work_item)
     if not raw_audit.is_replay and not raw_audit.raw_written_by_ingress:
         _persist_raw_record(raw_audit)
     validation_errors = _validate_raw_work_item(work_item)
     if validation_errors:
+        policy_decision = reject_decision(
+            reason="invalid_raw_message",
+            report_family="unknown",
+            report_type=None,
+            target_agent=None,
+        )
         _update_raw_metadata(
             raw_audit,
             detected_report_type="unknown",
@@ -110,6 +133,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             processing_status="invalid_input",
             branch_hint=raw_audit.branch_hint,
             routing_metadata=None,
+            policy_decision=policy_decision,
         )
         _write_rejected_record(
             raw_audit,
@@ -118,6 +142,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             attempted_agent=None,
             attempted_branch_hint=raw_audit.branch_hint,
             exception_message=None,
+            policy_decision=policy_decision,
         )
         return _failure_result(
             work_item,
@@ -125,10 +150,59 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             status="invalid_input",
             route_reason="invalid_raw_message",
             warnings=validation_errors,
+            policy_decision=policy_decision,
         )
 
     mixed_detection = detect_mixed_content(raw_audit.raw_text)
     if mixed_detection.is_mixed:
+        mixed_policy = evaluate_mixed_report_policy(
+            reject_mixed_reports=_reject_mixed_reports(payload)
+        )
+        if mixed_policy.action == "reject":
+            routing_payload = _build_routing_payload(
+                classification="mixed",
+                target_agent=None,
+                status="needs_review",
+                route_reason="mixed_report_rejected",
+                branch_hint=raw_audit.branch_hint,
+                confidence=mixed_detection.confidence,
+                evidence=list(mixed_detection.evidence),
+                review_reason="mixed_reports_rejected_upstream",
+            )
+            _update_raw_metadata(
+                raw_audit,
+                detected_report_type="mixed",
+                routing_target=None,
+                processing_status="needs_review",
+                branch_hint=raw_audit.branch_hint,
+                routing_metadata=_routing_metadata_from_payload(routing_payload),
+                policy_decision=mixed_policy,
+            )
+            _write_rejected_record(
+                raw_audit,
+                rejection_reason="mixed_report",
+                attempted_report_type="mixed",
+                attempted_agent=None,
+                attempted_branch_hint=raw_audit.branch_hint,
+                exception_message=None,
+                policy_decision=mixed_policy,
+            )
+            rejected_payload = dict(payload)
+            rejected_payload["routing"] = routing_payload
+            return _failure_result(
+                WorkItem(kind=work_item.kind, payload=rejected_payload),
+                classification="mixed",
+                status="needs_review",
+                route_reason="mixed_report_rejected",
+                warnings=[
+                    _make_warning(
+                        code="mixed_report",
+                        severity="warning",
+                        message="Mixed WhatsApp reports are rejected upstream and must be resubmitted as one report per message.",
+                    )
+                ],
+                policy_decision=mixed_policy,
+            )
         split_result = split_report(raw_audit.raw_text, mixed_detection)
         if len(split_result.segments) >= 2:
             return _process_mixed_work_item(
@@ -136,11 +210,18 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 raw_audit=raw_audit,
                 mixed_detection=mixed_detection,
                 split_result=split_result,
+                policy_decision=mixed_policy,
             )
 
     try:
         routed_work_item = _build_routed_work_item(work_item)
     except Exception as exc:
+        policy_decision = reject_decision(
+            reason="classifier_failure",
+            report_family="unknown",
+            report_type=None,
+            target_agent=None,
+        )
         _update_raw_metadata(
             raw_audit,
             detected_report_type="unknown",
@@ -148,6 +229,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             processing_status="invalid_input",
             branch_hint=raw_audit.branch_hint,
             routing_metadata=None,
+            policy_decision=policy_decision,
         )
         _write_rejected_record(
             raw_audit,
@@ -156,6 +238,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             attempted_agent=None,
             attempted_branch_hint=raw_audit.branch_hint,
             exception_message=str(exc) or None,
+            policy_decision=policy_decision,
         )
         return _failure_result(
             work_item,
@@ -169,6 +252,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                     message="The raw message could not be classified safely.",
                 )
             ],
+            policy_decision=policy_decision,
         )
 
     routing_payload = routed_work_item.payload["routing"]
@@ -176,8 +260,37 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
     target_agent = routing_payload["target_agent"]
     route_status = routing_payload["route_status"]
     resolved_branch_hint = routing_payload.get("branch_hint")
+    specialist_report_type = routing_payload.get("specialist_report_type")
 
-    if classification == "unknown" or target_agent is None or route_status != "routed":
+    policy_decision = evaluate_pre_specialist_policy(
+        existing_metadata=raw_audit.existing_metadata,
+        report_family=classification,
+        report_type=specialist_report_type if isinstance(specialist_report_type, str) else None,
+        target_agent=target_agent if isinstance(target_agent, str) else None,
+        route_status=route_status if isinstance(route_status, str) else None,
+    )
+
+    if policy_decision.action == "reject":
+        rejection_reason: RejectionReason = (
+            "duplicate_message"
+            if policy_decision.reason == "duplicate_message"
+            else "unknown_report_type"
+        )
+        route_reason = (
+            "duplicate_message_rejected"
+            if policy_decision.reason == "duplicate_message"
+            else str(routing_payload.get("review_reason") or "unknown_route")
+        )
+        warning_code = (
+            "duplicate_message"
+            if policy_decision.reason == "duplicate_message"
+            else "missing_fields"
+        )
+        warning_message = (
+            "This raw message was already processed and was blocked by the idempotency policy."
+            if policy_decision.reason == "duplicate_message"
+            else "The raw message could not be routed to a supported specialist agent."
+        )
         _update_raw_metadata(
             raw_audit,
             detected_report_type=classification,
@@ -185,32 +298,41 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             processing_status="needs_review",
             branch_hint=resolved_branch_hint,
             routing_metadata=_routing_metadata_from_payload(routing_payload),
+            policy_decision=policy_decision,
         )
         _write_rejected_record(
             raw_audit,
-            rejection_reason="unknown_report_type",
+            rejection_reason=rejection_reason,
             attempted_report_type=classification,
             attempted_agent=None,
             attempted_branch_hint=resolved_branch_hint,
             exception_message=None,
+            policy_decision=policy_decision,
         )
         return _failure_result(
             routed_work_item,
             classification=classification,
             status="needs_review",
-            route_reason=str(routing_payload.get("review_reason") or "unknown_route"),
+            route_reason=route_reason,
             warnings=[
                 _make_warning(
-                    code="missing_fields",
+                    code=warning_code,
                     severity="warning",
-                    message="The raw message could not be routed to a supported specialist agent.",
+                    message=warning_message,
                 )
             ],
+            policy_decision=policy_decision,
         )
 
     try:
         result = _dispatch_to_specialist(routed_work_item, target_agent=target_agent)
     except Exception as exc:
+        routing_failure_policy = reject_decision(
+            reason="routing_failure",
+            report_family=classification,
+            report_type=specialist_report_type if isinstance(specialist_report_type, str) else None,
+            target_agent=target_agent,
+        )
         _update_raw_metadata(
             raw_audit,
             detected_report_type=classification,
@@ -218,6 +340,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             processing_status="invalid_input",
             branch_hint=resolved_branch_hint,
             routing_metadata=_routing_metadata_from_payload(routing_payload),
+            policy_decision=routing_failure_policy,
         )
         _write_rejected_record(
             raw_audit,
@@ -226,6 +349,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             attempted_agent=target_agent,
             attempted_branch_hint=resolved_branch_hint,
             exception_message=str(exc) or None,
+            policy_decision=routing_failure_policy,
         )
         return _failure_result(
             routed_work_item,
@@ -239,9 +363,24 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                     message="The routed work item could not be processed safely.",
                 )
             ],
+            policy_decision=routing_failure_policy,
         )
 
     specialist_status = _result_status(result)
+    if specialist_status == "invalid_input":
+        fallback_result = _process_specialist_fallback(
+            routed_work_item=routed_work_item,
+            raw_audit=raw_audit,
+            classification=classification,
+            target_agent=target_agent,
+            specialist_report_type=specialist_report_type if isinstance(specialist_report_type, str) else None,
+            resolved_branch_hint=resolved_branch_hint,
+            routing_payload=routing_payload,
+            policy_decision=policy_decision,
+        )
+        if fallback_result is not None:
+            return fallback_result
+
     _update_raw_metadata(
         raw_audit,
         detected_report_type=classification,
@@ -249,6 +388,22 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         processing_status=specialist_status,
         branch_hint=resolved_branch_hint,
         routing_metadata=_routing_metadata_from_payload(routing_payload),
+        policy_decision=policy_decision,
+        extra_metadata=None,
+    )
+    _write_outcome_provenance(
+        outcome="accepted",
+        audit=raw_audit,
+        report_type=specialist_report_type if isinstance(specialist_report_type, str) else classification,
+        branch=_result_branch(result) or resolved_branch_hint or raw_audit.branch_hint or "unknown",
+        report_date=_result_report_date(result) or _date_segment(raw_audit.received_at),
+        parser_used=result.agent_name,
+        parse_mode="strict",
+        confidence=_result_confidence(result),
+        warnings=_result_warnings(result),
+        validation_outcome={"status": "not_run"},
+        acceptance_outcome={"status": "accepted"},
+        downstream_references={"structured_records": _structured_output_paths_from_result(result)},
     )
     if specialist_status == "invalid_input":
         _write_rejected_record(
@@ -258,8 +413,136 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             attempted_agent=target_agent,
             attempted_branch_hint=resolved_branch_hint,
             exception_message=None,
+            policy_decision=policy_decision,
+            extra_metadata=None,
         )
     return result
+
+
+def _process_specialist_fallback(
+    *,
+    routed_work_item: WorkItem,
+    raw_audit: RawAuditRecord,
+    classification: ClassificationLabel,
+    target_agent: str,
+    specialist_report_type: str | None,
+    resolved_branch_hint: str | None,
+    routing_payload: Mapping[str, Any],
+    policy_decision: PolicyDecision,
+) -> AgentResult | None:
+    """Attempt schema-bound fallback extraction after strict parsing fails."""
+
+    if specialist_report_type is None or not policy_decision.fallback_eligible:
+        return None
+
+    fallback_result = process_fallback_extraction_work_item(routed_work_item)
+    fallback_payload = fallback_result.payload if isinstance(fallback_result.payload, dict) else {}
+    normalized_report = fallback_payload.get("normalized_report")
+    if not isinstance(normalized_report, Mapping):
+        normalized_report = {}
+
+    validation_result = validate_report(specialist_report_type, normalized_report)
+    acceptance_result = decide_acceptance(
+        specialist_report_type,
+        validation_result=validation_result,
+        work_item_payload={
+            **(routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}),
+            "normalized_report": dict(validation_result.normalized_payload),
+            "confidence": fallback_payload.get("confidence"),
+        },
+    )
+
+    if acceptance_result.decision == "reject":
+        fallback_policy = reject_decision(
+            reason="fallback_validation_failed",
+            report_family=classification,
+            report_type=specialist_report_type,
+            target_agent=target_agent,
+        )
+        fallback_metadata = _fallback_metadata(
+            fallback_payload=fallback_payload,
+            validation_result=validation_result,
+            acceptance_payload=acceptance_result.to_payload(),
+            review_queue_path=None,
+        )
+        _update_raw_metadata(
+            raw_audit,
+            detected_report_type=classification,
+            routing_target=target_agent,
+            processing_status="invalid_input",
+            branch_hint=resolved_branch_hint,
+            routing_metadata=_routing_metadata_from_payload(routing_payload),
+            policy_decision=fallback_policy,
+            extra_metadata=fallback_metadata,
+        )
+        _write_rejected_record(
+            raw_audit,
+            rejection_reason="fallback_validation_failed",
+            attempted_report_type=classification,
+            attempted_agent=target_agent,
+            attempted_branch_hint=resolved_branch_hint,
+            exception_message=None,
+            policy_decision=fallback_policy,
+            extra_metadata=fallback_metadata,
+        )
+        return _build_fallback_result(
+            routed_work_item=routed_work_item,
+            classification=classification,
+            route_reason="fallback_validation_rejected",
+            fallback_payload=fallback_payload,
+            validation_result=validation_result,
+            acceptance_payload=acceptance_result.to_payload(),
+            warnings=_fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result),
+            policy_decision=fallback_policy,
+            status="invalid_input",
+            review_queue_path=None,
+        )
+
+    review_queue_path: str | None = None
+    if acceptance_result.decision == "review":
+        review_queue_path = write_review_item(
+            routed_work_item,
+            report_type=specialist_report_type,
+            branch=_string_or_default(validation_result.normalized_payload.get("branch"), default="unknown"),
+            report_date=_string_or_default(validation_result.normalized_payload.get("report_date"), default="unknown"),
+            confidence=acceptance_result.confidence,
+            warnings=_fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result),
+            reason=acceptance_result.reason,
+            validation_outcome=validation_result.to_payload(),
+            acceptance_outcome=acceptance_result.to_payload(),
+            parser_used="fallback_extraction_agent",
+            parse_mode="fallback",
+        )
+
+    fallback_metadata = _fallback_metadata(
+        fallback_payload=fallback_payload,
+        validation_result=validation_result,
+        acceptance_payload=acceptance_result.to_payload(),
+        review_queue_path=review_queue_path,
+    )
+    fallback_status = "needs_review" if acceptance_result.decision == "review" else "ready"
+    _update_raw_metadata(
+        raw_audit,
+        detected_report_type=classification,
+        routing_target=target_agent,
+        processing_status=fallback_status,
+        branch_hint=resolved_branch_hint,
+        routing_metadata=_routing_metadata_from_payload(routing_payload),
+        policy_decision=policy_decision,
+        extra_metadata=fallback_metadata,
+    )
+    return _build_fallback_result(
+        routed_work_item=routed_work_item,
+        classification=classification,
+        route_reason="fallback_review_required" if acceptance_result.decision == "review" else "fallback_accepted",
+        fallback_payload=fallback_payload,
+        validation_result=validation_result,
+        acceptance_payload=acceptance_result.to_payload(),
+        warnings=_fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result),
+        policy_decision=policy_decision,
+        status=fallback_status,
+        review_queue_path=review_queue_path,
+    )
 
 
 def _process_mixed_work_item(
@@ -268,6 +551,7 @@ def _process_mixed_work_item(
     raw_audit: RawAuditRecord,
     mixed_detection,
     split_result,
+    policy_decision: PolicyDecision,
 ) -> AgentResult:
     """Process one explicitly mixed raw message through deterministic fan-out."""
 
@@ -382,6 +666,7 @@ def _process_mixed_work_item(
         processing_status=parent_status,
         branch_hint=branch_hint,
         routing_metadata=_routing_metadata_from_payload(routing_payload),
+        policy_decision=policy_decision,
     )
 
     parent_payload = {
@@ -541,6 +826,7 @@ def _persist_raw_record(audit: RawAuditRecord) -> RawAuditRecord:
             processing_status="received",
             branch_hint=audit.branch_hint,
             routing_metadata=None,
+            policy_decision=None,
         ),
     )
     return audit
@@ -554,6 +840,8 @@ def _update_raw_metadata(
     processing_status: str,
     branch_hint: str | None,
     routing_metadata: dict[str, Any] | None,
+    policy_decision: PolicyDecision | None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Update audit metadata without relocating the original raw archive."""
 
@@ -569,6 +857,8 @@ def _update_raw_metadata(
             processing_status=processing_status,
             branch_hint=branch_hint,
             routing_metadata=routing_metadata,
+            policy_decision=policy_decision,
+            extra_metadata=extra_metadata,
         ),
     )
 
@@ -581,6 +871,8 @@ def _write_rejected_record(
     attempted_agent: str | None,
     attempted_branch_hint: str | None,
     exception_message: str | None,
+    policy_decision: PolicyDecision | None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> Path:
     """Write the rejected quarantine copy and its metadata."""
 
@@ -589,21 +881,39 @@ def _write_rejected_record(
     text_path = get_rejected_path(rejected_bucket) / filename
     meta_path = text_path.with_suffix(".meta.json")
     write_text_file(text_path, audit.raw_text)
-    write_json_file(
-        meta_path,
-        {
-            "rejection_reason": rejection_reason,
-            "source": audit.source,
-            "received_at": audit.received_at,
-            "sender": audit.sender,
-            "branch_hint": attempted_branch_hint,
-            "attempted_report_type": attempted_report_type,
-            "attempted_agent": attempted_agent,
-            "raw_sha256": audit.raw_sha256,
-            "exception_message": exception_message,
-            "replay": audit.is_replay,
-            "replay_source": audit.replay_source,
-            "replay_original_path": audit.replay_original_path,
+    payload = {
+        "rejection_reason": rejection_reason,
+        "source": audit.source,
+        "received_at": audit.received_at,
+        "sender": audit.sender,
+        "branch_hint": attempted_branch_hint,
+        "attempted_report_type": attempted_report_type,
+        "attempted_agent": attempted_agent,
+        "raw_sha256": audit.raw_sha256,
+        "exception_message": exception_message,
+        "replay": audit.is_replay,
+        "replay_source": audit.replay_source,
+        "replay_original_path": audit.replay_original_path,
+        "policy_guard": policy_decision.to_metadata() if policy_decision is not None else None,
+    }
+    if extra_metadata:
+        payload.update(extra_metadata)
+    write_json_file(meta_path, payload)
+    _write_outcome_provenance(
+        outcome="rejected",
+        audit=audit,
+        report_type=attempted_report_type,
+        branch=attempted_branch_hint or "unknown",
+        report_date=_provenance_report_date(extra_metadata, audit),
+        parser_used=attempted_agent or AGENT_NAME,
+        parse_mode=_provenance_parse_mode(extra_metadata),
+        confidence=_provenance_confidence(extra_metadata),
+        warnings=_provenance_warnings(extra_metadata),
+        validation_outcome=_provenance_validation(extra_metadata),
+        acceptance_outcome=_provenance_acceptance(extra_metadata),
+        downstream_references={
+            "rejected_text_path": str(text_path),
+            "rejected_meta_path": str(meta_path),
         },
     )
     return text_path
@@ -675,6 +985,8 @@ def _raw_metadata_payload(
     processing_status: str,
     branch_hint: str | None,
     routing_metadata: dict[str, Any] | None,
+    policy_decision: PolicyDecision | None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the raw metadata JSON payload."""
 
@@ -688,9 +1000,12 @@ def _raw_metadata_payload(
         "routing_target": routing_target,
         "raw_sha256": audit.raw_sha256,
         "processing_status": processing_status,
+        "policy_guard": policy_decision.to_metadata() if policy_decision is not None else None,
     }
     if routing_metadata:
         payload.update(routing_metadata)
+    if extra_metadata:
+        payload.update(extra_metadata)
     return payload
 
 
@@ -748,6 +1063,13 @@ def _sanitize_raw_record(raw_record: object) -> dict[str, Any]:
     if raw_record.get("raw_written") is True:
         safe_record["raw_written"] = True
     return safe_record
+
+
+def _reject_mixed_reports(payload: dict[str, Any]) -> bool:
+    """Return whether ingress policy requires mixed reports to be rejected."""
+
+    ingress_policy = payload.get("ingress_policy")
+    return isinstance(ingress_policy, Mapping) and ingress_policy.get("reject_mixed_reports") is True
 
 
 def _raw_path_from_record(raw_record: dict[str, Any], *, fallback_filename: str) -> Path:
@@ -830,6 +1152,7 @@ def _failure_result(
     status: RouteStatus,
     route_reason: str,
     warnings: list[dict[str, str]],
+    policy_decision: PolicyDecision | None = None,
 ) -> AgentResult:
     """Return a safe structured routing failure without specialist processing."""
 
@@ -867,8 +1190,234 @@ def _failure_result(
             "items": [],
             "warnings": warnings,
             "status": status,
+            "policy_guard": policy_decision.to_metadata() if policy_decision is not None else None,
         },
     )
+
+
+def _build_fallback_result(
+    *,
+    routed_work_item: WorkItem,
+    classification: ClassificationLabel,
+    route_reason: str,
+    fallback_payload: dict[str, Any],
+    validation_result,
+    acceptance_payload: dict[str, Any],
+    warnings: list[dict[str, str]],
+    policy_decision: PolicyDecision,
+    status: RouteStatus,
+    review_queue_path: str | None,
+) -> AgentResult:
+    """Return an orchestrator result for fallback extraction outcomes."""
+
+    result = _failure_result(
+        routed_work_item,
+        classification=classification,
+        status=status,
+        route_reason=route_reason,
+        warnings=warnings,
+        policy_decision=policy_decision,
+    )
+    result.payload["fallback"] = {
+        "parse_mode": fallback_payload.get("parse_mode"),
+        "confidence": fallback_payload.get("confidence"),
+        "warnings": list(fallback_payload.get("warnings", [])) if isinstance(fallback_payload.get("warnings"), list) else [],
+        "provenance": dict(fallback_payload.get("provenance", {})) if isinstance(fallback_payload.get("provenance"), Mapping) else {},
+        "normalized_report": dict(validation_result.normalized_payload),
+        "validation": validation_result.to_payload(),
+        "acceptance": acceptance_payload,
+        "review_queue_path": review_queue_path,
+    }
+    result.payload["confidence"] = fallback_payload.get("confidence", 0.0)
+    return result
+
+
+def _write_outcome_provenance(
+    *,
+    outcome: str,
+    audit: RawAuditRecord,
+    report_type: str,
+    branch: str,
+    report_date: str,
+    parser_used: str,
+    parse_mode: str,
+    confidence: float | None,
+    warnings: list[dict[str, Any]],
+    validation_outcome: dict[str, Any],
+    acceptance_outcome: dict[str, Any],
+    downstream_references: dict[str, Any],
+) -> str:
+    """Persist one dedicated provenance record."""
+
+    return write_provenance_record(
+        outcome=outcome,
+        report_type=report_type,
+        branch=branch,
+        report_date=report_date,
+        raw_message_hash=audit.raw_sha256,
+        parser_used=parser_used,
+        parse_mode=parse_mode,
+        confidence=confidence,
+        warnings=warnings,
+        validation_outcome=validation_outcome,
+        acceptance_outcome=acceptance_outcome,
+        downstream_references=downstream_references,
+        extra={
+            "source": audit.source,
+            "received_at": audit.received_at,
+            "raw_text_path": str(audit.text_path),
+            "raw_meta_path": str(audit.meta_path),
+        },
+    )
+
+
+def _fallback_warnings(*, fallback_payload: dict[str, Any], validation_result) -> list[dict[str, str]]:
+    """Return combined fallback and validation warnings."""
+
+    warnings: list[dict[str, str]] = []
+    fallback_entries = fallback_payload.get("warnings")
+    if isinstance(fallback_entries, list):
+        warnings.extend(entry for entry in fallback_entries if isinstance(entry, dict))
+    warnings.extend(_rejection_to_warning(rejection.to_payload()) for rejection in validation_result.rejections)
+    return warnings
+
+
+def _fallback_metadata(
+    *,
+    fallback_payload: dict[str, Any],
+    validation_result,
+    acceptance_payload: dict[str, Any],
+    review_queue_path: str | None,
+) -> dict[str, Any]:
+    """Return fallback metadata for raw and rejected audit records."""
+
+    return {
+        "fallback_parse_mode": fallback_payload.get("parse_mode"),
+        "fallback_confidence": fallback_payload.get("confidence"),
+        "fallback_status": fallback_payload.get("status"),
+        "fallback_validation": validation_result.to_payload(),
+        "fallback_acceptance": acceptance_payload,
+        "fallback_review_queue_path": review_queue_path,
+        "fallback_provenance": dict(fallback_payload.get("provenance", {})) if isinstance(fallback_payload.get("provenance"), Mapping) else {},
+    }
+
+
+def _rejection_to_warning(rejection_payload: dict[str, Any]) -> dict[str, str]:
+    """Translate one validation rejection into a warning-like payload."""
+
+    return _make_warning(
+        code=str(rejection_payload.get("code") or "validation_rejection"),
+        severity="error",
+        message=str(rejection_payload.get("message") or "Validation rejected the fallback extraction."),
+    )
+
+
+def _string_or_default(value: object, *, default: str) -> str:
+    """Return a stripped string value or a default."""
+
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default
+
+
+def _result_confidence(result: AgentResult) -> float | None:
+    """Return one result confidence when present."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    confidence = payload.get("confidence")
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        return float(confidence)
+    return None
+
+
+def _result_warnings(result: AgentResult) -> list[dict[str, Any]]:
+    """Return JSON-safe warnings from a result payload."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list):
+        return [warning for warning in warnings if isinstance(warning, dict)]
+    return []
+
+
+def _provenance_report_date(extra_metadata: dict[str, Any] | None, audit: RawAuditRecord) -> str:
+    """Return the best provenance date for rejected records."""
+
+    if isinstance(extra_metadata, dict):
+        for field_name in ("resolved_report_date", "fallback_validation", "fallback_provenance"):
+            value = extra_metadata.get(field_name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if field_name == "fallback_validation" and isinstance(value, Mapping):
+                report_type = value.get("report_type")
+                if isinstance(report_type, str):
+                    break
+    return _date_segment(audit.received_at)
+
+
+def _provenance_parse_mode(extra_metadata: dict[str, Any] | None) -> str:
+    """Return rejected-record parse mode."""
+
+    if isinstance(extra_metadata, dict):
+        value = extra_metadata.get("fallback_parse_mode")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "strict"
+
+
+def _provenance_confidence(extra_metadata: dict[str, Any] | None) -> float | None:
+    """Return rejected-record confidence when available."""
+
+    if isinstance(extra_metadata, dict):
+        value = extra_metadata.get("fallback_confidence")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _provenance_warnings(extra_metadata: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return rejected-record warnings when available."""
+
+    warnings: list[dict[str, Any]] = []
+    if not isinstance(extra_metadata, dict):
+        return warnings
+    provenance = extra_metadata.get("fallback_provenance")
+    if isinstance(provenance, Mapping):
+        pass
+    validation = extra_metadata.get("fallback_validation")
+    if isinstance(validation, Mapping):
+        rejections = validation.get("rejections")
+        if isinstance(rejections, list):
+            for rejection in rejections:
+                if isinstance(rejection, Mapping):
+                    warnings.append(
+                        _make_warning(
+                            code=str(rejection.get("code") or "validation_rejection"),
+                            severity="error",
+                            message=str(rejection.get("message") or "Validation rejected the record."),
+                        )
+                    )
+    return warnings
+
+
+def _provenance_validation(extra_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return validation outcome for provenance."""
+
+    if isinstance(extra_metadata, dict):
+        value = extra_metadata.get("fallback_validation")
+        if isinstance(value, Mapping):
+            return dict(value)
+    return {"status": "not_run"}
+
+
+def _provenance_acceptance(extra_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return acceptance outcome for provenance."""
+
+    if isinstance(extra_metadata, dict):
+        value = extra_metadata.get("fallback_acceptance")
+        if isinstance(value, Mapping):
+            return dict(value)
+    return {"status": "rejected"}
 
 
 def _rejection_reason_from_validation(warnings: list[dict[str, str]]) -> RejectionReason:

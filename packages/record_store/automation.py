@@ -21,6 +21,7 @@ from analytics.phase3 import (
 )
 from packages.common.executive_alerts import write_executive_alert_artifacts
 from packages.common.paths import REPO_ROOT
+from packages.observability import record_export_event
 from scripts.export_colony_signals import export_all_record_types
 
 IOI_COLONY_ROOT_ENV_VAR = "TOPTOWN_IOI_COLONY_ROOT"
@@ -133,6 +134,13 @@ def run_post_write_automation(
         duration_ms=_duration_ms(started_at),
         status="completed",
     )
+    record_export_event(
+        report_date=report_date,
+        branch=branch,
+        success=True,
+        manifest_summary=export_manifest.get("summary") if isinstance(export_manifest, dict) else None,
+        output_root=source_repo_root,
+    )
 
     _log_event(
         "info",
@@ -209,6 +217,13 @@ def log_post_write_failure(
 ) -> None:
     """Emit one explicit failure log for downstream automation errors."""
 
+    record_export_event(
+        report_date=report_date,
+        branch=branch,
+        success=False,
+        error=str(error),
+        output_root=structured_path.parents[4],
+    )
     _log_event(
         "exception",
         "downstream_automation_failure",

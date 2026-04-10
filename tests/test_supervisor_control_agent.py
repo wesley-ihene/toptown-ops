@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from apps.supervisor_control_agent.worker import process_work_item
-from packages.common import signal_writer
+import packages.record_store.automation as record_automation
+import packages.record_store.paths as record_paths
 from packages.signal_contracts.work_item import WorkItem
 
 
@@ -31,23 +32,18 @@ def test_valid_supervisor_control_sample_writes_one_signal_file(tmp_path: Path, 
     )
 
     assert result.payload["status"] == "ready"
-    signal_files = sorted((signals_root / "waigani" / "2026-04-07").glob("*.json"))
     outbox_files = sorted(outbox_path.glob("*.json"))
-    assert len(signal_files) == 1
     assert len(outbox_files) == 1
+    event_path = signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json"
+    assert event_path.exists()
 
-    payload = json.loads(signal_files[0].read_text(encoding="utf-8"))
-    assert payload["signal_type"] == "supervisor_control"
-    assert payload["source"] == "live"
+    payload = json.loads(event_path.read_text(encoding="utf-8"))
+    assert payload["signal_type"] == "supervisor_control_report"
     assert payload["branch"] == "waigani"
     assert payload["report_date"] == "2026-04-07"
-    assert payload["sop_compliance"] == "strict"
-    assert payload["signal_weight"] == 0.4
-    assert payload["metrics"]["exception_count"] == 1
-    assert payload["metrics"]["open_exception_count"] == 0
-    assert payload["metrics"]["escalated_count"] == 0
-    assert payload["metrics"]["confirmed_count"] == 1
-    assert payload["metrics"]["control_gap_count"] == 0
+    assert payload["source_record_type"] == "supervisor_control"
+    assert payload["event_kind"] == "supervisor_control_report"
+    assert payload["payload"]["provenance"]["notes"] == ["Transport delay"]
     assert payload["warnings"] == []
 
     assert json.loads(outbox_files[0].read_text(encoding="utf-8")) == result.payload
@@ -78,8 +74,8 @@ def test_missing_supervisor_confirmation_raises_missing_confirmation(tmp_path: P
     assert result.payload["signal_weight"] == 0.4
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
     assert "missing_confirmation" in warning_codes
-    assert len(sorted((signals_root / "waigani" / "2026-04-07").glob("*.json"))) == 1
     assert len(sorted(outbox_path.glob("*.json"))) == 1
+    assert (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
 
 
 def test_unresolved_exception_raises_escalation_required(tmp_path: Path, monkeypatch) -> None:
@@ -108,8 +104,8 @@ def test_unresolved_exception_raises_escalation_required(tmp_path: Path, monkeyp
     assert result.payload["signal_weight"] == 0.4
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
     assert "escalation_required" in warning_codes
-    assert len(sorted((signals_root / "waigani" / "2026-04-07").glob("*.json"))) == 1
     assert len(sorted(outbox_path.glob("*.json"))) == 1
+    assert (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
 
 
 def test_checklist_style_supervisor_report_synthesizes_contract_items(tmp_path: Path, monkeypatch) -> None:
@@ -142,8 +138,8 @@ def test_checklist_style_supervisor_report_synthesizes_contract_items(tmp_path: 
         assert item["action_taken"]
         assert item["supervisor_confirmed"] in {"YES", "NO"}
 
-    assert len(sorted((signals_root / "waigani" / "2026-04-07").glob("*.json"))) == 1
     assert len(sorted(outbox_path.glob("*.json"))) == 1
+    assert (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
 
 
 def test_checklist_style_supervisor_report_uses_canonical_semantic_exception_types(
@@ -202,9 +198,15 @@ def test_replay_marked_work_item_sets_source_to_replay(tmp_path: Path, monkeypat
 
 
 def _patch_output_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
-    signals_root = tmp_path / "SIGNALS" / "normalized"
+    records_dir = tmp_path / "records"
+    colony_root = tmp_path / "ioi-colony"
+    signals_root = colony_root / "SIGNALS" / "normalized"
     outbox_path = tmp_path / "outbox"
-    monkeypatch.setattr(signal_writer, "SIGNALS_ROOT", signals_root)
+    monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
+    monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
+    monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
+    monkeypatch.setenv(record_automation.IOI_COLONY_ROOT_ENV_VAR, str(colony_root))
     monkeypatch.setattr("apps.supervisor_control_agent.worker.OUTBOX_PATH", outbox_path)
     return signals_root, outbox_path
 

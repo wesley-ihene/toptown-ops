@@ -1,0 +1,32 @@
+{
+  "acceptance_outcome": {
+    "status": "accepted"
+  },
+  "branch": "lae_malaita",
+  "confidence": 0.97,
+  "date": "2026-04-07",
+  "downstream_references": {
+    "structured_records": [
+      "records/structured/hr_performance/lae_malaita/2026-04-07.json"
+    ]
+  },
+  "outcome": "accepted",
+  "parse_mode": "strict",
+  "parser_used": "hr_agent",
+  "raw_message_hash": "29021f0ba657509bd2b28837381a931311fc8fbfe3fce0580afbad973ae62fc0",
+  "raw_meta_path": "/tmp/pytest-of-clawadmin/pytest-146/test_orchestrator_replay_of_li0/records/raw/whatsapp/unknown/2026-04-07__unknown__29021f0ba657.meta.json",
+  "raw_text_path": "/tmp/pytest-of-clawadmin/pytest-146/test_orchestrator_replay_of_li0/records/raw/whatsapp/unknown/2026-04-07__unknown__29021f0ba657.txt",
+  "received_at": "2026-04-07T09:43:59Z",
+  "report_type": "staff_performance",
+  "source": "whatsapp",
+  "validation_outcome": {
+    "status": "not_run"
+  },
+  "warnings": [
+    {
+      "code": "section_unresolved",
+      "message": "One or more section values were preserved in raw form because canonical mapping was uncertain.",
+      "severity": "info"
+    }
+  ]
+}

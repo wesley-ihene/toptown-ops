@@ -28,7 +28,10 @@ def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
     report_date = payload.get("report_date")
     status = payload.get("status")
 
-    if signal_type != "hr":
+    if signal_subtype == "staff_attendance":
+        if signal_type not in {"hr", "hr_staffing"}:
+            return None
+    elif signal_type != "hr":
         return None
     if status == "invalid_input":
         return None

@@ -1,0 +1,44 @@
+{
+  "report_types": {
+    "sales": {
+      "fallback_enabled": true,
+      "confidence_thresholds": {
+        "auto_accept_min": 0.9,
+        "review_min": 0.6,
+        "reject_max": 0.4
+      }
+    },
+    "bale_summary": {
+      "fallback_enabled": true,
+      "confidence_thresholds": {
+        "auto_accept_min": 0.88,
+        "review_min": 0.58,
+        "reject_max": 0.38
+      }
+    },
+    "attendance": {
+      "fallback_enabled": true,
+      "confidence_thresholds": {
+        "auto_accept_min": 0.9,
+        "review_min": 0.62,
+        "reject_max": 0.42
+      }
+    },
+    "staff_performance": {
+      "fallback_enabled": false,
+      "confidence_thresholds": {
+        "auto_accept_min": 0.92,
+        "review_min": 0.64,
+        "reject_max": 0.44
+      }
+    },
+    "supervisor_control": {
+      "fallback_enabled": true,
+      "confidence_thresholds": {
+        "auto_accept_min": 0.9,
+        "review_min": 0.6,
+        "reject_max": 0.4
+      }
+    }
+  }
+}

@@ -507,6 +507,9 @@ def build_work_item(
             "replay": dict(envelope.replay),
             "raw_record": dict(raw_record),
             "ingress_envelope": ingress_envelope,
+            "ingress_policy": {
+                "reject_mixed_reports": True,
+            },
         },
     )
 

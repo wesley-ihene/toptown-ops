@@ -759,6 +759,8 @@ def _suppress_replay_side_effects(rejected_capture: RejectedCapture):
         attempted_agent,
         attempted_branch_hint,
         exception_message,
+        policy_decision=None,
+        **kwargs,
     ):
         rejected_capture.rejection_reason = rejection_reason
         rejected_capture.attempted_report_type = attempted_report_type

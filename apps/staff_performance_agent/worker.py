@@ -40,13 +40,17 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         )
 
     parsed = parse_work_item(work_item)
-    result = _build_result(parsed)
+    result = build_staff_performance_result(parsed)
     write_structured_record(result.payload)
     return result
 
 
-def _build_result(parsed: ParsedStaffPerformanceReport) -> AgentResult:
-    """Return one structured staff performance agent result."""
+def build_staff_performance_result(
+    parsed: ParsedStaffPerformanceReport,
+    *,
+    source_agent: str = AGENT_NAME,
+) -> AgentResult:
+    """Return one structured staff-performance result for the owning agent."""
 
     figures, figure_warnings = summarize_performance(
         parsed.records,
@@ -60,11 +64,11 @@ def _build_result(parsed: ParsedStaffPerformanceReport) -> AgentResult:
     status = _determine_status(parsed=parsed, warnings=warnings, confidence=confidence)
 
     return AgentResult(
-        agent_name=AGENT_NAME,
+        agent_name=source_agent,
         payload={
             "signal_type": SIGNAL_TYPE,
             "signal_subtype": "staff_performance",
-            "source_agent": AGENT_NAME,
+            "source_agent": source_agent,
             "branch": parsed.branch_slug or parsed.branch,
             "report_date": parsed.report_date,
             "confidence": confidence,

@@ -63,6 +63,7 @@ def test_live_webhook_writes_raw_then_invokes_orchestrator(
     work_item = captured_work_items[0]
     assert work_item.kind == "raw_message"
     assert "classification" not in work_item.payload
+    assert work_item.payload["ingress_policy"] == {"reject_mixed_reports": True}
     assert work_item.payload["replay"] == {"is_replay": False}
     assert work_item.payload["raw_record"]["raw_written"] is True
     assert work_item.payload["ingress_envelope"]["payload"]["text"] == "DAY-END SALES REPORT\nBranch: Waigani"
@@ -238,6 +239,62 @@ def test_orchestrator_exception_preserves_raw_record(
     assert body["orchestrator_status"] == "failed"
     assert body["error_stage"] == "orchestrator"
     assert raw_text_paths[0].read_text(encoding="utf-8") == "DAY-END SALES REPORT\nBranch: Waigani"
+
+
+def test_live_webhook_rejects_mixed_report_upstream(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(
+            _meta_payload(
+                message_id="wamid.mixed-1",
+                text="\n".join(
+                    [
+                        "Branch: Waigani Branch",
+                        "Date: 07/04/2026",
+                        "",
+                        "DAY-END SALES REPORT",
+                        "Gross Sales: 1200",
+                        "Cash Sales: 600",
+                        "",
+                        "SUPERVISOR CONTROL REPORT",
+                        "Floor Check: Passed",
+                    ]
+                ),
+            )
+        ).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    rejected_text_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "unknown", "*.txt")
+    rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "unknown", "*.meta.json")
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["agent"] == "orchestrator_agent"
+    assert body["orchestrator_status"] == "needs_review"
+    assert body["route"] == "mixed"
+    assert body["outputs"] == []
+    assert len(raw_meta_paths) == 1
+    assert len(rejected_text_paths) == 1
+    assert len(rejected_meta_paths) == 1
+    assert not (tmp_path / "records" / "structured").exists()
+
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "mixed"
+    assert raw_meta["routing_target"] is None
+    assert raw_meta["processing_status"] == "needs_review"
+    assert raw_meta["routing_review_reason"] == "mixed_reports_rejected_upstream"
+
+    rejected_meta = _read_json(rejected_meta_paths[0])
+    assert rejected_meta["rejection_reason"] == "mixed_report"
+    assert rejected_meta["attempted_report_type"] == "mixed"
 
 
 def test_health_endpoint_returns_bridge_status(
