@@ -20,6 +20,7 @@ __pycache__/
 .codex
 .env*
 
+records/
 records/raw/
 records/rejected/
 logs/

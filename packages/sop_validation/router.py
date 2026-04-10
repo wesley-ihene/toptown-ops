@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from packages.common.branch import canonical_branch_slug
-from packages.common.date import normalize_report_date
+from packages.normalization.branches import normalize_branch
+from packages.normalization.dates import normalize_report_date
 
 from .attendance import validate_attendance
 from .bale_release import validate_bale_release
@@ -74,20 +74,25 @@ def normalize_report_payload(payload: Mapping[str, Any]) -> tuple[dict[str, Any]
 
     branch = payload.get("branch")
     if isinstance(branch, str) and branch.strip():
-        normalized_branch = canonical_branch_slug(branch)
+        branch_result = normalize_branch(branch)
+        normalized_branch = branch_result.normalized_value or branch.strip()
         normalized_payload["branch"] = normalized_branch
         normalization["branch"] = {
             "raw": branch,
             "normalized": normalized_branch,
+            "confidence": branch_result.confidence,
+            "matched_alias": branch_result.metadata.get("matched_alias"),
         }
 
     report_date = payload.get("report_date")
     if isinstance(report_date, str) and report_date.strip():
-        normalized_date = normalize_report_date(report_date)
+        date_result = normalize_report_date(report_date)
+        normalized_date = date_result.normalized_value or report_date.strip()
         normalized_payload["report_date"] = normalized_date
         normalization["report_date"] = {
             "raw": report_date,
             "normalized": normalized_date,
+            "confidence": date_result.confidence,
         }
 
     return normalized_payload, normalization

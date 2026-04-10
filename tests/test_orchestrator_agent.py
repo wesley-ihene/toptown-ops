@@ -139,6 +139,103 @@ def test_orchestrator_routes_live_staff_performance_message_with_resolved_metada
     assert result.payload["status"] == "accepted_with_warning"
 
 
+def test_orchestrator_routes_live_sales_message_with_recoverable_date_formatting(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _live_sales_income_text()},
+                "metadata": {
+                    "received_at": "2026-04-10T09:43:59Z",
+                    "sender": "live-sales",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "sales_income"
+    assert raw_meta["branch_hint"] == "lae_5th_street"
+    assert raw_meta["routing_target"] == "sales_income_agent"
+    assert raw_meta["resolved_report_date"] == "2026-04-10"
+    assert raw_meta["processing_status"] == "ready"
+
+    structured_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-04-10.json"
+    assert structured_path.exists()
+    structured_payload = _read_json(structured_path)
+    assert structured_payload["source_agent"] == "sales_income_agent"
+    assert structured_payload["branch"] == "lae_5th_street"
+    assert structured_payload["report_date"] == "2026-04-10"
+    assert structured_payload["status"] == "ready"
+    assert structured_payload["metrics"]["gross_sales"] == 1200.0
+    assert structured_payload["metrics"]["eftpos_sales"] == 500.0
+
+    assert result.agent_name == "sales_income_agent"
+    assert result.payload["signal_type"] == "sales_income"
+    assert result.payload["branch"] == "lae_5th_street"
+    assert result.payload["report_date"] == "2026-04-10"
+    assert result.payload["status"] == "ready"
+
+
+def test_orchestrator_routes_recoverable_sales_message_with_messy_money_and_aliases(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {
+                    "text": "\n".join(
+                        [
+                            "DAY end sales report",
+                            "Shop: TTC LAE 5TH STREET BRANCH",
+                            "Date: Friday, 10/04 /26",
+                            "Total Sales: K3,489. 00",
+                            "Cash Sales: 1 236.00",
+                            "Card Sales: 2 253.00",
+                            "Main Door: 43",
+                            "Customers Served: 20",
+                        ]
+                    )
+                },
+                "metadata": {
+                    "received_at": "2026-04-10T09:43:59Z",
+                    "sender": "live-sales-normalized",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "sales_income"
+    assert raw_meta["branch_hint"] == "lae_5th_street"
+    assert raw_meta["resolved_report_date"] == "2026-04-10"
+    assert raw_meta["processing_status"] == "ready"
+
+    structured_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-04-10.json"
+    assert structured_path.exists()
+    structured_payload = _read_json(structured_path)
+    assert structured_payload["metrics"]["gross_sales"] == 3489.0
+    assert structured_payload["metrics"]["cash_sales"] == 1236.0
+    assert structured_payload["metrics"]["eftpos_sales"] == 2253.0
+
+    assert result.payload["status"] == "ready"
+
+
 def test_orchestrator_unknown_message_writes_rejected_copy_but_keeps_raw_archive(
     tmp_path: Path,
     monkeypatch,
@@ -405,6 +502,59 @@ def test_orchestrator_rejects_mixed_report_when_ingress_policy_requires_single_r
     assert specialist_calls == 0
 
 
+def test_orchestrator_mixed_report_goes_to_review_when_safe_split_is_not_possible(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    class FakeSplitResult:
+        def __init__(self) -> None:
+            self.segments = []
+            self.common_prefix_lines = []
+            self.split_confidence = 0.4
+
+    monkeypatch.setattr(
+        "apps.orchestrator_agent.worker.split_report",
+        lambda text, detection: FakeSplitResult(),
+    )
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _mixed_sales_and_performance_text()},
+                "metadata": {
+                    "received_at": "2026-04-07T13:00:00Z",
+                    "sender": "mixed-review-smoke",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "unknown", "*.meta.json")
+
+    assert len(raw_meta_paths) == 1
+    assert len(rejected_meta_paths) == 0
+    assert not (tmp_path / "records" / "structured").exists()
+
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "mixed"
+    assert raw_meta["routing_target"] is None
+    assert raw_meta["processing_status"] == "needs_review"
+    assert raw_meta["routing_review_reason"] == "mixed_report_split_not_safe"
+    assert raw_meta["split_child_count"] == 0
+
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["classification"]["report_type"] == "mixed"
+    assert result.payload["routing"]["route_reason"] == "mixed_report_requires_review"
+    assert result.payload["status"] == "needs_review"
+    assert result.payload["warnings"][0]["code"] == "mixed_split_review"
+
+
 def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
     tmp_path: Path,
     monkeypatch,
@@ -478,6 +628,178 @@ def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
     assert second_result.payload["status"] == "needs_review"
     assert second_result.payload["warnings"][0]["code"] == "duplicate_message"
     assert second_result.payload["policy_guard"]["reason"] == "duplicate_message"
+
+
+def test_orchestrator_routes_actual_backlog_attendance_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _backlog_attendance_text()},
+                "metadata": {
+                    "received_at": "2026-04-06T09:43:59Z",
+                    "sender": "backlog-attendance",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "attendance"
+    assert raw_meta["branch_hint"] == "lae_5th_street"
+    assert raw_meta["routing_target"] == "hr_agent"
+    assert raw_meta["resolved_report_date"] == "2026-04-05"
+    assert raw_meta["processing_status"] == "needs_review"
+
+    rejected_unknown_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "unknown", "*.meta.json")
+    assert rejected_unknown_paths == []
+    review_paths = _paths(tmp_path / "records" / "review" / "2026_04_05" / "lae_5th_street" / "staff_attendance", "*.json")
+    assert len(review_paths) == 1
+
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["classification"]["report_type"] == "attendance"
+    assert result.payload["status"] == "needs_review"
+    assert result.payload["fallback"]["normalized_report"]["branch"] == "lae_5th_street"
+    assert result.payload["fallback"]["normalized_report"]["report_date"] == "2026-04-05"
+    assert result.payload["fallback"]["normalized_report"]["metrics"]["total_staff_listed"] >= 17
+
+
+def test_orchestrator_routes_actual_backlog_staff_performance_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _backlog_staff_performance_text()},
+                "metadata": {
+                    "received_at": "2026-04-07T09:43:59Z",
+                    "sender": "backlog-performance",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "staff_performance"
+    assert raw_meta["branch_hint"] == "lae_malaita"
+    assert raw_meta["routing_target"] == "hr_agent"
+    assert raw_meta["resolved_report_date"] == "2026-04-07"
+
+    structured_path = tmp_path / "records" / "structured" / "hr_performance" / "lae_malaita" / "2026-04-07.json"
+    assert structured_path.exists()
+
+    structured_payload = _read_json(structured_path)
+    assert structured_payload["branch"] == "lae_malaita"
+    assert structured_payload["report_date"] == "2026-04-07"
+    assert len(structured_payload["items"]) >= 19
+    assert structured_payload["status"] in {"accepted_with_warning", "ready", "needs_review"}
+
+    assert result.agent_name == "hr_agent"
+    assert result.payload["branch"] == "lae_malaita"
+    assert result.payload["report_date"] == "2026-04-07"
+
+
+def test_orchestrator_routes_actual_backlog_pricing_stock_release_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _backlog_bale_release_text()},
+                "metadata": {
+                    "received_at": "2026-04-06T09:43:59Z",
+                    "sender": "backlog-bale-release",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "pricing_stock_release"
+    assert raw_meta["branch_hint"] == "waigani"
+    assert raw_meta["routing_target"] == "pricing_stock_release_agent"
+    assert raw_meta["resolved_report_date"] == "2026-04-06"
+
+    structured_path = tmp_path / "records" / "structured" / "pricing_stock_release" / "waigani" / "2026-04-06.json"
+    assert structured_path.exists()
+    assert not (tmp_path / "records" / "structured" / "pricing_stock_release" / "ttc_pom_waigani_branch" / "2026-04-06.json").exists()
+
+    structured_payload = _read_json(structured_path)
+    assert structured_payload["branch"] == "waigani"
+    assert structured_payload["report_date"] == "2026-04-06"
+    assert structured_payload["metrics"]["total_qty"] == 428
+    assert structured_payload["metrics"]["total_amount"] == 3282.0
+
+    assert result.agent_name == "pricing_stock_release_agent"
+    assert result.payload["branch"] == "waigani"
+    assert result.payload["report_date"] == "2026-04-06"
+
+
+def test_orchestrator_splits_actual_backlog_sales_and_supervisor_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _backlog_mixed_sales_and_supervisor_text()},
+                "metadata": {
+                    "received_at": "2026-04-10T09:43:59Z",
+                    "sender": "backlog-mixed",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "mixed"
+    assert raw_meta["routing_target"] == "fan_out"
+    assert raw_meta["split_child_count"] == 2
+    assert raw_meta["split_child_report_types"] == ["sales_income", "supervisor_control"]
+    assert raw_meta["processing_status"] in {"accepted_split", "accepted_with_warning"}
+
+    sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-10.json"
+    supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-10.json"
+    assert sales_path.exists()
+    assert supervisor_path.exists()
+    assert not (tmp_path / "records" / "structured" / "sales_income" / "ttc_waigani_branch" / "2026-04-10.json").exists()
+
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["classification"]["report_type"] == "mixed"
+    assert result.payload["status"] in {"accepted_split", "accepted_with_warning"}
+    assert len(result.payload["fanout"]["children"]) == 2
+    assert result.payload["output_paths"] == [
+        "records/structured/sales_income/waigani/2026-04-10.json",
+        "records/structured/supervisor_control/waigani/2026-04-10.json",
+    ]
 
 
 def test_orchestrator_persists_fallback_eligibility_by_report_type_in_raw_metadata(
@@ -654,6 +976,75 @@ def test_orchestrator_strict_parse_failure_invokes_fallback(
     assert result.payload["fallback"]["parse_mode"] == "fallback"
 
 
+def test_orchestrator_strict_needs_review_invokes_fallback_before_final_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    fallback_calls = 0
+
+    def fake_dispatch(work_item, *, target_agent):
+        return AgentResult(
+            agent_name=target_agent,
+            payload={
+                "status": "needs_review",
+                "warnings": [{"code": "needs_review", "severity": "warning", "message": "strict parse needs review"}],
+            },
+        )
+
+    def fake_fallback(work_item):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return AgentResult(
+            agent_name="fallback_extraction_agent",
+            payload={
+                "signal_type": "fallback_extraction",
+                "source_agent": "fallback_extraction_agent",
+                "report_type": "sales",
+                "parse_mode": "fallback",
+                "confidence": 0.95,
+                "warnings": [],
+                "provenance": {"source": "test"},
+                "normalized_report": {
+                    "branch": "waigani",
+                    "report_date": "2026-04-07",
+                    "metrics": {
+                        "gross_sales": 1200.0,
+                        "cash_sales": 700.0,
+                        "eftpos_sales": 500.0,
+                        "traffic": 12,
+                        "served": 10,
+                    },
+                    "items": [],
+                },
+                "status": "extracted",
+            },
+        )
+
+    monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+    monkeypatch.setattr("apps.orchestrator_agent.worker.process_fallback_extraction_work_item", fake_fallback)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_report_text()},
+                "metadata": {
+                    "received_at": "2026-04-07T11:00:00Z",
+                    "sender": "strict-needs-review",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    assert fallback_calls == 1
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["status"] == "ready"
+    assert result.payload["fallback"]["acceptance"]["decision"] == "accept"
+
+
 def test_orchestrator_valid_fallback_output_proceeds_to_validation(
     tmp_path: Path,
     monkeypatch,
@@ -697,6 +1088,131 @@ def test_orchestrator_valid_fallback_output_proceeds_to_validation(
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["fallback_parse_mode"] == "fallback"
     assert raw_meta["fallback_validation"]["accepted"] is True
+
+
+def test_orchestrator_fallback_validation_uses_normalized_report_date(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    def fake_dispatch(work_item, *, target_agent):
+        return AgentResult(
+            agent_name=target_agent,
+            payload={
+                "status": "invalid_input",
+                "warnings": [{"code": "missing_fields", "severity": "error", "message": "strict parse failed"}],
+            },
+        )
+
+    monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {
+                    "text": "\n".join(
+                        [
+                            "DAY end sales report",
+                            "Shop: TTC LAE 5TH STREET BRANCH",
+                            "Date: Friday, 10/04 /26",
+                            "Total Sales: 1200",
+                            "Cash Sales: 700",
+                            "Card Sales: 500",
+                            "Main Door: 15",
+                            "Customers Served: 12",
+                        ]
+                    )
+                },
+                "metadata": {
+                    "received_at": "2026-04-10T09:43:59Z",
+                    "sender": "fallback-date-normalized",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+
+    assert result.payload["status"] == "needs_review"
+    assert result.payload["fallback"]["validation"]["accepted"] is True
+    assert result.payload["fallback"]["normalized_report"]["report_date"] == "2026-04-10"
+
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["normalized_report_date"] == "2026-04-10"
+    assert raw_meta["raw_report_date"] == "10/04 /26"
+    assert raw_meta["fallback_validation"]["accepted"] is True
+
+
+def test_orchestrator_strict_needs_review_is_not_rejected_when_fallback_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    fallback_calls = 0
+
+    def fake_dispatch(work_item, *, target_agent):
+        return AgentResult(
+            agent_name=target_agent,
+            payload={
+                "status": "needs_review",
+                "warnings": [{"code": "needs_review", "severity": "warning", "message": "strict parse needs review"}],
+            },
+        )
+
+    def fake_fallback(work_item):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return AgentResult(
+            agent_name="fallback_extraction_agent",
+            payload={
+                "signal_type": "fallback_extraction",
+                "source_agent": "fallback_extraction_agent",
+                "report_type": "sales",
+                "parse_mode": "fallback",
+                "confidence": 0.2,
+                "warnings": [],
+                "provenance": {"source": "test"},
+                "normalized_report": {
+                    "branch": "",
+                    "report_date": "bad-date",
+                    "metrics": {},
+                    "items": [],
+                },
+                "status": "extracted",
+            },
+        )
+
+    monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+    monkeypatch.setattr("apps.orchestrator_agent.worker.process_fallback_extraction_work_item", fake_fallback)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_report_text()},
+                "metadata": {
+                    "received_at": "2026-04-07T11:00:00Z",
+                    "sender": "strict-review-fallback-fails",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "sales", "*.meta.json")
+
+    assert fallback_calls == 1
+    assert result.agent_name == "sales_income_agent"
+    assert result.payload["status"] == "needs_review"
+    assert len(rejected_meta_paths) == 0
+
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["processing_status"] == "needs_review"
 
 
 def test_orchestrator_high_confidence_fallback_is_accepted_for_allowed_report_type(
@@ -1079,6 +1595,278 @@ def _live_staff_performance_text() -> str:
     )
 
 
+def _backlog_attendance_text() -> str:
+    return "\n".join(
+        [
+            "TTC LAE ",
+            "5th Street branch ",
+            "Monday 05/04/2026",
+            "",
+            "Staffs  Attendance",
+            "",
+            "1. Marryane Sakias =✔️",
+            "2. ⁠Imelda Patrick = ✔️",
+            "3. ⁠Merolyne Tobby = Off",
+            "4. ⁠George Andau = ✔️",
+            "5. ⁠Cloe Wofinga =On leave",
+            "6. ⁠ Doil Wai-ah=  Off",
+            "7. ⁠Donock Levi = ✔️",
+            "8. ⁠Joyice Andrew = Off",
+            "9. ⁠Jackson Kuri = ✔️",
+            "10. ⁠Jennifer Golomb = ✔️",
+            "11. ⁠Sheeba I=✔️",
+            "12. ⁠Lieb Yawano = ✔️ ",
+            "13. ⁠Hazel Arumbu = ✔️",
+            "14. Anuty Mina = ✔️",
+            "15. Joyce Lovave =✔️",
+            "16. Sandra Daniel = Absent with notice",
+            "17. ⁠Joycelyn Alu = ✔️",
+            "",
+            "Total Staffs present = 12",
+            " Staffs day off = 3",
+            "Staffs on leavebreak =1",
+            "Staffs suspend =Nill ",
+            "Staffs late = Nill",
+            "Staffs Absent with notice = 1",
+            "Staffs Absent without =Nill ",
+            "Staffs sick =Nill ",
+            "Staffs Lay off =Nill ",
+            "",
+            "Total Staffs =17",
+            "",
+            "Note ",
+            "1. Cleo Wofinga on her annual leave break ",
+            "2. ⁠Sandra Daniel: Absent with notice because of some personal/family problem.",
+            "",
+            "Thanks",
+        ]
+    )
+
+
+def _backlog_bale_release_text() -> str:
+    return "\n".join(
+        [
+            "📦 DAILY BALE SUMMARY – RELEASED TO RAIL",
+            "",
+            "Branch: TTC POM Waigani Branch.",
+            " ",
+            "Date: 06/04/26",
+            "Monday.",
+            "",
+            "Bale #\tItem Name\tTotal Qty (pcs)\tTotal Amount (K)",
+            "",
+            "#01.OSH 45kg",
+            "(Qty:229) ",
+            " Amt:K2,089.00",
+            "",
+            "#02.Soft Toys 10kg",
+            "(Qty:46)",
+            "Amt:K392.00",
+            "",
+            "#03.Ladies t-shirt XL creme 39kg",
+            "(Qty.153)",
+            "Amt:K801.00",
+            "",
+            "",
+            "Total bales break today Five(05)",
+            "Three(03) bales released for sales,",
+            "Two (02) bales waiting for approval.",
+            "",
+            "Total quantity:428pcs",
+            "",
+            "Total Amount: K3,281.00",
+            "",
+            "Prepared by:Moviyo Alex(Pricing Clerk)",
+            "",
+            "Thanks.",
+        ]
+    )
+
+
+def _backlog_staff_performance_text() -> str:
+    return "\n".join(
+        [
+            "TTC LAE MALAITA BRANCH",
+            "TUESDAY 07 /04/26",
+            "",
+            "➡️STAFF PEFORMANCE RATING, CUSTOMER ASSISTS &  ITEMS SOLD... ",
+            "",
+            "1..Debra Aegobi -Off",
+            "SECTION.. Kids Girl shirt, Baby Overall, kids Girls and Baby pants.  ",
+            "🔹Total items moved (-) ",
+            "🔹Assist  (-) ",
+            "",
+            "2..Rodah Paku - 4",
+            "SECTION..Kids Girls Dress, Jumpsuit, kids Polo t-shirt ",
+            "🔹Total items Moved (51) ",
+            "🔹Assist (07) ",
+            "",
+            "3..Julie Yorkie- 5 (Cashier )",
+            "SECTION (Vacant).. Shoe Shop- Shoes, Handbags, Shopping bags ",
+            "🔹Total items moved (-) ",
+            "🔹Assist(-)",
+            "",
+            "4..Rodah  Frank - 5",
+            "SECTION.. Price Room - Sales Tally ",
+            "🔹Total items moved (-) ",
+            "🔹Assist (-) ",
+            "",
+            "5..Jesina Poknga -5",
+            "SECTION.. Ladies Jeans, Rip Jeans,Skinny Jeans",
+            "🔹Total items moved (37)",
+            "🔹Assist(14)",
+            "",
+            "6..Nathan Moti - Sick",
+            "SECTION.. , Beach wear sports wear,Jackets",
+            "🔹Total items moved (-) ",
+            "🔹Assist (-) ",
+            "",
+            "7.Matthew Manu -4",
+            "SECTION.. Reflectors, workwear, Men's button shirt, Socks ",
+            "🔹Total items moved (24) ",
+            "🔹Assist (19) ",
+            "",
+            "8.. Pison Orie -Off",
+            "SECTION.. Ladies Tshirt, Ladies Long Dress, Crop Top, Singlet",
+            "🔹Total items moved (-) ",
+            "🔹Assist(-) ",
+            "",
+            "9...Herish Waizepa - 4",
+            "SECTION.. Men's Jeans, Camouflage, Kids Girls Jeans ",
+            "🔹Total items moved (30) ",
+            "🔹Assist (12) ",
+            "",
+            "10..Medlyn Sehamo - Off",
+            "SECTION.. Men's T-shirt, Household Rummage ",
+            "🔹Total items moved (-) ",
+            "🔹Assist(-) ",
+            "",
+            "11.Movzii Tuwasa -Off",
+            "SECTION.. Kids Boy Pants, Kids Shorts, Comforter",
+            "🔹Total items moved (-) ",
+            "🔹Assist (-)",
+            "",
+            "",
+            "12 ..Amos Waizepo - 4",
+            "SECTION.. Ladies Jackets,Teregal Dress, HHR",
+            "🔹Total items moved (31) ",
+            "🔹Assist (11) ",
+            "",
+            "13 . Samson Billy - 5",
+            "SECTION.. Door Man (Made sales for items on display at doorway)",
+            "🔹Total items moved (-) ",
+            "🔹Assist (-) ",
+            "",
+            "14..Raymond Koyem -Off",
+            "SECTION.. Doorman (Made sales for items on display at doorway)",
+            "Items: -",
+            "Assist: -",
+            "",
+            "15. Tabitha Lonobin -5",
+            " SECTION - Men's Tshirt,Jackets",
+            "Items: 29",
+            "Asssist: 07",
+            "",
+            "16.Shandy Essau - Off",
+            "SECTION. Ladies Silk Blouse, Ladies T-Shirt,Crop top, Ladies Skirt ",
+            "Item:-",
+            "Assist: -",
+            "",
+            "17.Dorish Molong -3",
+            "SECTION. Ladies Cotton Capri, Ladies Colour Jeans, Cotton Pants ",
+            "Items:31",
+            "Assist: 13",
+            "",
+            "18.Gizard Joe - 4",
+            "SECTION, Men's Shorts ",
+            "Items: 25",
+            "Assist: 12",
+            "",
+            "19.Nason Mapia -5",
+            "SECTION. Ladies Jeans, Men's Cotton Pants, Ladies Leggings ",
+            "Items: 11",
+            "Assists:07",
+            "",
+            "20.Julie Yorkie (Cashier)(Slow moving bale- special price) Pricing- Rhoda Frank",
+            "Items Sold: -",
+            "",
+            "Staff who work in price room:",
+            "1.Kerry Iki ",
+            "2.Abilen Yawano ",
+            "3.Willmah Langa ",
+            "4.Rhoda Frank (Work on slow moving bale)",
+            "5.Renate Norman-- Till Assistant ",
+            "",
+            "THANKS...",
+        ]
+    )
+
+
+def _backlog_mixed_sales_and_supervisor_text() -> str:
+    return "\n".join(
+        [
+            "TTC WAIGANI ",
+            "Date: Friday 10/04/2026",
+            "",
+            "DAY-END SALES REPORT",
+            "Till#1: Main Shop",
+            "Cashier: Fidelma Wobiro",
+            "Assistant: Privien/Anita",
+            "",
+            "T/Cash:K3,005.00",
+            "T/Card: K841.00",
+            "Z/Reading: K3,846.00",
+            "Balance: Yes",
+            "",
+            "DAY-END SALES REPORT",
+            "Till#2: ",
+            "Cashier: Dorothy Morofa",
+            "Assistant: David",
+            "",
+            "T/Cash:K2,845.80",
+            "T/Card: K929.80",
+            "Z/Reading: K3,775.60",
+            "Balance: Yes",
+            "",
+            "TOTALS",
+            "Total Cash: K5,850.80",
+            "Total Card: K1,770.80",
+            "Total Sales: K7,620.60",
+            "",
+            "CUSTOMER COUNT",
+            "Main Door: 355",
+            "Guest/customer serve: 192",
+            "",
+            "Balanced by: Privien",
+            "",
+            "ADDITIONAL INFORMATION. ",
+            "",
+            "*Sales per labor hours =K229.50",
+            "",
+            "*Sale per customer:= K39.70",
+            "",
+            "*Conversion rate:= 54%",
+            "",
+            "--------------------------------",
+            "",
+            "Supervisor Control Summary",
+            "Date: Friday 10/04/26",
+            "Branch: Waigani",
+            "Supervisor: Privien (acting)",
+            "",
+            "Cash variance: No",
+            "Staffing issues: No",
+            "Stock issues affecting sales: No",
+            "Pricing or system issues:NO ",
+            "",
+            "Exceptions escalated to Ops Manager: ",
+            "",
+            "Supervisor confirmation:",
+            "All material issues have been escalated.",
+        ]
+    )
+
+
 def _mixed_sales_and_performance_text() -> str:
     return "\n".join(
         [
@@ -1116,6 +1904,25 @@ def _sales_report_text() -> str:
             "Traffic: 24",
             "Served: 19",
             "Cashier: Alice",
+        ]
+    )
+
+
+def _live_sales_income_text() -> str:
+    return "\n".join(
+        [
+            "TTC LAE 5TH STREET BRANCH",
+            "Friday, 10/04 /26",
+            "",
+            "DAY end sales report",
+            "Shop: Lae 5th Street Branch",
+            "Date: Friday, 10/04 /26",
+            "Total Sales: 1200",
+            "Cash Sales: 700",
+            "Card Sales: 500",
+            "Main Door: 15",
+            "Customers Served: 12",
+            "Remark: Balanced and checked",
         ]
     )
 

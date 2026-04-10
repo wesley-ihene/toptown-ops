@@ -92,13 +92,23 @@ def dispatch_http_request(
 
     parsed = urlparse(target)
     path = parsed.path or "/"
+    request_headers = headers or {}
+
+    LOGGER.info(
+        "bridge request received: method=%s path=%s body_bytes=%s user_agent=%s forwarded_for=%s",
+        method,
+        path,
+        len(body),
+        _header_value(request_headers, "User-Agent"),
+        _header_value(request_headers, "X-Forwarded-For"),
+    )
 
     if method == "GET" and path == HEALTH_ROUTE:
         return _json_response(HTTPStatus.OK, _health_payload())
     if method == "GET" and path in SUPPORTED_WEBHOOK_ROUTES:
         return _handle_verification(parsed.query)
     if method == "POST" and path in SUPPORTED_WEBHOOK_ROUTES:
-        return _handle_webhook_post(body=body, headers=headers or {})
+        return _handle_webhook_post(body=body, headers=request_headers)
     return _json_response(
         HTTPStatus.NOT_FOUND,
         {
@@ -174,6 +184,16 @@ def _handle_webhook_post(*, body: bytes, headers: Mapping[str, str]) -> BridgeHt
             },
         )
 
+    payload_summary = _summarize_payload(payload)
+    LOGGER.info(
+        "whatsapp payload summary: object=%s messages=%s statuses=%s unsupported_changes=%s unsupported_message_types=%s",
+        payload_summary["object"],
+        payload_summary["message_count"],
+        payload_summary["status_count"],
+        ",".join(payload_summary["unsupported_change_fields"]) or "none",
+        ",".join(payload_summary["unsupported_message_types"]) or "none",
+    )
+
     try:
         messages = extract_inbound_messages(payload=payload, headers=headers)
     except Exception as exc:
@@ -189,6 +209,13 @@ def _handle_webhook_post(*, body: bytes, headers: Mapping[str, str]) -> BridgeHt
         )
 
     if not messages:
+        LOGGER.info(
+            "whatsapp payload ignored: reason=no_supported_messages messages=%s statuses=%s unsupported_changes=%s unsupported_message_types=%s",
+            payload_summary["message_count"],
+            payload_summary["status_count"],
+            ",".join(payload_summary["unsupported_change_fields"]) or "none",
+            ",".join(payload_summary["unsupported_message_types"]) or "none",
+        )
         return _json_response(
             HTTPStatus.OK,
             {
@@ -349,6 +376,13 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
     replay = envelope.replay
     raw_sha256 = hashlib.sha256(envelope.text.encode("utf-8")).hexdigest()
     message_sha256 = _message_sha256(envelope)
+    LOGGER.info(
+        "processing inbound envelope: message_id=%s replay=%s received_at=%s raw_sha256=%s",
+        envelope.message_id,
+        replay.get("is_replay") is True,
+        envelope.received_at,
+        raw_sha256,
+    )
 
     try:
         raw_record = (
@@ -361,7 +395,13 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             )
         )
     except DuplicateLiveMessage as exc:
-        LOGGER.info("duplicate live WhatsApp message skipped: %s", exc.message_id or exc.raw_sha256)
+        LOGGER.info(
+            "duplicate live WhatsApp message skipped: message_id=%s raw_sha256=%s reason=%s raw_txt_path=%s",
+            exc.message_id,
+            exc.raw_sha256,
+            exc.reason,
+            exc.raw_txt_path,
+        )
         return {
             "ok": True,
             "ingress": INGRESS_NAME,
@@ -381,7 +421,11 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             "outputs": [],
         }
     except Exception as exc:
-        LOGGER.exception("whatsapp raw write failed")
+        LOGGER.exception(
+            "whatsapp raw write failed: message_id=%s raw_sha256=%s",
+            envelope.message_id,
+            raw_sha256,
+        )
         return {
             "ok": False,
             "ingress": INGRESS_NAME,
@@ -424,7 +468,11 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
     try:
         result = orchestrator_worker.process_work_item(work_item)
     except Exception as exc:
-        LOGGER.exception("whatsapp orchestrator dispatch failed")
+        LOGGER.exception(
+            "whatsapp orchestrator dispatch failed: message_id=%s raw_txt_path=%s",
+            envelope.message_id,
+            raw_record.get("raw_txt_path"),
+        )
         return {
             "ok": False,
             "ingress": INGRESS_NAME,
@@ -443,6 +491,16 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             "raw_meta_path": raw_record.get("raw_meta_path"),
             "outputs": [],
         }
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    LOGGER.info(
+        "whatsapp orchestrator dispatch completed: message_id=%s agent=%s status=%s route=%s outputs=%s",
+        envelope.message_id,
+        result.agent_name,
+        payload.get("status"),
+        _route_from_result(result),
+        len(_outputs_from_result(result)),
+    )
 
     return _success_response(
         envelope=envelope,
@@ -508,7 +566,7 @@ def build_work_item(
             "raw_record": dict(raw_record),
             "ingress_envelope": ingress_envelope,
             "ingress_policy": {
-                "reject_mixed_reports": True,
+                "reject_mixed_reports": False,
             },
         },
     )
@@ -534,7 +592,26 @@ def _write_live_raw_record(
         raise duplicate
 
     if raw_txt_path.exists() or raw_meta_path.exists():
-        raise FileExistsError(f"raw audit collision at {raw_txt_path}")
+        raw_txt_path, raw_meta_path = _collision_safe_raw_paths(
+            raw_txt_path=raw_txt_path,
+            message_sha256=message_sha256,
+        )
+        duplicate = _detect_duplicate(
+            envelope=envelope,
+            raw_sha256=raw_sha256,
+            raw_txt_path=raw_txt_path,
+            raw_meta_path=raw_meta_path,
+        )
+        if duplicate is not None:
+            raise duplicate
+        if raw_txt_path.exists() or raw_meta_path.exists():
+            raise FileExistsError(f"raw audit collision at {raw_txt_path}")
+        LOGGER.info(
+            "raw audit path collision resolved: message_id=%s raw_sha256=%s raw_txt_path=%s",
+            envelope.message_id,
+            raw_sha256,
+            raw_txt_path,
+        )
 
     write_text_file(raw_txt_path, envelope.text)
     write_json_file(
@@ -547,6 +624,12 @@ def _write_live_raw_record(
             raw_meta_path=raw_meta_path,
             processing_status="received",
         ),
+    )
+    LOGGER.info(
+        "raw audit written: message_id=%s raw_txt_path=%s raw_meta_path=%s",
+        envelope.message_id,
+        raw_txt_path,
+        raw_meta_path,
     )
     return {
         "raw_written": True,
@@ -805,6 +888,65 @@ def _raw_txt_path(*, envelope: InboundMessageEnvelope, raw_sha256: str) -> Path:
     return get_raw_path(UNKNOWN_BUCKET) / filename
 
 
+def _collision_safe_raw_paths(*, raw_txt_path: Path, message_sha256: str) -> tuple[Path, Path]:
+    """Return a stable fallback raw path when the primary hash path already exists."""
+
+    alternate_txt_path = raw_txt_path.with_name(f"{raw_txt_path.stem}__{message_sha256[:12]}{raw_txt_path.suffix}")
+    return alternate_txt_path, alternate_txt_path.with_suffix(".meta.json")
+
+
+def _summarize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one small summary of the inbound Meta payload shape for logging."""
+
+    summary = {
+        "object": _clean_text(payload.get("object")) or "unknown",
+        "message_count": 0,
+        "status_count": 0,
+        "unsupported_change_fields": [],
+        "unsupported_message_types": [],
+    }
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return summary
+
+    unsupported_change_fields: set[str] = set()
+    unsupported_message_types: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, Mapping):
+                continue
+            field_name = _clean_text(change.get("field")) or "unknown"
+            value = change.get("value")
+            if not isinstance(value, Mapping):
+                unsupported_change_fields.add(field_name)
+                continue
+            messages = value.get("messages")
+            statuses = value.get("statuses")
+            saw_supported_block = False
+            if isinstance(messages, list):
+                saw_supported_block = True
+                for message in messages:
+                    if not isinstance(message, Mapping):
+                        continue
+                    summary["message_count"] += 1
+                    if _extract_meta_text(message) is None:
+                        unsupported_message_types.add(_clean_text(message.get("type")) or "unknown")
+            if isinstance(statuses, list):
+                saw_supported_block = True
+                summary["status_count"] += len(statuses)
+            if not saw_supported_block:
+                unsupported_change_fields.add(field_name)
+
+    summary["unsupported_change_fields"] = sorted(unsupported_change_fields)
+    summary["unsupported_message_types"] = sorted(unsupported_message_types)
+    return summary
+
+
 def _message_sha256(envelope: InboundMessageEnvelope) -> str:
     """Return a stable hash of the normalized inbound message envelope."""
 
@@ -971,8 +1113,8 @@ def main() -> int:
     """Run the live webhook bridge server."""
 
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-    host = os.getenv("WHATSAPP_WEBHOOK_HOST", DEFAULT_HOST)
-    port = int(os.getenv("WHATSAPP_WEBHOOK_PORT", os.getenv("PORT", str(DEFAULT_PORT))))
+    host = os.getenv("WHATSAPP_WEBHOOK_HOST", os.getenv("WHATSAPP_BRIDGE_HOST", DEFAULT_HOST))
+    port = int(os.getenv("WHATSAPP_WEBHOOK_PORT", os.getenv("WHATSAPP_BRIDGE_PORT", os.getenv("PORT", str(DEFAULT_PORT)))))
     server = ThreadingHTTPServer((host, port), WhatsAppWebhookHandler)
     LOGGER.info("listening on %s:%s", host, port)
     try:

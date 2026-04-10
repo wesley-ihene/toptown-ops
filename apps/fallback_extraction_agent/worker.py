@@ -8,8 +8,10 @@ import hashlib
 import re
 from typing import Any
 
-from packages.common.branch import canonical_branch_slug
-from packages.common.date import normalize_report_date
+from packages.normalization.branches import normalize_branch
+from packages.normalization.dates import normalize_report_date
+from packages.normalization.engine import normalize_report
+from packages.normalization.numbers import normalize_decimal
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
 
@@ -24,6 +26,11 @@ _SUPPORTED_REPORT_TYPES = {
 }
 _STATUS_PATTERN = re.compile(r"\b(present|absent|off|leave)\b", flags=re.IGNORECASE)
 _NUMERIC_PATTERN = re.compile(r"-?\d+(?:[.,]\d+)?")
+_ATTENDANCE_ROW_PATTERN = re.compile(
+    r"^\s*(?:\d+[.)-]?\s*)?(?P<name>[^:=]+?)\s*(?:=|[-:])\s*(?P<status>.+?)\s*$",
+    flags=re.IGNORECASE,
+)
+_CHECKMARK_PATTERN = re.compile(r"[✔✅]")
 
 
 @dataclass(slots=True)
@@ -89,9 +96,19 @@ def _extract_report(*, report_type: str, text: str, payload: dict[str, Any]) -> 
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     branch_raw = _extract_labeled_value(lines, "branch") or _branch_hint(payload)
-    report_date_raw = _extract_labeled_value(lines, "date") or _routing_value(payload, "raw_report_date") or _routing_value(payload, "report_date")
-    branch = canonical_branch_slug(branch_raw) if isinstance(branch_raw, str) and branch_raw.strip() else "unknown"
-    report_date = normalize_report_date(report_date_raw) if isinstance(report_date_raw, str) and report_date_raw.strip() else "unknown"
+    report_date_raw = (
+        _routing_value(payload, "raw_report_date")
+        or _extract_labeled_value(lines, "date")
+    )
+    normalized_report_date = (
+        _routing_value(payload, "normalized_report_date")
+        or _routing_value(payload, "report_date")
+    )
+    report_date_source = normalized_report_date or report_date_raw
+    branch_result = normalize_branch(branch_raw) if isinstance(branch_raw, str) and branch_raw.strip() else None
+    date_result = normalize_report_date(report_date_source) if isinstance(report_date_source, str) and report_date_source.strip() else None
+    branch = branch_result.normalized_value if branch_result is not None and branch_result.normalized_value is not None else "unknown"
+    report_date = date_result.normalized_value if date_result is not None and date_result.normalized_value is not None else "unknown"
 
     warnings: list[dict[str, str]] = []
     if branch == "unknown":
@@ -111,7 +128,12 @@ def _extract_report(*, report_type: str, text: str, payload: dict[str, Any]) -> 
         normalized_report = _extract_supervisor_control(lines, branch=branch, report_date=report_date, warnings=warnings)
 
     confidence = _fallback_confidence(normalized_report=normalized_report, warnings=warnings)
-    provenance = _base_provenance(payload, branch_raw=branch_raw, report_date_raw=report_date_raw)
+    provenance = _base_provenance(
+        payload,
+        branch_raw=branch_raw,
+        report_date_raw=report_date_raw,
+        normalized_report_date=report_date if report_date != "unknown" else normalized_report_date,
+    )
     return FallbackExtraction(
         report_type=report_type,
         normalized_report=normalized_report,
@@ -126,8 +148,8 @@ def _extract_sales(lines: list[str], *, branch: str, report_date: str, warnings:
 
     metrics = {
         "gross_sales": _number_from_labels(lines, "gross sales", "total sales", "z reading") or 0.0,
-        "cash_sales": _number_from_labels(lines, "cash sales") or 0.0,
-        "eftpos_sales": _number_from_labels(lines, "eftpos sales", "card sales") or 0.0,
+        "cash_sales": _number_from_labels(lines, "cash sales", "total cash") or 0.0,
+        "eftpos_sales": _number_from_labels(lines, "eftpos sales", "card sales", "total card") or 0.0,
         "mobile_money_sales": _number_from_labels(lines, "mobile money sales") or 0.0,
         "traffic": int(_number_from_labels(lines, "traffic") or 0),
         "served": int(_number_from_labels(lines, "served") or 0),
@@ -193,11 +215,20 @@ def _extract_attendance(lines: list[str], *, branch: str, report_date: str, warn
 
     items: list[dict[str, Any]] = []
     counts = {"present": 0, "absent": 0, "off": 0, "leave": 0}
+    in_notes = False
     for line in lines:
-        match = re.match(r"^(?:\d+[.)-]?\s*)?(?P<name>.+?)\s*[-:]\s*(?P<status>present|absent|off|leave)\b", line, flags=re.IGNORECASE)
+        normalized = line.casefold().strip()
+        if normalized in {"note", "notes", "thanks", "thank you", "thankyou"}:
+            in_notes = True
+            continue
+        if in_notes:
+            continue
+        match = _ATTENDANCE_ROW_PATTERN.match(line)
         if not match:
             continue
-        status = match.group("status").lower()
+        status = _normalize_attendance_status(match.group("status"))
+        if status is None:
+            continue
         items.append({"staff_name": match.group("name").strip(), "status": status})
         counts[status] += 1
     if not items:
@@ -214,6 +245,23 @@ def _extract_attendance(lines: list[str], *, branch: str, report_date: str, warn
         },
         "items": items,
     }
+
+
+def _normalize_attendance_status(raw_status: str) -> str | None:
+    """Return one fallback attendance status for noisy WhatsApp row values."""
+
+    candidate = raw_status.strip().casefold()
+    if not candidate:
+        return None
+    if _CHECKMARK_PATTERN.search(raw_status) or candidate in {"p", "pres", "present"}:
+        return "present"
+    if "off" in candidate:
+        return "off"
+    if "leave" in candidate:
+        return "leave"
+    if "absent" in candidate or "awn" in candidate or "without notice" in candidate or "sick" in candidate:
+        return "absent"
+    return None
 
 
 def _extract_staff_performance(lines: list[str], *, branch: str, report_date: str, warnings: list[dict[str, str]]) -> dict[str, Any]:
@@ -330,9 +378,20 @@ def _raw_text(payload: dict[str, Any]) -> str:
 
     raw_message = payload.get("raw_message")
     if isinstance(raw_message, Mapping):
-        text = raw_message.get("text")
+        text = raw_message.get("normalized_text")
+        if not isinstance(text, str):
+            text = raw_message.get("text")
         if isinstance(text, str):
-            return text
+            stripped = text.strip()
+            if isinstance(raw_message.get("normalized_text"), str):
+                return stripped
+            report_type = _report_type(payload)
+            normalization = normalize_report(
+                stripped,
+                report_family=report_type,
+                routing_context=payload.get("routing") if isinstance(payload.get("routing"), Mapping) else None,
+            )
+            return normalization.normalized_text or stripped
     return ""
 
 
@@ -362,10 +421,12 @@ def _routing_value(payload: dict[str, Any], field_name: str) -> str | None:
 def _extract_labeled_value(lines: list[str], label: str) -> str | None:
     """Return the first `label: value` match from lines."""
 
-    prefix = f"{label.casefold()}:"
     for line in lines:
-        if line.casefold().startswith(prefix):
-            value = line.split(":", 1)[1].strip()
+        if ":" not in line:
+            continue
+        key, value = [part.strip() for part in line.split(":", 1)]
+        normalized_key = key.casefold().replace("_", " ")
+        if normalized_key == label.casefold():
             return value or None
     return None
 
@@ -375,8 +436,11 @@ def _number_from_labels(lines: list[str], *labels: str) -> float | None:
 
     label_set = {label.casefold() for label in labels}
     for line in lines:
-        normalized = line.casefold()
-        if any(normalized.startswith(f"{label}:") for label in label_set):
+        if ":" not in line:
+            continue
+        key, _ = [part.strip() for part in line.split(":", 1)]
+        normalized_key = key.casefold().replace("_", " ")
+        if normalized_key in label_set:
             return _number_from_line(line)
     return None
 
@@ -384,12 +448,12 @@ def _number_from_labels(lines: list[str], *labels: str) -> float | None:
 def _number_from_line(line: str) -> float | None:
     """Return the first numeric token from a line."""
 
-    matches = _NUMERIC_PATTERN.findall(line.replace(",", ""))
-    if not matches:
+    candidate = line.split(":", 1)[1].strip() if ":" in line else line.strip()
+    normalized = normalize_decimal(candidate, allow_percent=True, scalar_from_ratio=True)
+    if not normalized.succeeded or normalized.normalized_value is None:
         return None
-    candidate = matches[-1].replace(",", ".")
     try:
-        return float(candidate)
+        return float(normalized.normalized_value)
     except ValueError:
         return None
 
@@ -405,14 +469,22 @@ def _bale_item(index: int, item_name: str, qty: float | None, amount: float | No
     }
 
 
-def _base_provenance(payload: dict[str, Any], *, branch_raw: str | None, report_date_raw: str | None) -> dict[str, Any]:
+def _base_provenance(
+    payload: dict[str, Any],
+    *,
+    branch_raw: str | None,
+    report_date_raw: str | None,
+    normalized_report_date: str | None = None,
+) -> dict[str, Any]:
     """Return stable fallback provenance fields."""
 
-    text = _raw_text(payload)
+    raw_message = payload.get("raw_message")
+    text = raw_message.get("text") if isinstance(raw_message, Mapping) and isinstance(raw_message.get("text"), str) else ""
     return {
         "raw_text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None,
         "branch_raw": branch_raw,
         "report_date_raw": report_date_raw,
+        "normalized_report_date": normalized_report_date,
         "message_hash": payload.get("message_hash") if isinstance(payload.get("message_hash"), str) else None,
         "routing": dict(payload.get("routing", {})) if isinstance(payload.get("routing"), Mapping) else {},
         "classification": dict(payload.get("classification", {})) if isinstance(payload.get("classification"), Mapping) else {},

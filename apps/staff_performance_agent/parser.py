@@ -20,6 +20,7 @@ from apps.hr_agent.section_resolver import resolve_section
 from apps.hr_agent.staff_identity import duplicate_staff_names
 from apps.hr_agent.warnings import WarningEntry, dedupe_warnings, make_warning
 from apps.staff_status_resolver_agent.worker import resolve_staff_status
+from packages.normalization.engine import normalize_report
 from packages.section_registry import resolve_section_alias
 from packages.signal_contracts.work_item import WorkItem
 
@@ -172,10 +173,20 @@ def _raw_text(payload: dict[str, Any]) -> str:
     raw_message = payload.get("raw_message")
     if not isinstance(raw_message, Mapping):
         return ""
-    text = raw_message.get("text")
+    text = raw_message.get("normalized_text")
+    if not isinstance(text, str):
+        text = raw_message.get("text")
     if not isinstance(text, str):
         return ""
-    return text.strip()
+    stripped = text.strip()
+    if isinstance(raw_message.get("normalized_text"), str):
+        return stripped
+    normalization = normalize_report(
+        stripped,
+        report_family="staff_performance",
+        routing_context=payload.get("routing") if isinstance(payload.get("routing"), Mapping) else None,
+    )
+    return (normalization.normalized_text or stripped).strip()
 
 
 def _parse_performance_block(

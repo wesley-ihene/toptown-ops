@@ -43,8 +43,12 @@ FAMILY_BOUNDARY_HEADERS: Final[dict[str, tuple[str, ...]]] = {
     ),
     "staff_performance": (
         "staff performance report",
+        "staff peformance report",
+        "staff performance rating",
+        "staff peformance rating",
         "staff assisting customers",
         "staff assisting report",
+        "update for staff performance",
     ),
     "staff_sales": (
         "staff sales report",
@@ -54,6 +58,7 @@ FAMILY_BOUNDARY_HEADERS: Final[dict[str, tuple[str, ...]]] = {
     "attendance": (
         "staff attendance report",
         "staff attendance",
+        "staffs attendance",
         "attendance report",
     ),
     "pricing_stock_release": (
@@ -66,6 +71,7 @@ FAMILY_BOUNDARY_HEADERS: Final[dict[str, tuple[str, ...]]] = {
     "supervisor_control": (
         "supervisor control report",
         "supervisor control",
+        "supervisor control summary",
         "supervisor report",
         "supervisor checklist",
         "control report",

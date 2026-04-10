@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 from packages.branch_registry import canonical_branch_slug as canonical_upstream_branch_slug
+from packages.normalization.labels import internal_field_name
 
 SECTION_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     "sales_header": ("sales report", "sales header", "sales summary", "daily sales"),
@@ -47,6 +48,10 @@ def canonical_section_name(value: str) -> str | None:
 
 def canonical_field_name(value: str) -> str | None:
     """Return the canonical field name for a wording variant when recognized."""
+
+    normalized_internal = internal_field_name(value, report_family="sales")
+    if normalized_internal is not None:
+        return normalized_internal
 
     normalized = _normalize(value)
     for canonical_name, aliases in FIELD_ALIASES.items():

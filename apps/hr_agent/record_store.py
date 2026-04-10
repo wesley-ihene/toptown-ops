@@ -68,6 +68,8 @@ def _iso_date_or_none(report_date: str) -> str | None:
     """Return an ISO report date suitable for structured record paths."""
 
     candidate = normalize_report_date(report_date.strip())
+    if candidate is None:
+        return None
     if not _ISO_DATE_PATTERN.fullmatch(candidate):
         return None
     return candidate

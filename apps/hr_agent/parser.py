@@ -7,29 +7,16 @@ from dataclasses import dataclass, field
 import re
 from typing import Any
 
-from packages.common.branch import canonical_branch_slug
-from packages.common.date import normalize_report_date
-from packages.common.normalizer import parse_count
+from apps.hr_agent.date_branch_resolver import normalize_report_date, resolve_branch
+from apps.hr_agent.normalizer import normalize_status, parse_count
 from packages.common.warnings import WarningEntry, dedupe_warnings, make_warning
+from packages.normalization.engine import normalize_report
+from packages.normalization.labels import internal_field_name
 from packages.signal_contracts.work_item import WorkItem
 
 _KEY_VALUE_PATTERN = re.compile(r"^\s*([^:=]+)\s*[:=]\s*(.+?)\s*$")
 _NUMBERED_LINE_PATTERN = re.compile(r"^\s*(\d+)\s*(?:[.)\-:]+|\s)\s*(.+?)\s*$")
-_STATUS_PATTERN = re.compile(r"\b(leave|off|present|absent)\b", flags=re.IGNORECASE)
-_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
-    "branch": ("branch", "shop", "location"),
-    "report_date": ("date", "report date", "attendance date"),
-    "total_staff": ("total staff", "staff total", "headcount", "total headcount"),
-    "notes": ("notes", "note", "remarks", "remark"),
-}
-_SUMMARY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
-    "present": ("present", "p"),
-    "absent": ("absent", "a"),
-    "off": ("off", "off duty"),
-    "leave": ("leave", "annual leave", "anual leave"),
-    "sick": ("sick",),
-    "suspended": ("suspended", "suspend"),
-}
+_STATUS_PATTERN = re.compile(r"\b(leave|off|present|absent|p|sick|suspended|suspend)\b", flags=re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -74,8 +61,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
             field_name, value = metadata
             if field_name == "branch":
                 parsed.raw_branch = value
-                parsed.branch = value
-                parsed.branch_slug = canonical_branch_slug(value)
+                parsed.branch, parsed.branch_slug = resolve_branch(value)
             elif field_name == "report_date":
                 parsed.raw_date = value
                 parsed.report_date = normalize_report_date(value)
@@ -106,7 +92,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
 
         parsed.notes.append(line)
 
-    if not parsed.branch:
+    if not parsed.branch_slug:
         parsed.warnings.append(
             make_warning(
                 code="missing_fields",
@@ -140,15 +126,14 @@ def _parse_metadata_line(line: str) -> tuple[str, Any] | None:
     if match is None:
         return None
 
-    raw_key = _normalize_key(match.group(1))
+    raw_key = match.group(1).strip()
     raw_value = match.group(2).strip()
-
-    for canonical_name, aliases in _FIELD_ALIASES.items():
-        if raw_key in {_normalize_key(alias) for alias in aliases}:
-            if canonical_name == "total_staff":
-                count = parse_count(raw_value)
-                return (canonical_name, count) if count is not None else None
-            return canonical_name, raw_value
+    field_name = internal_field_name(raw_key, report_family="attendance")
+    if field_name == "total_staff":
+        count = parse_count(raw_value)
+        return (field_name, count) if count is not None else None
+    if field_name in {"branch", "report_date", "notes"}:
+        return field_name, raw_value
     return None
 
 
@@ -157,16 +142,14 @@ def _parse_summary_count_line(line: str) -> tuple[str, int] | None:
     if match is None:
         return None
 
-    raw_key = _normalize_key(match.group(1))
+    raw_key = match.group(1).strip()
     raw_value = match.group(2).strip()
     count = parse_count(raw_value)
     if count is None:
         return None
 
-    for canonical_status, aliases in _SUMMARY_FIELD_ALIASES.items():
-        if raw_key in {_normalize_key(alias) for alias in aliases}:
-            return canonical_status, count
-    return None
+    canonical_status, _ = normalize_status(raw_key)
+    return (canonical_status, count) if canonical_status is not None else None
 
 
 def _parse_record_line(line: str) -> ParsedAttendanceRecord | None:
@@ -217,24 +200,25 @@ def _raw_text(payload: dict[str, Any]) -> str:
     raw_message = payload.get("raw_message")
     if not isinstance(raw_message, Mapping):
         return ""
-    text = raw_message.get("text")
+    text = raw_message.get("normalized_text")
+    if not isinstance(text, str):
+        text = raw_message.get("text")
     if not isinstance(text, str):
         return ""
-    return text.strip()
+    stripped = text.strip()
+    if isinstance(raw_message.get("normalized_text"), str):
+        return stripped
+    normalization = normalize_report(
+        stripped,
+        report_family="attendance",
+        routing_context=payload.get("routing") if isinstance(payload.get("routing"), Mapping) else None,
+    )
+    return (normalization.normalized_text or stripped).strip()
 
 
 def _canonical_status(value: str) -> str | None:
-    normalized = _normalize_key(value)
-    for canonical_status, aliases in _SUMMARY_FIELD_ALIASES.items():
-        if normalized in {_normalize_key(alias) for alias in aliases}:
-            return canonical_status
-    if normalized in {"sick", "suspended", "suspend"}:
-        return "absent"
-    if normalized in {"annual leave", "anual leave"}:
-        return "leave"
-    if normalized:
-        return None
-    return None
+    canonical_status, _ = normalize_status(value)
+    return canonical_status
 
 
 def _clean_text(value: str) -> str | None:

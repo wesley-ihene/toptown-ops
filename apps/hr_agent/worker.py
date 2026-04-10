@@ -81,7 +81,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 "signal_type": SIGNAL_TYPE,
                 "signal_subtype": "staff_attendance",
                 "source_agent": AGENT_NAME,
-                "branch": parsed.branch_slug or parsed.branch,
+                "branch": parsed.branch_slug,
                 "report_date": parsed.report_date,
                 "confidence": _compute_confidence(parsed=parsed, warnings=warnings, status=status),
                 "metrics": {
@@ -102,7 +102,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                     for record in parsed.records
                 ],
                 "provenance": {
-                    "branch_text": parsed.branch,
+                    "branch_text": parsed.raw_branch or parsed.branch,
                     "notes": parsed.notes,
                 },
                 "warnings": [warning.to_payload() for warning in warnings],
@@ -231,7 +231,7 @@ def _build_failure_result(
                 },
                 "items": [],
                 "provenance": {
-                    "branch_text": parsed.branch if parsed is not None else None,
+                    "branch_text": (parsed.raw_branch or parsed.branch) if parsed is not None else None,
                     "notes": parsed.notes if parsed is not None else [],
                 },
                 "warnings": [warning.to_payload() for warning in warning_list],

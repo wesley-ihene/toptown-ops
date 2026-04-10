@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 import re
+
+from packages.common.normalizer import parse_count
+from packages.normalization.labels import normalize_label
 
 STATUS_ALIASES: dict[str, tuple[str, ...]] = {
     "present": ("p", "present"),
-    "off": ("off",),
+    "off": ("off", "off duty"),
     "annual_leave": ("anual leave", "annual leave", "leave"),
     "suspended": ("suspend", "suspended"),
     "absent": ("absent",),
@@ -21,20 +23,6 @@ def normalize_text(value: str) -> str:
     return " ".join(value.casefold().replace("_", " ").split())
 
 
-def parse_count(raw_value: str) -> int | None:
-    """Parse an integer count from free-form text."""
-
-    cleaned = raw_value.strip()
-    cleaned = cleaned.replace(",", "")
-    cleaned = re.sub(r"[^0-9.\-]", "", cleaned)
-    if not cleaned:
-        return None
-    try:
-        return int(Decimal(cleaned))
-    except (InvalidOperation, ValueError):
-        return None
-
-
 def clean_name(raw_value: str) -> str | None:
     """Return a cleaned person-name candidate or `None`."""
 
@@ -44,6 +32,19 @@ def clean_name(raw_value: str) -> str | None:
 
 def normalize_status(raw_value: str) -> tuple[str | None, str | None]:
     """Return canonical and raw attendance status values when recognized."""
+
+    label_result = normalize_label(raw_value, report_family="attendance")
+    if label_result.succeeded and label_result.normalized_value is not None:
+        canonical = {
+            "P": "present",
+            "OFF": "off",
+            "LEAVE": "leave",
+            "ABSENT": "absent",
+            "SICK": "absent",
+            "SUSPENDED": "absent",
+        }.get(label_result.normalized_value)
+        if canonical is not None:
+            return canonical, label_result.normalized_value
 
     normalized = normalize_text(raw_value)
     matched_aliases: list[tuple[int, str, str]] = []

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from packages.branch_registry import canonical_branch_slug as canonical_upstream_branch_slug
+from packages.normalization.branches import canonical_branch_slug as canonical_upstream_branch_slug
 
 
 def canonical_branch_slug(value: str) -> str:

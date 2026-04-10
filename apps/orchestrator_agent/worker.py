@@ -47,6 +47,8 @@ from apps.supervisor_control_agent.worker import (
 from packages.record_store.naming import build_rejected_filename, safe_segment
 from packages.record_store.paths import get_raw_path, get_rejected_path, get_structured_path
 from packages.record_store.writer import write_json_file, write_text_file
+from packages.normalization.dates import normalize_report_date
+from packages.normalization.engine import normalize_report
 from packages.report_acceptance import decide_acceptance
 from packages.provenance_store import write_provenance_record
 from packages.report_registry import route_for_family
@@ -59,6 +61,8 @@ AGENT_NAME: Final[str] = "orchestrator_agent"
 RAW_MESSAGE_KIND: Final[str] = "raw_message"
 SIGNAL_TYPE: Final[str] = "routing"
 UNKNOWN_STORAGE_BUCKET: Final[str] = "unknown"
+CLASSIFICATION_CONFIDENCE_MIN_FOR_FALLBACK: Final[float] = 0.45
+MIXED_SPLIT_CONFIDENCE_MIN: Final[float] = 0.85
 
 ClassificationLabel = str
 
@@ -204,7 +208,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 policy_decision=mixed_policy,
             )
         split_result = split_report(raw_audit.raw_text, mixed_detection)
-        if len(split_result.segments) >= 2:
+        if _can_safely_split_mixed_report(mixed_detection=mixed_detection, split_result=split_result):
             return _process_mixed_work_item(
                 work_item,
                 raw_audit=raw_audit,
@@ -212,6 +216,43 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 split_result=split_result,
                 policy_decision=mixed_policy,
             )
+        routing_payload = _build_routing_payload(
+            classification="mixed",
+            target_agent=None,
+            status="needs_review",
+            route_reason="mixed_report_requires_review",
+            branch_hint=raw_audit.branch_hint,
+            confidence=split_result.split_confidence,
+            evidence=list(mixed_detection.evidence),
+            review_reason="mixed_report_split_not_safe",
+            child_report_types=list(mixed_detection.detected_families),
+            child_count=len(split_result.segments),
+        )
+        _update_raw_metadata(
+            raw_audit,
+            detected_report_type="mixed",
+            routing_target=None,
+            processing_status="needs_review",
+            branch_hint=raw_audit.branch_hint,
+            routing_metadata=_routing_metadata_from_payload(routing_payload),
+            policy_decision=mixed_policy,
+        )
+        review_payload = dict(payload)
+        review_payload["routing"] = routing_payload
+        return _failure_result(
+            WorkItem(kind=work_item.kind, payload=review_payload),
+            classification="mixed",
+            status="needs_review",
+            route_reason="mixed_report_requires_review",
+            warnings=[
+                _make_warning(
+                    code="mixed_split_review",
+                    severity="warning",
+                    message="Mixed WhatsApp content was detected but could not be safely split for specialist fan-out.",
+                )
+            ],
+            policy_decision=mixed_policy,
+        )
 
     try:
         routed_work_item = _build_routed_work_item(work_item)
@@ -367,7 +408,12 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         )
 
     specialist_status = _result_status(result)
-    if specialist_status == "invalid_input":
+    if _should_attempt_specialist_fallback(
+        routed_work_item=routed_work_item,
+        specialist_status=specialist_status,
+        specialist_report_type=specialist_report_type if isinstance(specialist_report_type, str) else None,
+        policy_decision=policy_decision,
+    ):
         fallback_result = _process_specialist_fallback(
             routed_work_item=routed_work_item,
             raw_audit=raw_audit,
@@ -377,6 +423,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             resolved_branch_hint=resolved_branch_hint,
             routing_payload=routing_payload,
             policy_decision=policy_decision,
+            specialist_status=specialist_status,
         )
         if fallback_result is not None:
             return fallback_result
@@ -429,19 +476,21 @@ def _process_specialist_fallback(
     resolved_branch_hint: str | None,
     routing_payload: Mapping[str, Any],
     policy_decision: PolicyDecision,
+    specialist_status: str,
 ) -> AgentResult | None:
     """Attempt schema-bound fallback extraction after strict parsing fails."""
-
-    if specialist_report_type is None or not policy_decision.fallback_eligible:
-        return None
 
     fallback_result = process_fallback_extraction_work_item(routed_work_item)
     fallback_payload = fallback_result.payload if isinstance(fallback_result.payload, dict) else {}
     normalized_report = fallback_payload.get("normalized_report")
     if not isinstance(normalized_report, Mapping):
         normalized_report = {}
+    validation_payload = _fallback_validation_payload(
+        normalized_report=normalized_report,
+        routing_payload=routed_work_item.payload.get("routing") if isinstance(routed_work_item.payload, dict) else {},
+    )
 
-    validation_result = validate_report(specialist_report_type, normalized_report)
+    validation_result = validate_report(specialist_report_type, validation_payload)
     acceptance_result = decide_acceptance(
         specialist_report_type,
         validation_result=validation_result,
@@ -453,6 +502,8 @@ def _process_specialist_fallback(
     )
 
     if acceptance_result.decision == "reject":
+        if specialist_status != "invalid_input":
+            return None
         fallback_policy = reject_decision(
             reason="fallback_validation_failed",
             report_family=classification,
@@ -543,6 +594,48 @@ def _process_specialist_fallback(
         status=fallback_status,
         review_queue_path=review_queue_path,
     )
+
+
+def _should_attempt_specialist_fallback(
+    *,
+    routed_work_item: WorkItem,
+    specialist_status: str,
+    specialist_report_type: str | None,
+    policy_decision: PolicyDecision,
+) -> bool:
+    """Return whether the orchestrator should try fallback before finalizing."""
+
+    if specialist_status not in {"needs_review", "invalid_input"}:
+        return False
+    if specialist_report_type is None or not policy_decision.fallback_eligible:
+        return False
+    classification_confidence = _classification_confidence(routed_work_item)
+    if classification_confidence is None:
+        return False
+    return classification_confidence >= CLASSIFICATION_CONFIDENCE_MIN_FOR_FALLBACK
+
+
+def _fallback_validation_payload(
+    *,
+    normalized_report: Mapping[str, Any],
+    routing_payload: object,
+) -> dict[str, Any]:
+    """Return the payload sent to SOP validation for fallback extraction."""
+
+    payload = dict(normalized_report)
+    report_date = payload.get("report_date")
+    if not isinstance(report_date, str) or not report_date.strip():
+        if isinstance(routing_payload, Mapping):
+            for field_name in ("normalized_report_date", "report_date", "raw_report_date"):
+                candidate = routing_payload.get(field_name)
+                if isinstance(candidate, str) and candidate.strip():
+                    report_date = candidate.strip()
+                    break
+    if isinstance(report_date, str) and report_date.strip():
+        date_result = normalize_report_date(report_date)
+        if date_result.normalized_value is not None:
+            payload["report_date"] = date_result.normalized_value
+    return payload
 
 
 def _process_mixed_work_item(
@@ -936,27 +1029,71 @@ def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
         date_resolution=date_resolution,
         family_classification=family_classification,
     )
+    normalization = normalize_report(
+        text,
+        report_family=routing_decision.detected_report_type,
+        routing_context={
+            "branch_hint": routing_decision.branch_hint,
+            "report_date": routing_decision.report_date,
+            "raw_report_date": routing_decision.raw_report_date,
+            "report_type": routing_decision.specialist_report_type,
+        },
+    )
+    normalized_branch_hint = (
+        routing_decision.branch_hint
+        or normalization.normalized_fields.get("branch")
+    )
+    normalized_report_date = (
+        routing_decision.report_date
+        or normalization.normalized_fields.get("report_date")
+    )
+    normalized_raw_report_date = (
+        routing_decision.raw_report_date
+        or (
+            normalization.report_date.raw_value
+            if normalization.report_date is not None and normalization.report_date.normalized_value is not None
+            else None
+        )
+    )
+    review_reason = routing_decision.review_reason
+    processing_status = routing_decision.processing_status
+    if (
+        routing_decision.routing_target is not None
+        and normalized_branch_hint is not None
+        and normalized_report_date is not None
+    ):
+        processing_status = "routed"
+        review_reason = None
+    normalization_evidence = [
+        f"normalization:{rule.name}:{rule.normalized_value}"
+        for rule in normalization.provenance
+        if rule.normalized_value is not None
+    ]
 
     routed_payload: dict[str, Any] = {
-        "raw_message": {"text": text},
+        "raw_message": {
+            "text": text,
+            "normalized_text": normalization.normalized_text or text,
+        },
         "classification": {
             "report_family": routing_decision.detected_report_type,
             "report_type": routing_decision.specialist_report_type,
             "confidence": family_classification.confidence,
             "evidence": family_classification.evidence,
         },
+        "normalization": normalization.to_payload(),
         "routing": _build_routing_payload(
             classification=routing_decision.detected_report_type,
             target_agent=routing_decision.routing_target,
-            status=routing_decision.processing_status if routing_decision.processing_status in {"routed", "needs_review"} else "needs_review",
+            status=processing_status if processing_status in {"routed", "needs_review"} else "needs_review",
             route_reason="classified_for_specialist" if routing_decision.routing_target is not None else "unknown_route",
-            branch_hint=routing_decision.branch_hint,
-            report_date=routing_decision.report_date,
-            raw_report_date=routing_decision.raw_report_date,
+            branch_hint=normalized_branch_hint,
+            report_date=normalized_report_date,
+            raw_report_date=normalized_raw_report_date,
             confidence=routing_decision.confidence,
-            evidence=routing_decision.evidence,
+            evidence=routing_decision.evidence + normalization_evidence,
             normalized_header_candidates=routing_decision.normalized_header_candidates,
-            review_reason=routing_decision.review_reason,
+            review_reason=review_reason,
             specialist_report_type=routing_decision.specialist_report_type,
         ),
     }
@@ -966,8 +1103,8 @@ def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
         routed_payload["source"] = source
 
     if metadata:
-        if routing_decision.branch_hint is not None:
-            metadata["branch_hint"] = routing_decision.branch_hint
+        if normalized_branch_hint is not None:
+            metadata["branch_hint"] = normalized_branch_hint
         routed_payload["metadata"] = metadata
 
     replay = _sanitize_replay(payload.get("replay"))
@@ -1330,6 +1467,35 @@ def _result_confidence(result: AgentResult) -> float | None:
     return None
 
 
+def _classification_confidence(work_item: WorkItem) -> float | None:
+    """Return the specialist-family classification confidence when present."""
+
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    classification = payload.get("classification")
+    if not isinstance(classification, Mapping):
+        return None
+    confidence = classification.get("confidence")
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        return float(confidence)
+    return None
+
+
+def _can_safely_split_mixed_report(*, mixed_detection, split_result) -> bool:
+    """Return whether mixed content can be safely fanned out into children."""
+
+    detected_family_count = len(set(mixed_detection.detected_families))
+    if detected_family_count < 2:
+        return False
+    if split_result.split_confidence < MIXED_SPLIT_CONFIDENCE_MIN:
+        return False
+    if len(split_result.segments) < detected_family_count:
+        return False
+    return all(
+        bool(segment.raw_text.strip()) and segment.split_confidence >= MIXED_SPLIT_CONFIDENCE_MIN
+        for segment in split_result.segments
+    )
+
+
 def _result_warnings(result: AgentResult) -> list[dict[str, Any]]:
     """Return JSON-safe warnings from a result payload."""
 
@@ -1452,6 +1618,7 @@ def _build_routing_payload(
     route_reason: str,
     branch_hint: str | None = None,
     report_date: str | None = None,
+    normalized_report_date: str | None = None,
     raw_report_date: str | None = None,
     confidence: float | None = None,
     evidence: list[str] | None = None,
@@ -1471,6 +1638,7 @@ def _build_routing_payload(
         "route_reason": route_reason,
         "branch_hint": branch_hint,
         "report_date": report_date,
+        "normalized_report_date": normalized_report_date or report_date,
         "raw_report_date": raw_report_date,
         "confidence": confidence,
         "evidence": evidence or [],
@@ -1541,6 +1709,7 @@ def _routing_metadata_from_payload(routing_payload: Mapping[str, Any]) -> dict[s
         "route_status": routing_payload.get("route_status"),
         "route_reason": routing_payload.get("route_reason"),
         "resolved_report_date": routing_payload.get("report_date"),
+        "normalized_report_date": routing_payload.get("normalized_report_date"),
         "raw_report_date": routing_payload.get("raw_report_date"),
         "routing_confidence": routing_payload.get("confidence"),
         "routing_evidence": routing_payload.get("evidence"),
@@ -1677,7 +1846,41 @@ def _build_mixed_child_work_item(
     """Return one child work item for a split mixed segment."""
 
     payload = dict(parent_work_item.payload if isinstance(parent_work_item.payload, dict) else {})
-    payload["raw_message"] = {"text": segment.raw_text}
+    metadata_branch_hint = _sanitize_metadata(payload.get("metadata")).get("branch_hint")
+    child_headers = normalize_headers(segment.raw_text)
+    child_branch_resolution = resolve_branch(child_headers, metadata_branch_hint=metadata_branch_hint)
+    child_date_resolution = resolve_report_date(child_headers)
+    child_normalization = normalize_report(
+        segment.raw_text,
+        report_family=segment.detected_report_family,
+        routing_context={
+            "branch_hint": child_branch_resolution.branch_hint,
+            "report_date": child_date_resolution.iso_date,
+            "raw_report_date": child_date_resolution.raw_date,
+            "report_type": specialist_report_type,
+        },
+    )
+    normalized_branch_hint = (
+        child_branch_resolution.branch_hint
+        or child_normalization.normalized_fields.get("branch")
+        or metadata_branch_hint
+    )
+    normalized_report_date = (
+        child_date_resolution.iso_date
+        or child_normalization.normalized_fields.get("report_date")
+    )
+    raw_report_date = (
+        child_date_resolution.raw_date
+        or (
+            child_normalization.report_date.raw_value
+            if child_normalization.report_date is not None and child_normalization.report_date.raw_value
+            else None
+        )
+    )
+    payload["raw_message"] = {
+        "text": segment.raw_text,
+        "normalized_text": child_normalization.normalized_text or segment.raw_text,
+    }
     payload["classification"] = {
         "report_family": segment.detected_report_family,
         "report_type": specialist_report_type,
@@ -1695,9 +1898,10 @@ def _build_mixed_child_work_item(
         "target_agent": target_agent,
         "route_status": "routed",
         "route_reason": "fanout_split_child",
-        "branch_hint": _sanitize_metadata(payload.get("metadata")).get("branch_hint"),
-        "report_date": None,
-        "raw_report_date": None,
+        "branch_hint": normalized_branch_hint,
+        "report_date": normalized_report_date,
+        "normalized_report_date": normalized_report_date,
+        "raw_report_date": raw_report_date,
         "confidence": segment.split_confidence,
         "evidence": list(segment.evidence),
         "normalized_header_candidates": [],

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 import re
 
 from apps.header_normalizer_agent.worker import HeaderNormalizationResult
+from packages.normalization.dates import normalize_report_date as normalize_strict_report_date
 
 _DATE_PATTERN = re.compile(
     r"\b(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+)?"
@@ -33,21 +33,7 @@ class DateResolution:
 def normalize_report_date(raw_value: str) -> str | None:
     """Return ISO date for supported branch report date formats."""
 
-    cleaned = raw_value.strip()
-    cleaned = _WEEKDAY_PREFIX_PATTERN.sub("", cleaned)
-    cleaned = re.sub(r"\s*([/-])\s*", r"\1", cleaned)
-    for pattern in ("%Y-%m-%d", "%d/%m/%y", "%d/%m/%Y", "%d-%m-%y", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(cleaned, pattern).date().isoformat()
-        except ValueError:
-            continue
-    matched = _DATE_PATTERN.search(raw_value)
-    if matched is not None:
-        return normalize_report_date(matched.group(1))
-    iso_matched = _ISO_DATE_PATTERN.search(raw_value)
-    if iso_matched is not None:
-        return normalize_report_date(iso_matched.group(1))
-    return None
+    return normalize_strict_report_date(raw_value).normalized_value
 
 
 def resolve_report_date(header_result: HeaderNormalizationResult) -> DateResolution:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import packages.record_store.paths as record_paths
@@ -63,7 +64,7 @@ def test_live_webhook_writes_raw_then_invokes_orchestrator(
     work_item = captured_work_items[0]
     assert work_item.kind == "raw_message"
     assert "classification" not in work_item.payload
-    assert work_item.payload["ingress_policy"] == {"reject_mixed_reports": True}
+    assert work_item.payload["ingress_policy"] == {"reject_mixed_reports": False}
     assert work_item.payload["replay"] == {"is_replay": False}
     assert work_item.payload["raw_record"]["raw_written"] is True
     assert work_item.payload["ingress_envelope"]["payload"]["text"] == "DAY-END SALES REPORT\nBranch: Waigani"
@@ -168,6 +169,49 @@ def test_duplicate_live_webhook_does_not_duplicate_raw_write_or_dispatch(
     assert second_body["orchestrator_status"] == "skipped"
 
 
+def test_same_text_with_different_message_id_gets_collision_safe_raw_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    dispatch_count = 0
+    request_one = json.dumps(_meta_payload(message_id="wamid.live-1", text="Repeated body")).encode("utf-8")
+    request_two = json.dumps(_meta_payload(message_id="wamid.live-2", text="Repeated body")).encode("utf-8")
+
+    def fake_process_work_item(work_item):
+        nonlocal dispatch_count
+        dispatch_count += 1
+        return AgentResult(
+            agent_name="sales_income_agent",
+            payload={
+                "status": "ready",
+                "signal_type": "sales_income",
+                "branch": "waigani",
+                "report_date": "2026-04-07",
+            },
+        )
+
+    monkeypatch.setattr(bridge.orchestrator_worker, "process_work_item", fake_process_work_item)
+
+    first = bridge.dispatch_http_request(method="POST", target="/webhook", body=request_one)
+    second = bridge.dispatch_http_request(method="POST", target="/webhook", body=request_two)
+
+    first_body = json.loads(first.body.decode("utf-8"))
+    second_body = json.loads(second.body.decode("utf-8"))
+    raw_text_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.txt")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first_body["ok"] is True
+    assert second_body["ok"] is True
+    assert first_body["raw_written"] is True
+    assert second_body["raw_written"] is True
+    assert dispatch_count == 2
+    assert len(raw_text_paths) == 2
+    assert second_body["raw_txt_path"].endswith(".txt")
+    assert "__" in Path(second_body["raw_txt_path"]).stem
+
+
 def test_webhooks_whatsapp_alias_matches_webhook_post_behavior(
     tmp_path: Path,
     monkeypatch,
@@ -241,7 +285,7 @@ def test_orchestrator_exception_preserves_raw_record(
     assert raw_text_paths[0].read_text(encoding="utf-8") == "DAY-END SALES REPORT\nBranch: Waigani"
 
 
-def test_live_webhook_rejects_mixed_report_upstream(
+def test_live_webhook_fans_out_mixed_report_when_split_is_safe(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -278,23 +322,19 @@ def test_live_webhook_rejects_mixed_report_upstream(
     assert response.status_code == 200
     assert body["ok"] is True
     assert body["agent"] == "orchestrator_agent"
-    assert body["orchestrator_status"] == "needs_review"
+    assert body["orchestrator_status"] in {"accepted_split", "accepted_with_warning"}
     assert body["route"] == "mixed"
-    assert body["outputs"] == []
+    assert len(body["outputs"]) == 2
     assert len(raw_meta_paths) == 1
-    assert len(rejected_text_paths) == 1
-    assert len(rejected_meta_paths) == 1
-    assert not (tmp_path / "records" / "structured").exists()
+    assert len(rejected_text_paths) == 0
+    assert len(rejected_meta_paths) == 0
+    assert (tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json").exists()
+    assert (tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-07.json").exists()
 
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["detected_report_type"] == "mixed"
-    assert raw_meta["routing_target"] is None
-    assert raw_meta["processing_status"] == "needs_review"
-    assert raw_meta["routing_review_reason"] == "mixed_reports_rejected_upstream"
-
-    rejected_meta = _read_json(rejected_meta_paths[0])
-    assert rejected_meta["rejection_reason"] == "mixed_report"
-    assert rejected_meta["attempted_report_type"] == "mixed"
+    assert raw_meta["routing_target"] == "fan_out"
+    assert raw_meta["processing_status"] in {"accepted_split", "accepted_with_warning"}
 
 
 def test_health_endpoint_returns_bridge_status(
@@ -314,6 +354,31 @@ def test_health_endpoint_returns_bridge_status(
         "service": "whatsapp_webhook_bridge",
         "workspace_root": str(tmp_path),
     }
+
+
+def test_status_only_payload_is_logged_and_returns_no_supported_messages(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    caplog.set_level(logging.INFO, logger=bridge.__name__)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhooks/whatsapp",
+        body=json.dumps(_status_payload()).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["reason"] == "no_supported_messages"
+    assert "bridge request received" in caplog.text
+    assert "whatsapp payload summary" in caplog.text
+    assert "statuses=1" in caplog.text
+    assert "reason=no_supported_messages" in caplog.text
 
 
 def _meta_payload(*, message_id: str = "wamid.live-1", text: str = "DAY-END SALES REPORT\nBranch: Waigani") -> dict[str, object]:
@@ -345,6 +410,31 @@ def _meta_payload(*, message_id: str = "wamid.live-1", text: str = "DAY-END SALE
                                     "type": "text",
                                 }
                             ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _status_payload() -> dict[str, object]:
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "entry-status-1",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "statuses": [
+                                {
+                                    "id": "wamid.status-1",
+                                    "status": "delivered",
+                                    "timestamp": "1775563200",
+                                }
+                            ]
                         },
                     }
                 ],

@@ -70,7 +70,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         + performance_metrics.warnings
         + reconciliation.warnings
     )
-    status = "ready" if not warnings else "needs_review"
+    status = _determine_status(parsed=parsed, warnings=warnings)
 
     result = AgentResult(
         agent_name=AGENT_NAME,
@@ -175,3 +175,26 @@ def _failure_result(warnings: list[WarningEntry]) -> AgentResult:
             "status": "invalid_input",
         },
     )
+
+
+def _determine_status(
+    *,
+    parsed,
+    warnings: list[WarningEntry],
+) -> str:
+    """Return the final sales status with strict core checks and soft optional warnings."""
+
+    if not parsed.branch_slug or not parsed.report_date or parsed.figures.gross_sales is None:
+        return "invalid_input"
+
+    critical_warning_codes = {
+        "missing_fields",
+        "invalid_totals",
+        "data_mismatch",
+        "financial_anomaly",
+    }
+    if any(warning.code in critical_warning_codes for warning in warnings):
+        return "needs_review"
+    if warnings:
+        return "accepted_with_warning"
+    return "ready"

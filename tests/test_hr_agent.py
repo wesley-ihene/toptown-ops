@@ -98,6 +98,32 @@ def test_unknown_status_sample_raises_unknown_attendance_status(tmp_path: Path, 
     assert (signals_root / "waigani" / "2026-04-07" / "staff_attendance_report__waigani__2026-04-07.json").exists()
 
 
+def test_hr_agent_normalizes_branch_alias_date_and_short_statuses(tmp_path: Path, monkeypatch) -> None:
+    signals_root, outbox_path = _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        _attendance_work_item(
+            lines=[
+                "Shop: TTC LAE 5TH STREET BRANCH",
+                "Date: Friday, 10/04 /26",
+                "John Doe - P",
+                "Mary Kila - P",
+                "Peter Ake - Off",
+                "Lena Bina - Leave",
+                "Total Staff: (4)",
+            ]
+        )
+    )
+
+    assert result.payload["status"] == "needs_review"
+    warning_codes = {warning["code"] for warning in result.payload["warnings"]}
+    assert "unknown_attendance_status" not in warning_codes
+    assert result.payload["branch"] == "lae_5th_street"
+    assert result.payload["report_date"] == "2026-04-10"
+    assert len(sorted(outbox_path.glob("*.json"))) == 1
+    assert (signals_root / "lae_5th_street" / "2026-04-10" / "staff_attendance_report__lae_5th_street__2026-04-10.json").exists()
+
+
 def _patch_output_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     records_dir = tmp_path / "records"
     colony_root = tmp_path / "ioi-colony"
