@@ -40,3 +40,7 @@ records/review_queue/
 records/raw/
 records/rejected/
 records/structured/*/*.json
+analytics/branch_comparison/
+analytics/branch_daily/
+analytics/section_daily/
+analytics/staff_daily/
