@@ -1,4 +1,17 @@
-"""Deterministic Phase 3 analytics builders over structured upstream records."""
+"""Deterministic Phase 3 analytics builders over structured upstream records.
+
+Wave 1 Phase 3 ownership note:
+- TopTown Ops keeps factual operational aggregation derived from structured
+  upstream records: what happened, what inputs were present, and what raw KPI
+  totals can be stated without downstream interpretation.
+- Interpretive ranking and executive-style framing inside the Phase 3 layer are
+  deprecated and slated for later removal or relocation.
+- In practice, "strongest/weakest", cross-branch interpretation, and executive
+  scoring semantics should not grow here and are not part of TopTown Ops'
+  target long-term ownership.
+- Wave 1 does not remove code or alter outputs; this note only records the
+  pending split between facts and interpretation.
+"""
 
 from __future__ import annotations
 

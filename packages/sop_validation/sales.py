@@ -34,13 +34,13 @@ def validate_sales(payload: Mapping[str, Any]) -> ValidationResult:
     served = add_non_negative_number(rejections, value=metrics.get("served"), field="metrics.served")
 
     payment_total = 0.0
-    payment_parts_present = False
+    payment_part_count = 0
     for value in (cash_sales, eftpos_sales, mobile_money_sales):
         if value is not None:
             payment_total += value
-            payment_parts_present = True
+            payment_part_count += 1
 
-    if gross_sales is not None and payment_parts_present and abs(gross_sales - payment_total) > 0.01:
+    if gross_sales is not None and payment_part_count >= 2 and abs(gross_sales - payment_total) > 0.01:
         rejections.append(
             make_rejection(
                 code=INVALID_TOTALS,

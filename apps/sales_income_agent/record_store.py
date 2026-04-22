@@ -9,14 +9,18 @@ from typing import Any
 
 from apps.sales_income_agent.date_branch_resolver import normalize_report_date
 from packages.branch_registry import canonical_branch_slug
-from packages.record_store.writer import write_structured
+from packages.record_store.writer import write_governed_structured
 
 SIGNAL_TYPE = "sales_income"
 _CANONICAL_BRANCH_PATTERN = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
+def write_structured_record(
+    payload: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> object | None:
     """Persist a valid sales payload as a canonical structured record."""
 
     branch = payload.get("branch")
@@ -38,11 +42,12 @@ def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
     persisted_payload = dict(payload)
     persisted_payload["branch"] = canonical_branch
     persisted_payload["report_date"] = iso_report_date
-    return write_structured(
+    return write_governed_structured(
         signal_type=SIGNAL_TYPE,
         branch=canonical_branch,
         date=iso_report_date,
         payload=persisted_payload,
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
     )
 
 

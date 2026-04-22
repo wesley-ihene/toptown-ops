@@ -6,12 +6,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from packages.record_store.writer import write_structured
+from packages.record_store.writer import write_governed_structured
 
 SIGNAL_TYPE = "supervisor_control"
 
 
-def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
+def write_structured_record(
+    payload: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> object | None:
     """Persist a valid supervisor control payload as a canonical structured record."""
 
     branch = payload.get("branch")
@@ -25,9 +29,10 @@ def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
     if not isinstance(report_date, str) or not report_date.strip():
         return None
 
-    return write_structured(
+    return write_governed_structured(
         signal_type=SIGNAL_TYPE,
         branch=branch,
         date=report_date,
         payload=dict(payload),
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
     )

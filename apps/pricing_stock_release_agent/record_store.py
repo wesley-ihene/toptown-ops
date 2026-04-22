@@ -8,12 +8,16 @@ from typing import Any
 
 from packages.common.branch import canonical_branch_slug
 from packages.common.date import normalize_report_date
-from packages.record_store.writer import write_structured
+from packages.record_store.writer import write_governed_structured
 
 SIGNAL_TYPE = "pricing_stock_release"
 
 
-def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
+def write_structured_record(
+    payload: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> object | None:
     """Persist a valid pricing payload as a canonical structured record."""
 
     branch = payload.get("branch")
@@ -33,11 +37,12 @@ def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
     persisted_payload["branch_slug"] = branch_slug
     persisted_payload["report_date"] = normalized_date
 
-    return write_structured(
+    return write_governed_structured(
         signal_type=SIGNAL_TYPE,
         branch=branch_slug,
         date=normalized_date,
         payload=persisted_payload,
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
     )
 
 

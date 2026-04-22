@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -206,8 +207,11 @@ def _available_branch_dates(root: Path) -> dict[str, set[str]]:
 def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (JSONDecodeError, OSError):
+        return None
     return payload if isinstance(payload, Mapping) else None
 
 

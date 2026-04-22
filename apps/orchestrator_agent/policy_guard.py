@@ -11,6 +11,9 @@ from packages.report_policy import get_report_policy
 PolicyAction = Literal["allow", "reject"]
 
 _FINAL_PROCESSING_STATUSES: Final[set[str]] = {
+    "processed",
+    "rejected",
+    "duplicate",
     "ready",
     "needs_review",
     "accepted_split",

@@ -411,7 +411,7 @@ def _write_sales_record(
     traffic: int,
     served: int,
     sales_per_labor_hour: float,
-    status: str = "ready",
+    status: str = "accepted",
     warnings: list[dict[str, str]] | None = None,
 ) -> None:
     path = root / "records" / "structured" / "sales_income" / branch / f"{report_date}.json"

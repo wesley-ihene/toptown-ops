@@ -19,8 +19,10 @@ from apps.staff_performance_agent.parser import parse_work_item as parse_staff_p
 from apps.staff_performance_agent.worker import build_staff_performance_result
 from packages.common.paths import OUTBOX_DIR
 from packages.common.warnings import WarningEntry, dedupe_warnings, make_warning
+from packages.data_governance import build_governance_context
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
+from packages.validation import ValidationMetadata, normalize_rejections
 
 AGENT_NAME = "hr_agent"
 SIGNAL_TYPE = "hr_staffing"
@@ -43,11 +45,16 @@ class HrAgentWorker:
 def process_work_item(work_item: WorkItem) -> AgentResult:
     """Return a structured HR attendance result without raising."""
 
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    candidate_only = _candidate_mode_requested(payload)
     try:
-        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
         report_type = _report_type(payload)
         if report_type == "staff_performance":
-            return _process_staff_performance_work_item(work_item, payload=payload)
+            return _process_staff_performance_work_item(
+                work_item,
+                payload=payload,
+                candidate_only=candidate_only,
+            )
 
         validation_warnings = _validate_input(payload)
         if validation_warnings:
@@ -55,6 +62,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 work_item,
                 warnings=validation_warnings,
                 report_type=report_type,
+                work_item_payload=payload,
             )
             _write_result_to_outbox(result)
             return result
@@ -73,7 +81,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         if any(warning.severity == "error" for warning in warnings):
             status = "invalid_input"
         else:
-            status = "ready" if not warnings else "needs_review"
+            status = "accepted" if not warnings else "needs_review"
 
         result = AgentResult(
             agent_name=AGENT_NAME,
@@ -108,8 +116,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 "warnings": [warning.to_payload() for warning in warnings],
                 "status": status,
             },
+            metadata=_validation_metadata(status=status, warnings=warnings, report_type=report_type, work_item_payload=payload),
         )
-        write_structured_record(result.payload)
+        if not candidate_only:
+            write_result = write_structured_record(result.payload, metadata=result.metadata)
+            _apply_governance_result(result, write_result)
         _write_result_to_outbox(result)
         return result
     except Exception:
@@ -118,11 +129,13 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             report_type="staff_attendance",
             warnings=[
                 make_warning(
-                    code="missing_fields",
+                    code="parser_failure",
                     severity="error",
-                    message="The work item could not be processed safely.",
+                    message="The HR report could not be processed safely.",
                 )
             ],
+            work_item_payload=payload,
+            parser_failure=True,
         )
         _write_result_to_outbox(result)
         return result
@@ -132,6 +145,7 @@ def _process_staff_performance_work_item(
     work_item: WorkItem,
     *,
     payload: dict[str, Any],
+    candidate_only: bool,
 ) -> AgentResult:
     """Process one staff-performance report through the HR family agent."""
 
@@ -141,13 +155,17 @@ def _process_staff_performance_work_item(
             work_item,
             warnings=validation_warnings,
             report_type="staff_performance",
+            work_item_payload=payload,
         )
         _write_result_to_outbox(result)
         return result
 
     parsed = parse_staff_performance_work_item(work_item)
     result = build_staff_performance_result(parsed, source_agent=AGENT_NAME)
-    write_structured_record(result.payload)
+    result.metadata["governance_context"] = build_governance_context(payload)
+    if not candidate_only:
+        write_result = write_structured_record(result.payload, metadata=result.metadata)
+        _apply_governance_result(result, write_result)
     _write_result_to_outbox(result)
     return result
 
@@ -196,6 +214,8 @@ def _build_failure_result(
     parsed: ParsedHrReport | None = None,
     report_type: str = "staff_attendance",
     warnings: list[WarningEntry] | None = None,
+    work_item_payload: Mapping[str, Any] | None = None,
+    parser_failure: bool = False,
 ) -> AgentResult:
     """Return a safe failure result that still matches the output contract."""
 
@@ -237,6 +257,13 @@ def _build_failure_result(
                 "warnings": [warning.to_payload() for warning in warning_list],
                 "status": "invalid_input",
         },
+        metadata=_validation_metadata(
+            status="invalid_input",
+            warnings=warning_list,
+            report_type=report_type,
+            work_item_payload=work_item_payload or {},
+            parser_failure=parser_failure,
+        ),
     )
 
 
@@ -283,6 +310,49 @@ def _compute_confidence(
         confidence -= penalties.get(warning.code, 0.0)
 
     return round(max(confidence, 0.0), 2)
+
+
+def _validation_metadata(
+    *,
+    status: str,
+    warnings: list[WarningEntry],
+    report_type: str,
+    work_item_payload: Mapping[str, Any],
+    parser_failure: bool = False,
+) -> dict[str, object]:
+    """Return sidecar validation metadata for HR-family records."""
+
+    return {
+        "validation": ValidationMetadata(
+            stage=AGENT_NAME,
+            status="passed" if status != "invalid_input" else "rejected",
+            accepted=status != "invalid_input",
+            rejections=normalize_rejections([warning.to_payload() for warning in warnings if warning.severity == "error"]),
+            details={
+                "final_status": status,
+                "report_type": report_type,
+                "parser_failure": parser_failure,
+            },
+        ).to_payload(),
+        "governance_context": build_governance_context(work_item_payload),
+    }
+
+
+def _candidate_mode_requested(payload: Mapping[str, Any]) -> bool:
+    """Return whether this worker should stop at candidate generation."""
+
+    return payload.get("governance_mode") == "candidate"
+
+
+def _apply_governance_result(result: AgentResult, write_result: object) -> None:
+    """Project the persisted governance result back onto the live agent payload."""
+
+    governance = getattr(write_result, "governance", None)
+    if governance is None:
+        return
+    result.payload["status"] = governance.status
+    result.payload["export_allowed"] = governance.export_allowed
+    result.payload["governance"] = governance.to_payload()
 
 
 def _write_result_to_outbox(result: AgentResult) -> Path:

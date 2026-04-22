@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -22,6 +22,7 @@ from apps.fallback_extraction_agent.worker import (
     process_work_item as process_fallback_extraction_work_item,
 )
 from apps.header_normalizer_agent.worker import normalize_headers
+import apps.hr_agent.record_store as hr_record_store
 from apps.hr_agent.worker import process_work_item as process_hr_work_item
 from apps.mixed_content_detector_agent.worker import detect_mixed_content
 from apps.orchestrator_agent.policy_guard import (
@@ -30,6 +31,7 @@ from apps.orchestrator_agent.policy_guard import (
     evaluate_pre_specialist_policy,
     reject_decision,
 )
+import apps.pricing_stock_release_agent.record_store as pricing_record_store
 from apps.pricing_stock_release_agent.worker import (
     process_work_item as process_pricing_stock_release_work_item,
 )
@@ -44,18 +46,21 @@ from apps.staff_performance_agent.worker import (
 from apps.supervisor_control_agent.worker import (
     process_work_item as process_supervisor_control_work_item,
 )
+import apps.supervisor_control_agent.record_store as supervisor_record_store
 from packages.record_store.naming import build_rejected_filename, safe_segment
 from packages.record_store.paths import get_raw_path, get_rejected_path, get_structured_path
 from packages.record_store.writer import write_json_file, write_text_file
 from packages.normalization.dates import normalize_report_date
 from packages.normalization.engine import normalize_report
 from packages.report_acceptance import decide_acceptance
+from packages.report_policy import get_report_policy
 from packages.provenance_store import write_provenance_record
 from packages.report_registry import route_for_family
 from packages.review_queue import write_review_item
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
 from packages.sop_validation.router import validate_report
+from packages.sop_validation.common import is_iso_date
 
 AGENT_NAME: Final[str] = "orchestrator_agent"
 RAW_MESSAGE_KIND: Final[str] = "raw_message"
@@ -63,15 +68,22 @@ SIGNAL_TYPE: Final[str] = "routing"
 UNKNOWN_STORAGE_BUCKET: Final[str] = "unknown"
 CLASSIFICATION_CONFIDENCE_MIN_FOR_FALLBACK: Final[float] = 0.45
 MIXED_SPLIT_CONFIDENCE_MIN: Final[float] = 0.85
+RAW_SHA256_DEDUP_WINDOW: Final[timedelta] = timedelta(hours=24)
 
 ClassificationLabel = str
 
-RouteStatus = Literal["routed", "ready", "needs_review", "invalid_input"]
+RouteStatus = Literal["routed", "ready", "needs_review", "invalid_input", "accepted", "accepted_with_warning", "rejected", "duplicate", "conflict_blocked"]
+RawProcessingStatus = Literal["received", "processed", "rejected", "duplicate"]
 RejectionReason = Literal[
     "unknown_report_type",
+    "invalid_pricing_card_format",
     "missing_raw_text",
     "invalid_input",
     "duplicate_message",
+    "duplicate_message_id",
+    "duplicate_raw_sha256",
+    "duplicate_semantic",
+    "conflicting_record_same_scope",
     "mixed_report",
     "classifier_failure",
     "routing_failure",
@@ -120,6 +132,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
 
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     raw_audit = _prepare_raw_audit_record(work_item)
+    processing_text = _extract_processing_text(payload)
     if not raw_audit.is_replay and not raw_audit.raw_written_by_ingress:
         _persist_raw_record(raw_audit)
     validation_errors = _validate_raw_work_item(work_item)
@@ -134,10 +147,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             raw_audit,
             detected_report_type="unknown",
             routing_target=None,
-            processing_status="invalid_input",
+            processing_status="rejected",
             branch_hint=raw_audit.branch_hint,
             routing_metadata=None,
             policy_decision=policy_decision,
+            governance_outcome=_governance_outcome_payload(status="rejected", reasons=["insufficient_structure"]),
         )
         _write_rejected_record(
             raw_audit,
@@ -157,7 +171,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             policy_decision=policy_decision,
         )
 
-    mixed_detection = detect_mixed_content(raw_audit.raw_text)
+    mixed_detection = detect_mixed_content(processing_text)
     if mixed_detection.is_mixed:
         mixed_policy = evaluate_mixed_report_policy(
             reject_mixed_reports=_reject_mixed_reports(payload)
@@ -177,10 +191,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 raw_audit,
                 detected_report_type="mixed",
                 routing_target=None,
-                processing_status="needs_review",
+                processing_status="rejected",
                 branch_hint=raw_audit.branch_hint,
                 routing_metadata=_routing_metadata_from_payload(routing_payload),
                 policy_decision=mixed_policy,
+                governance_outcome=_governance_outcome_payload(status="rejected", reasons=["insufficient_structure"]),
             )
             _write_rejected_record(
                 raw_audit,
@@ -207,7 +222,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 ],
                 policy_decision=mixed_policy,
             )
-        split_result = split_report(raw_audit.raw_text, mixed_detection)
+        split_result = split_report(processing_text, mixed_detection)
         if _can_safely_split_mixed_report(mixed_detection=mixed_detection, split_result=split_result):
             return _process_mixed_work_item(
                 work_item,
@@ -232,10 +247,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             raw_audit,
             detected_report_type="mixed",
             routing_target=None,
-            processing_status="needs_review",
+            processing_status="rejected",
             branch_hint=raw_audit.branch_hint,
             routing_metadata=_routing_metadata_from_payload(routing_payload),
             policy_decision=mixed_policy,
+            governance_outcome=_governance_outcome_payload(status="needs_review", reasons=["insufficient_structure"]),
         )
         review_payload = dict(payload)
         review_payload["routing"] = routing_payload
@@ -267,10 +283,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             raw_audit,
             detected_report_type="unknown",
             routing_target=None,
-            processing_status="invalid_input",
+            processing_status="rejected",
             branch_hint=raw_audit.branch_hint,
             routing_metadata=None,
             policy_decision=policy_decision,
+            governance_outcome=_governance_outcome_payload(status="rejected", reasons=["unknown_report_type"]),
         )
         _write_rejected_record(
             raw_audit,
@@ -312,34 +329,35 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
     )
 
     if policy_decision.action == "reject":
-        rejection_reason: RejectionReason = (
-            "duplicate_message"
-            if policy_decision.reason == "duplicate_message"
-            else "unknown_report_type"
-        )
-        route_reason = (
-            "duplicate_message_rejected"
-            if policy_decision.reason == "duplicate_message"
-            else str(routing_payload.get("review_reason") or "unknown_route")
-        )
-        warning_code = (
-            "duplicate_message"
-            if policy_decision.reason == "duplicate_message"
-            else "missing_fields"
-        )
-        warning_message = (
-            "This raw message was already processed and was blocked by the idempotency policy."
-            if policy_decision.reason == "duplicate_message"
-            else "The raw message could not be routed to a supported specialist agent."
-        )
+        if policy_decision.reason == "duplicate_message":
+            rejection_reason: RejectionReason = "duplicate_message"
+            route_reason = "duplicate_message_rejected"
+            warning_code = "duplicate_message"
+            warning_message = "This raw message was already processed and was blocked by the idempotency policy."
+        elif classification == "invalid_pricing_card_format":
+            rejection_reason = "invalid_pricing_card_format"
+            route_reason = "invalid_pricing_card_format"
+            warning_code = "invalid_pricing_card_format"
+            warning_message = (
+                "Bale pricing card messages without release indicators are rejected upstream and must not be routed as bale releases."
+            )
+        else:
+            rejection_reason = "unknown_report_type"
+            route_reason = str(routing_payload.get("review_reason") or "unknown_route")
+            warning_code = "missing_fields"
+            warning_message = "The raw message could not be routed to a supported specialist agent."
         _update_raw_metadata(
             raw_audit,
             detected_report_type=classification,
             routing_target=None,
-            processing_status="needs_review",
+            processing_status="duplicate" if policy_decision.reason == "duplicate_message" else "rejected",
             branch_hint=resolved_branch_hint,
             routing_metadata=_routing_metadata_from_payload(routing_payload),
             policy_decision=policy_decision,
+            governance_outcome=_governance_outcome_payload(
+                status="duplicate" if policy_decision.reason == "duplicate_message" else "rejected",
+                reasons=[_policy_reason_to_governance_reason(policy_decision.reason)],
+            ),
         )
         _write_rejected_record(
             raw_audit,
@@ -353,7 +371,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         return _failure_result(
             routed_work_item,
             classification=classification,
-            status="needs_review",
+            status="duplicate" if policy_decision.reason == "duplicate_message" else "rejected",
             route_reason=route_reason,
             warnings=[
                 _make_warning(
@@ -365,8 +383,10 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             policy_decision=policy_decision,
         )
 
+    strict_work_item = _with_candidate_mode(routed_work_item)
+
     try:
-        result = _dispatch_to_specialist(routed_work_item, target_agent=target_agent)
+        result = _dispatch_to_specialist(strict_work_item, target_agent=target_agent)
     except Exception as exc:
         routing_failure_policy = reject_decision(
             reason="routing_failure",
@@ -378,10 +398,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             raw_audit,
             detected_report_type=classification,
             routing_target=target_agent,
-            processing_status="invalid_input",
+            processing_status="rejected",
             branch_hint=resolved_branch_hint,
             routing_metadata=_routing_metadata_from_payload(routing_payload),
             policy_decision=routing_failure_policy,
+            governance_outcome=_governance_outcome_payload(status="rejected", reasons=["parser_failure"]),
         )
         _write_rejected_record(
             raw_audit,
@@ -409,6 +430,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
 
     specialist_status = _result_status(result)
     if _should_attempt_specialist_fallback(
+        result=result,
         routed_work_item=routed_work_item,
         specialist_status=specialist_status,
         specialist_report_type=specialist_report_type if isinstance(specialist_report_type, str) else None,
@@ -428,18 +450,29 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         if fallback_result is not None:
             return fallback_result
 
+    if isinstance(specialist_report_type, str):
+        result = _finalize_strict_candidate(
+            routed_work_item=routed_work_item,
+            candidate_result=result,
+            specialist_report_type=specialist_report_type,
+            raw_audit=raw_audit,
+        )
+
+    governed_status = _result_status(result)
+    governance_outcome = _result_governance(result)
     _update_raw_metadata(
         raw_audit,
         detected_report_type=classification,
         routing_target=target_agent,
-        processing_status=specialist_status,
+        processing_status=_raw_processing_status_for_result(governed_status),
         branch_hint=resolved_branch_hint,
         routing_metadata=_routing_metadata_from_payload(routing_payload),
         policy_decision=policy_decision,
-        extra_metadata=None,
+        governance_outcome=governance_outcome,
+        extra_metadata=_result_metadata_extension(result),
     )
     _write_outcome_provenance(
-        outcome="accepted",
+        outcome=governed_status,
         audit=raw_audit,
         report_type=specialist_report_type if isinstance(specialist_report_type, str) else classification,
         branch=_result_branch(result) or resolved_branch_hint or raw_audit.branch_hint or "unknown",
@@ -448,11 +481,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         parse_mode="strict",
         confidence=_result_confidence(result),
         warnings=_result_warnings(result),
-        validation_outcome={"status": "not_run"},
-        acceptance_outcome={"status": "accepted"},
+        validation_outcome=_result_validation_outcome(result),
+        acceptance_outcome=_result_acceptance_outcome(result),
         downstream_references={"structured_records": _structured_output_paths_from_result(result)},
     )
-    if specialist_status == "invalid_input":
+    if governed_status in {"rejected", "duplicate", "conflict_blocked", "invalid_input"}:
         _write_rejected_record(
             raw_audit,
             rejection_reason=_rejection_reason_from_result(result),
@@ -461,7 +494,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             attempted_branch_hint=resolved_branch_hint,
             exception_message=None,
             policy_decision=policy_decision,
-            extra_metadata=None,
+            extra_metadata=_result_metadata_extension(result),
         )
     return result
 
@@ -491,6 +524,11 @@ def _process_specialist_fallback(
     )
 
     validation_result = validate_report(specialist_report_type, validation_payload)
+    _downgrade_resolved_fallback_date_rejection(
+        report_type=specialist_report_type,
+        validation_result=validation_result,
+        fallback_payload=fallback_payload,
+    )
     acceptance_result = decide_acceptance(
         specialist_report_type,
         validation_result=validation_result,
@@ -498,6 +536,8 @@ def _process_specialist_fallback(
             **(routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}),
             "normalized_report": dict(validation_result.normalized_payload),
             "confidence": fallback_payload.get("confidence"),
+            "status": fallback_payload.get("status"),
+            "parse_mode": "fallback",
         },
     )
 
@@ -520,10 +560,11 @@ def _process_specialist_fallback(
             raw_audit,
             detected_report_type=classification,
             routing_target=target_agent,
-            processing_status="invalid_input",
+            processing_status="rejected",
             branch_hint=resolved_branch_hint,
             routing_metadata=_routing_metadata_from_payload(routing_payload),
             policy_decision=fallback_policy,
+            governance_outcome=_governance_outcome_payload(status="rejected", reasons=["insufficient_structure"]),
             extra_metadata=fallback_metadata,
         )
         _write_rejected_record(
@@ -561,6 +602,11 @@ def _process_specialist_fallback(
             reason=acceptance_result.reason,
             validation_outcome=validation_result.to_payload(),
             acceptance_outcome=acceptance_result.to_payload(),
+            governance_outcome={
+                "status": "needs_review",
+                "export_allowed": False,
+                "reasons": [acceptance_result.reason],
+            },
             parser_used="fallback_extraction_agent",
             parse_mode="fallback",
         )
@@ -571,15 +617,22 @@ def _process_specialist_fallback(
         acceptance_payload=acceptance_result.to_payload(),
         review_queue_path=review_queue_path,
     )
-    fallback_status = "needs_review" if acceptance_result.decision == "review" else "ready"
+    fallback_status = acceptance_result.governed_status(
+        warning_codes=[warning.get("code", "") for warning in _fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result)]
+    )
     _update_raw_metadata(
         raw_audit,
         detected_report_type=classification,
         routing_target=target_agent,
-        processing_status=fallback_status,
+        processing_status=_raw_processing_status_for_result(fallback_status),
         branch_hint=resolved_branch_hint,
         routing_metadata=_routing_metadata_from_payload(routing_payload),
         policy_decision=policy_decision,
+        governance_outcome=_governance_outcome_payload(
+            status=fallback_status,
+            reasons=[acceptance_result.reason] if acceptance_result.decision == "review" else [],
+            export_allowed=False,
+        ),
         extra_metadata=fallback_metadata,
     )
     return _build_fallback_result(
@@ -598,6 +651,7 @@ def _process_specialist_fallback(
 
 def _should_attempt_specialist_fallback(
     *,
+    result: AgentResult,
     routed_work_item: WorkItem,
     specialist_status: str,
     specialist_report_type: str | None,
@@ -613,6 +667,272 @@ def _should_attempt_specialist_fallback(
     if classification_confidence is None:
         return False
     return classification_confidence >= CLASSIFICATION_CONFIDENCE_MIN_FOR_FALLBACK
+
+
+def _finalize_strict_candidate(
+    *,
+    routed_work_item: WorkItem,
+    candidate_result: AgentResult,
+    specialist_report_type: str,
+    raw_audit: RawAuditRecord,
+) -> AgentResult:
+    """Apply shared validation, acceptance, governance, and final action centrally."""
+
+    candidate_payload = candidate_result.payload if isinstance(candidate_result.payload, dict) else {}
+    validation_result = validate_report(specialist_report_type, candidate_payload)
+    acceptance_result = decide_acceptance(
+        specialist_report_type,
+        validation_result=validation_result,
+        work_item_payload={
+            **(routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}),
+            "normalized_report": dict(validation_result.normalized_payload),
+            "confidence": candidate_payload.get("confidence"),
+            "status": candidate_payload.get("status"),
+            "parse_mode": "strict",
+        },
+    )
+
+    finalized_payload = dict(candidate_payload)
+    if isinstance(validation_result.normalized_payload, Mapping):
+        for field_name in ("branch", "report_date"):
+            value = validation_result.normalized_payload.get(field_name)
+            if isinstance(value, str) and value.strip():
+                finalized_payload[field_name] = value.strip()
+
+    finalized_result = AgentResult(
+        agent_name=candidate_result.agent_name,
+        payload=finalized_payload,
+        metadata=_strict_write_metadata(
+            candidate_result=candidate_result,
+            routed_work_item=routed_work_item,
+            validation_result=validation_result,
+            acceptance_result=acceptance_result,
+        ),
+    )
+
+    write_result = _write_final_structured_result(finalized_result)
+    if write_result is not None:
+        _apply_final_governance(finalized_result, write_result)
+        review_queue_path = _maybe_write_strict_review_item(
+            routed_work_item=routed_work_item,
+            result=finalized_result,
+            validation_result=validation_result,
+            acceptance_result=acceptance_result,
+            raw_audit=raw_audit,
+            candidate_payload=finalized_payload,
+        )
+        if review_queue_path is not None:
+            finalized_result.metadata["review_queue_path"] = review_queue_path
+        return finalized_result
+
+    governance_status = acceptance_result.governed_status(
+        warning_codes=[warning.get("code", "") for warning in _result_warnings(finalized_result)]
+    )
+    governance_reasons = _governance_reasons_without_write(finalized_result)
+    finalized_result.payload["status"] = governance_status
+    finalized_result.payload["export_allowed"] = False
+    finalized_result.payload["governance"] = _governance_outcome_payload(
+        status=governance_status,
+        reasons=governance_reasons,
+        export_allowed=False,
+    )
+    review_queue_path = _maybe_write_strict_review_item(
+        routed_work_item=routed_work_item,
+        result=finalized_result,
+        validation_result=validation_result,
+        acceptance_result=acceptance_result,
+        raw_audit=raw_audit,
+        candidate_payload=finalized_payload,
+    )
+    if review_queue_path is not None:
+        finalized_result.metadata["review_queue_path"] = review_queue_path
+    return finalized_result
+
+
+def _strict_write_metadata(
+    *,
+    candidate_result: AgentResult,
+    routed_work_item: WorkItem,
+    validation_result,
+    acceptance_result,
+) -> dict[str, Any]:
+    """Return the central sidecar metadata for one strict candidate result."""
+
+    metadata = dict(candidate_result.metadata) if isinstance(candidate_result.metadata, dict) else {}
+    existing_validation = metadata.get("validation")
+    if isinstance(existing_validation, Mapping):
+        metadata["candidate_validation"] = dict(existing_validation)
+
+    routed_payload = routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}
+    validation_payload = validation_result.to_payload()
+    if isinstance(existing_validation, Mapping):
+        candidate_details = existing_validation.get("details")
+        if isinstance(candidate_details, Mapping) and candidate_details.get("parser_failure") is True:
+            validation_payload["details"] = {
+                "parser_failure": True,
+                "candidate_final_status": candidate_details.get("final_status"),
+            }
+    metadata["validation"] = validation_payload
+    metadata["acceptance"] = acceptance_result.to_payload()
+    metadata["governance_context"] = {
+        **_mapping(metadata.get("governance_context")),
+        **_routing_governance_context(routed_payload),
+    }
+    return metadata
+
+
+def _routing_governance_context(routed_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return governance context from the routed work item without losing raw links."""
+
+    governance_context = {
+        "classified_report_type": _string_or_default(
+            _mapping(routed_payload.get("classification")).get("report_type"),
+            default="unknown",
+        )
+    }
+    raw_record = routed_payload.get("raw_record")
+    if isinstance(raw_record, Mapping):
+        for field_name in ("raw_meta_path", "raw_sha256"):
+            value = raw_record.get(field_name)
+            if isinstance(value, str) and value.strip():
+                governance_context[field_name] = value.strip()
+    ingress_envelope = routed_payload.get("ingress_envelope")
+    if isinstance(ingress_envelope, Mapping):
+        payload = ingress_envelope.get("payload")
+        if isinstance(payload, Mapping):
+            message_id = payload.get("message_id")
+            if isinstance(message_id, str) and message_id.strip():
+                governance_context["message_id"] = message_id.strip()
+    return governance_context
+
+
+def _write_final_structured_result(result: AgentResult):
+    """Persist one finalized strict result through the existing governed writers."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    if payload.get("status") == "invalid_input":
+        return None
+
+    if result.agent_name == "sales_income_agent":
+        return sales_record_store.write_structured_record(payload, metadata=result.metadata)
+    if result.agent_name in {"hr_agent", "staff_performance_agent"}:
+        return hr_record_store.write_structured_record(payload, metadata=result.metadata)
+    if result.agent_name == "pricing_stock_release_agent":
+        return pricing_record_store.write_structured_record(payload, metadata=result.metadata)
+    if result.agent_name == "supervisor_control_agent":
+        return supervisor_record_store.write_structured_record(payload, metadata=result.metadata)
+    return None
+
+
+def _apply_final_governance(result: AgentResult, write_result: object) -> None:
+    """Project the final governed write result back onto the live payload."""
+
+    governance = getattr(write_result, "governance", None)
+    if governance is None:
+        return
+    result.payload["status"] = governance.status
+    result.payload["export_allowed"] = governance.export_allowed
+    result.payload["governance"] = governance.to_payload()
+
+
+def _maybe_write_strict_review_item(
+    *,
+    routed_work_item: WorkItem,
+    result: AgentResult,
+    validation_result,
+    acceptance_result,
+    raw_audit: RawAuditRecord,
+    candidate_payload: Mapping[str, Any],
+) -> str | None:
+    """Write one strict-path review item when governance or acceptance requires it."""
+
+    governance = _result_governance(result)
+    governance_status = _string_or_none(governance.get("status"))
+    if governance_status not in {"needs_review", "conflict_blocked"}:
+        return None
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    review_reason = _strict_review_reason(
+        governance=governance,
+        acceptance_result=acceptance_result,
+        candidate_payload=candidate_payload,
+    )
+    return write_review_item(
+        routed_work_item,
+        report_type=specialist_report_type_from_payload(payload),
+        branch=_string_or_default(payload.get("branch"), default="unknown"),
+        report_date=_string_or_default(payload.get("report_date"), default="unknown"),
+        confidence=_result_confidence(result),
+        warnings=_result_warnings(result),
+        reason=review_reason,
+        validation_outcome=validation_result.to_payload(),
+        acceptance_outcome=acceptance_result.to_payload(),
+        governance_outcome=governance,
+        candidate_payload=dict(candidate_payload),
+        raw_paths={
+            "raw_text_path": str(raw_audit.text_path),
+            "raw_meta_path": str(raw_audit.meta_path),
+        },
+        parser_used=result.agent_name,
+        parse_mode="strict",
+    )
+
+
+def specialist_report_type_from_payload(payload: Mapping[str, Any]) -> str:
+    """Return the specialist report type implied by the finalized payload."""
+
+    signal_type = _string_or_none(payload.get("signal_type"))
+    signal_subtype = _string_or_none(payload.get("signal_subtype"))
+    if signal_subtype == "staff_attendance":
+        return "staff_attendance"
+    if signal_subtype == "staff_performance":
+        return "staff_performance"
+    if signal_type == "sales_income":
+        return "sales"
+    if signal_type == "pricing_stock_release":
+        return "bale_summary"
+    if signal_type == "supervisor_control":
+        return "supervisor_control"
+    return "unknown"
+
+
+def _strict_review_reason(
+    *,
+    governance: Mapping[str, Any],
+    acceptance_result,
+    candidate_payload: Mapping[str, Any],
+) -> str:
+    """Return the stable review reason used for strict-path review queue records."""
+
+    reasons = governance.get("reasons")
+    if isinstance(reasons, list):
+        for reason in reasons:
+            if isinstance(reason, str) and reason.strip():
+                return reason.strip()
+    if acceptance_result.decision == "review":
+        return acceptance_result.reason
+    review_policy = candidate_payload.get("review_policy")
+    if isinstance(review_policy, Mapping):
+        final_status = review_policy.get("final_status")
+        if isinstance(final_status, str) and final_status.strip():
+            return final_status.strip()
+    return "needs_review"
+
+
+def _governance_reasons_without_write(result: AgentResult) -> list[str]:
+    """Return fallback governance reasons when no governed structured write occurs."""
+
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    validation = _mapping(metadata.get("validation"))
+    details = _mapping(validation.get("details"))
+    reasons: list[str] = []
+    if details.get("parser_failure") is True:
+        reasons.append("parser_failure")
+    if validation.get("accepted") is False:
+        reasons.append("insufficient_structure")
+    if not reasons:
+        reasons.append("insufficient_structure")
+    return reasons
 
 
 def _fallback_validation_payload(
@@ -636,6 +956,58 @@ def _fallback_validation_payload(
         if date_result.normalized_value is not None:
             payload["report_date"] = date_result.normalized_value
     return payload
+
+
+def _downgrade_resolved_fallback_date_rejection(
+    *,
+    report_type: str,
+    validation_result,
+    fallback_payload: Mapping[str, Any],
+) -> None:
+    """Convert resolvable fallback date-format failures into warnings."""
+
+    rejections = getattr(validation_result, "rejections", None)
+    if not isinstance(rejections, list) or not rejections:
+        return
+
+    invalid_date_rejections = [rejection for rejection in rejections if getattr(rejection, "code", None) == "invalid_report_date"]
+    if not invalid_date_rejections or len(invalid_date_rejections) != len(rejections):
+        return
+
+    normalized_payload = getattr(validation_result, "normalized_payload", None)
+    if not isinstance(normalized_payload, Mapping):
+        return
+    normalized_report_date = normalized_payload.get("report_date")
+    if not isinstance(normalized_report_date, str) or not is_iso_date(normalized_report_date):
+        return
+
+    normalization = getattr(validation_result, "normalization", None)
+    normalization_report_date = normalization.get("report_date") if isinstance(normalization, Mapping) else None
+    raw_report_date = normalization_report_date.get("raw") if isinstance(normalization_report_date, Mapping) else None
+    if not isinstance(raw_report_date, str) or not raw_report_date.strip() or is_iso_date(raw_report_date):
+        return
+
+    confidence = fallback_payload.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        return
+    if float(confidence) <= get_report_policy(report_type).confidence_thresholds.reject_max:
+        return
+
+    warnings = fallback_payload.get("warnings")
+    if not isinstance(warnings, list):
+        return
+    if any(isinstance(warning, Mapping) and warning.get("code") == "ambiguous_report_date" for warning in warnings):
+        return
+
+    validation_result.rejections = []
+    validation_result.accepted = True
+    warnings.append(
+        _make_warning(
+            code="invalid_report_date",
+            severity="warning",
+            message="Fallback validation accepted the normalized report_date after resolving a non-ISO raw date.",
+        )
+    )
 
 
 def _process_mixed_work_item(
@@ -689,8 +1061,9 @@ def _process_mixed_work_item(
             specialist_report_type=route.specialist_type,
             child_count=len(split_result.segments),
         )
+        strict_child_work_item = _with_candidate_mode(child_work_item)
         try:
-            child_result = _dispatch_to_specialist(child_work_item, target_agent=route.target_agent)
+            child_result = _dispatch_to_specialist(strict_child_work_item, target_agent=route.target_agent)
         except Exception as exc:
             warnings.append(
                 _make_warning(
@@ -712,6 +1085,13 @@ def _process_mixed_work_item(
                 }
             )
             continue
+
+        child_result = _finalize_strict_candidate(
+            routed_work_item=child_work_item,
+            candidate_result=child_result,
+            specialist_report_type=route.specialist_type,
+            raw_audit=raw_audit,
+        )
 
         child_results.append(child_result)
         child_output_paths = _structured_output_paths_from_result(child_result)
@@ -756,10 +1136,15 @@ def _process_mixed_work_item(
         raw_audit,
         detected_report_type="mixed",
         routing_target="fan_out",
-        processing_status=parent_status,
+        processing_status="processed" if parent_status in {"accepted_split", "accepted_with_warning"} else "rejected",
         branch_hint=branch_hint,
         routing_metadata=_routing_metadata_from_payload(routing_payload),
         policy_decision=policy_decision,
+        governance_outcome=_governance_outcome_payload(
+            status="accepted_with_warning" if parent_status in {"accepted_split", "accepted_with_warning"} else "needs_review",
+            reasons=[],
+            export_allowed=False,
+        ),
     )
 
     parent_payload = {
@@ -858,13 +1243,17 @@ def _validate_raw_work_item(work_item: WorkItem) -> list[dict[str, str]]:
         )
         return warnings
 
-    text = raw_message.get("text")
-    if not isinstance(text, str) or not text.strip():
+    processing_text = _extract_processing_text(payload)
+    if not processing_text.strip():
+        raw_text = raw_message.get("text")
+        message = "The work item must provide a non-empty routing text value."
+        if not isinstance(payload.get("cleaned_text"), str) and (not isinstance(raw_text, str) or not raw_text.strip()):
+            message = "The work item raw_message.text field must be a non-empty string."
         warnings.append(
             _make_warning(
                 code="missing_fields",
                 severity="error",
-                message="The work item raw_message.text field must be a non-empty string.",
+                message=message,
             )
         )
 
@@ -901,7 +1290,12 @@ def _prepare_raw_audit_record(work_item: WorkItem) -> RawAuditRecord:
         replay_source=replay.get("source"),
         replay_original_path=replay.get("original_path"),
         raw_written_by_ingress=raw_record.get("raw_written") is True,
-        existing_metadata=_load_existing_metadata(meta_path),
+        existing_metadata=_load_existing_metadata_for_dedup(
+            meta_path=meta_path,
+            raw_sha256=raw_sha256,
+            received_at=received_at,
+            replay=replay.get("is_replay") is True,
+        ),
     )
     return audit
 
@@ -930,10 +1324,11 @@ def _update_raw_metadata(
     *,
     detected_report_type: ClassificationLabel,
     routing_target: str | None,
-    processing_status: str,
+    processing_status: RawProcessingStatus,
     branch_hint: str | None,
     routing_metadata: dict[str, Any] | None,
     policy_decision: PolicyDecision | None,
+    governance_outcome: Mapping[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Update audit metadata without relocating the original raw archive."""
@@ -951,6 +1346,7 @@ def _update_raw_metadata(
             branch_hint=branch_hint,
             routing_metadata=routing_metadata,
             policy_decision=policy_decision,
+            governance_outcome=governance_outcome,
             extra_metadata=extra_metadata,
         ),
     )
@@ -1017,7 +1413,7 @@ def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
 
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     raw_message = payload.get("raw_message")
-    text = raw_message.get("text", "") if isinstance(raw_message, Mapping) else ""
+    text = _extract_processing_text(payload)
     metadata = _sanitize_metadata(payload.get("metadata"))
     header_result = normalize_headers(text)
     branch_resolution = resolve_branch(header_result, metadata_branch_hint=metadata.get("branch_hint"))
@@ -1111,6 +1507,22 @@ def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
     if replay:
         routed_payload["replay"] = replay
 
+    raw_record = _sanitize_raw_record(payload.get("raw_record"))
+    if raw_record:
+        routed_payload["raw_record"] = raw_record
+
+    cleaned_text = payload.get("cleaned_text")
+    if isinstance(cleaned_text, str):
+        routed_payload["cleaned_text"] = cleaned_text
+
+    pre_ingestion_validation = _sanitize_pre_ingestion_validation(payload.get("pre_ingestion_validation"))
+    if pre_ingestion_validation:
+        routed_payload["pre_ingestion_validation"] = pre_ingestion_validation
+
+    ingress_envelope = payload.get("ingress_envelope")
+    if isinstance(ingress_envelope, Mapping):
+        routed_payload["ingress_envelope"] = dict(ingress_envelope)
+
     return WorkItem(kind=RAW_MESSAGE_KIND, payload=routed_payload)
 
 
@@ -1123,6 +1535,7 @@ def _raw_metadata_payload(
     branch_hint: str | None,
     routing_metadata: dict[str, Any] | None,
     policy_decision: PolicyDecision | None,
+    governance_outcome: Mapping[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the raw metadata JSON payload."""
@@ -1138,9 +1551,17 @@ def _raw_metadata_payload(
         "raw_sha256": audit.raw_sha256,
         "processing_status": processing_status,
         "policy_guard": policy_decision.to_metadata() if policy_decision is not None else None,
+        "governance_status": None,
+        "governance_reasons": [],
+        "export_allowed": False,
     }
     if routing_metadata:
         payload.update(routing_metadata)
+    if isinstance(governance_outcome, Mapping):
+        payload["governance_status"] = governance_outcome.get("status")
+        reasons = governance_outcome.get("reasons")
+        payload["governance_reasons"] = list(reasons) if isinstance(reasons, list) else []
+        payload["export_allowed"] = governance_outcome.get("export_allowed") is True
     if extra_metadata:
         payload.update(extra_metadata)
     return payload
@@ -1167,6 +1588,26 @@ def _sanitize_optional_text(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _string_or_none(value: object) -> str | None:
+    """Return one stripped string or `None`."""
+
+    return _sanitize_optional_text(value)
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    """Return one mapping-like object or an empty mapping."""
+
+    return value if isinstance(value, Mapping) else {}
+
+
+def _with_candidate_mode(work_item: WorkItem) -> WorkItem:
+    """Return a routed work item that asks specialists for candidates only."""
+
+    payload = dict(work_item.payload) if isinstance(work_item.payload, dict) else {}
+    payload["governance_mode"] = "candidate"
+    return WorkItem(kind=work_item.kind, payload=payload)
 
 
 def _sanitize_replay(replay: object) -> dict[str, Any]:
@@ -1200,6 +1641,14 @@ def _sanitize_raw_record(raw_record: object) -> dict[str, Any]:
     if raw_record.get("raw_written") is True:
         safe_record["raw_written"] = True
     return safe_record
+
+
+def _sanitize_pre_ingestion_validation(validation: object) -> dict[str, Any]:
+    """Keep one validator payload only when it follows the expected shape."""
+
+    if not isinstance(validation, Mapping):
+        return {}
+    return dict(validation)
 
 
 def _reject_mixed_reports(payload: dict[str, Any]) -> bool:
@@ -1241,6 +1690,99 @@ def _load_existing_metadata(path: Path) -> dict[str, Any]:
     return {}
 
 
+def _load_existing_metadata_for_dedup(
+    *,
+    meta_path: Path,
+    raw_sha256: str,
+    received_at: str,
+    replay: bool,
+) -> dict[str, Any]:
+    """Return the most relevant existing raw metadata for duplicate detection."""
+
+    exact_metadata = _load_existing_metadata(meta_path)
+    if replay:
+        return exact_metadata
+
+    current_received_at = _parse_iso8601_timestamp(received_at)
+    if current_received_at is None:
+        return exact_metadata
+
+    best_match = (
+        _candidate_duplicate_metadata(
+            payload=exact_metadata,
+            raw_sha256=raw_sha256,
+            current_received_at=current_received_at,
+        )
+        if _is_reusable_exact_metadata(exact_metadata)
+        else None
+    )
+
+    for candidate_path in get_raw_path(UNKNOWN_STORAGE_BUCKET).glob("*.meta.json"):
+        if candidate_path == meta_path:
+            continue
+        candidate_payload = _load_existing_metadata(candidate_path)
+        candidate_match = _candidate_duplicate_metadata(
+            payload=candidate_payload,
+            raw_sha256=raw_sha256,
+            current_received_at=current_received_at,
+        )
+        if candidate_match is None:
+            continue
+        if best_match is None or candidate_match[0] > best_match[0]:
+            best_match = candidate_match
+
+    return best_match[1] if best_match is not None else exact_metadata
+
+
+def _candidate_duplicate_metadata(
+    *,
+    payload: dict[str, Any],
+    raw_sha256: str,
+    current_received_at: datetime,
+) -> tuple[datetime, dict[str, Any]] | None:
+    """Return duplicate-candidate metadata when the hash matches inside the dedup window."""
+
+    if _sanitize_optional_text(payload.get("raw_sha256")) != raw_sha256:
+        return None
+
+    existing_received_at = _parse_iso8601_timestamp(payload.get("received_at"))
+    if existing_received_at is None:
+        return None
+
+    age = current_received_at - existing_received_at
+    if age < timedelta(0) or age > RAW_SHA256_DEDUP_WINDOW:
+        return None
+    return existing_received_at, payload
+
+
+def _is_reusable_exact_metadata(payload: dict[str, Any]) -> bool:
+    """Return whether exact-path metadata predates the current ingest enough to seed dedup."""
+
+    if not payload:
+        return False
+    processing_status = _sanitize_optional_text(payload.get("processing_status"))
+    if processing_status and processing_status != "received":
+        return True
+    return isinstance(payload.get("policy_guard"), Mapping)
+
+
+def _parse_iso8601_timestamp(value: object) -> datetime | None:
+    """Return one timezone-aware timestamp when the input is parseable."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _extract_raw_text(payload: dict[str, object]) -> str:
     """Return the inbound raw text or an empty string for invalid input."""
 
@@ -1252,6 +1794,15 @@ def _extract_raw_text(payload: dict[str, object]) -> str:
     if not isinstance(text, str):
         return ""
     return text
+
+
+def _extract_processing_text(payload: dict[str, object]) -> str:
+    """Return cleaned text when explicitly provided, otherwise the raw text."""
+
+    cleaned_text = payload.get("cleaned_text")
+    if isinstance(cleaned_text, str):
+        return cleaned_text
+    return _extract_raw_text(payload)
 
 
 def _dispatch_to_specialist(
@@ -1280,6 +1831,16 @@ def _result_status(result: AgentResult) -> str:
     if isinstance(status, str) and status.strip():
         return status
     return "needs_review"
+
+
+def _raw_processing_status_for_result(status: str) -> RawProcessingStatus:
+    """Return the raw-audit processing status for one governed result."""
+
+    if status == "duplicate":
+        return "duplicate"
+    if status in {"rejected", "conflict_blocked", "invalid_input"}:
+        return "rejected"
+    return "processed"
 
 
 def _failure_result(
@@ -1327,6 +1888,12 @@ def _failure_result(
             "items": [],
             "warnings": warnings,
             "status": status,
+            "export_allowed": False,
+            "governance": {
+                "status": "duplicate" if status == "duplicate" else "rejected" if status in {"rejected", "invalid_input"} else status,
+                "export_allowed": False,
+                "reasons": [route_reason],
+            },
             "policy_guard": policy_decision.to_metadata() if policy_decision is not None else None,
         },
     )
@@ -1467,6 +2034,67 @@ def _result_confidence(result: AgentResult) -> float | None:
     return None
 
 
+def _result_governance(result: AgentResult) -> dict[str, Any]:
+    """Return the final governance payload for one result when present."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    governance = payload.get("governance")
+    if isinstance(governance, Mapping):
+        return dict(governance)
+    return _governance_outcome_payload(status=_result_status(result), reasons=[])
+
+
+def _result_validation_outcome(result: AgentResult) -> dict[str, Any]:
+    """Return the central validation outcome for provenance."""
+
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    validation = metadata.get("validation")
+    if isinstance(validation, Mapping):
+        return dict(validation)
+    return {"status": "not_run"}
+
+
+def _result_acceptance_outcome(result: AgentResult) -> dict[str, Any]:
+    """Return the central acceptance outcome for provenance."""
+
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    acceptance = metadata.get("acceptance")
+    if isinstance(acceptance, Mapping):
+        return dict(acceptance)
+    return {"status": _result_status(result)}
+
+
+def _result_metadata_extension(result: AgentResult) -> dict[str, Any] | None:
+    """Return extra raw-metadata fields derived from the finalized result."""
+
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    extra: dict[str, Any] = {
+        "validation": _result_validation_outcome(result),
+        "acceptance": _result_acceptance_outcome(result),
+        "candidate_payload": dict(payload),
+    }
+    review_queue_path = metadata.get("review_queue_path")
+    if isinstance(review_queue_path, str) and review_queue_path.strip():
+        extra["review_queue_path"] = review_queue_path.strip()
+    return extra
+
+
+def _governance_outcome_payload(
+    *,
+    status: str,
+    reasons: list[str],
+    export_allowed: bool = False,
+) -> dict[str, Any]:
+    """Return the raw-metadata and review-queue governance payload."""
+
+    return {
+        "status": status,
+        "export_allowed": export_allowed,
+        "reasons": list(reasons),
+    }
+
+
 def _classification_confidence(work_item: WorkItem) -> float | None:
     """Return the specialist-family classification confidence when present."""
 
@@ -1595,11 +2223,35 @@ def _rejection_reason_from_validation(warnings: list[dict[str, str]]) -> Rejecti
     return "invalid_input"
 
 
+def _policy_reason_to_governance_reason(reason: str) -> str:
+    """Map one policy-guard reason into the governance taxonomy."""
+
+    mapping = {
+        "duplicate_message": "duplicate_message_id",
+        "unknown_report_type": "unknown_report_type",
+        "invalid_pricing_card_format": "invalid_pricing_card_format",
+        "route_requires_review": "insufficient_structure",
+    }
+    return mapping.get(reason, "insufficient_structure")
+
+
 def _rejection_reason_from_result(result: AgentResult) -> RejectionReason:
     """Map specialist invalid-input results into stable rejection reason codes."""
 
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    governance = payload.get("governance")
+    if isinstance(governance, Mapping):
+        reasons = governance.get("reasons")
+        if isinstance(reasons, list):
+            for reason in reasons:
+                if reason in {
+                    "duplicate_message_id",
+                    "duplicate_raw_sha256",
+                    "duplicate_semantic",
+                    "conflicting_record_same_scope",
+                }:
+                    return reason
     if result.agent_name == "hr_agent":
-        payload = result.payload if isinstance(result.payload, dict) else {}
         warnings = payload.get("warnings")
         if isinstance(warnings, list):
             for warning in warnings:
@@ -1727,7 +2379,7 @@ def _structured_output_paths_from_result(result: AgentResult) -> list[str]:
     """Return canonical structured output paths for one child result."""
 
     payload = result.payload if isinstance(result.payload, dict) else {}
-    if payload.get("status") == "invalid_input":
+    if payload.get("status") in {"invalid_input", "rejected", "duplicate", "conflict_blocked"}:
         return []
 
     branch = payload.get("branch")
@@ -1795,10 +2447,32 @@ def _mixed_parent_status(
 
     if not child_summaries:
         return "invalid_input"
-    child_statuses = [summary.get("status") for summary in child_summaries]
-    if any(status == "invalid_input" for status in child_statuses):
+
+    child_statuses = [
+        summary.get("status")
+        for summary in child_summaries
+        if isinstance(summary.get("status"), str)
+    ]
+    if not child_statuses or len(child_statuses) != len(child_summaries):
         return "needs_review"
-    if any(status in {"needs_review", "accepted_with_warning"} for status in child_statuses):
+
+    success_statuses = {"accepted", "accepted_with_warning"}
+    warning_statuses = {"accepted_with_warning"}
+    failed_statuses = {
+        "invalid_input",
+        "needs_review",
+        "rejected",
+        "duplicate",
+        "conflict_blocked",
+    }
+
+    child_status_set = set(child_statuses)
+
+    if child_status_set & failed_statuses:
+        return "needs_review"
+    if not child_status_set <= success_statuses:
+        return "needs_review"
+    if child_status_set & warning_statuses:
         return "accepted_with_warning"
     if child_results:
         return "accepted_split"

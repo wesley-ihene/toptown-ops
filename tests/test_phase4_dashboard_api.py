@@ -94,6 +94,52 @@ def test_dashboard_renders_required_operational_views(tmp_path: Path) -> None:
     _write_staff_daily(tmp_path, "lae_malaita", "2026-04-07")
     _write_section_daily(tmp_path, "lae_malaita", "2026-04-07")
     _write_branch_comparison(tmp_path, "2026-04-07", ["waigani", "lae_malaita"])
+    _write_json(
+        tmp_path / "records" / "actions" / "2026-04-07" / "lae_malaita" / "low_conversion_rate" / "action-1.json",
+        {
+            "action_id": "action-1",
+            "action_type": "low_conversion_rate",
+            "rule_code": "low_conversion_rate",
+            "branch": "lae_malaita",
+            "report_date": "2026-04-07",
+            "signal_type": "sales_income",
+            "priority": "high",
+            "severity": "warning",
+            "assigned_to": "branch_supervisor",
+            "requires_ack": True,
+            "status": "pending",
+            "expires_at": "2026-04-08T23:59:59Z",
+        },
+    )
+    _write_json(
+        tmp_path / "records" / "feedback" / "2026-04-07" / "lae_malaita" / "action_1.json",
+        {
+            "feedback_id": "action_1_001",
+            "action_id": "action-1",
+            "branch": "lae_malaita",
+            "report_date": "2026-04-07",
+            "status": "acknowledged",
+            "acknowledged_by": "Ops One",
+            "acknowledged_at": "2026-04-07T10:00:00Z",
+            "resolution_note": None,
+            "evidence_paths": [],
+            "source_action_path": "records/actions/2026-04-07/lae_malaita/low_conversion_rate/action-1.json",
+            "linked_review_queue_path": None,
+            "version": "v1",
+            "history": [
+                {
+                    "feedback_id": "action_1_001",
+                    "status": "acknowledged",
+                    "acknowledged_by": "Ops One",
+                    "acknowledged_at": "2026-04-07T10:00:00Z",
+                    "resolution_note": None,
+                    "evidence_paths": [],
+                    "source_action_path": "records/actions/2026-04-07/lae_malaita/low_conversion_rate/action-1.json",
+                    "linked_review_queue_path": None,
+                }
+            ],
+        },
+    )
 
     response = phase4_portal.dispatch_http_request(
         method="GET",
@@ -103,16 +149,21 @@ def test_dashboard_renders_required_operational_views(tmp_path: Path) -> None:
     html = response.body.decode("utf-8")
 
     assert response.status_code == 200
-    assert "Executive Overview" in html
+    assert "Operational Overview" in html
     assert "Staff Performance View" in html
     assert "Sales vs Staffing Efficiency View" in html
     assert "Section Productivity View" in html
-    assert "Branch Comparison View" in html
-    assert "Top Branch by Ops Score" in html
-    assert "Weakest Branch by Ops Score" in html
+    assert "Branch Comparison Metrics" in html
+    assert "Highest Ops Score Branch" in html
+    assert "Lowest Ops Score Branch" in html
     assert "Top Items Moved" in html
     assert "Operational Flags" in html
     assert "Unresolved Sections Indicator" in html
+    assert "Operator Action Loop" in html
+    assert "Pending Actions" in html
+    assert "Acknowledged" in html
+    assert "Alice Demo" in html
+    assert "Unknown Rack" in html
 
 
 def test_dashboard_branch_and_date_filters_handle_partial_and_missing_data(tmp_path: Path) -> None:
@@ -140,6 +191,25 @@ def test_dashboard_branch_and_date_filters_handle_partial_and_missing_data(tmp_p
     assert missing_response.status_code == 404
     assert "Analytics Not Found" in missing_html
     assert "branch=bena_road, date=2026-04-09" in missing_html
+
+
+def test_dashboard_handles_invalid_json_as_missing_data(tmp_path: Path) -> None:
+    _write_branch_daily(tmp_path, "waigani", "2026-04-07", gross_sales=1200.0)
+    _write_branch_comparison(tmp_path, "2026-04-07", ["waigani"])
+    broken_staff_path = tmp_path / "analytics" / "staff_daily" / "waigani" / "2026-04-07.json"
+    broken_staff_path.parent.mkdir(parents=True, exist_ok=True)
+    broken_staff_path.write_text('{"branch": "waigani"', encoding="utf-8")
+
+    response = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/dashboard?branch=waigani&date=2026-04-07",
+        root=tmp_path,
+    )
+    html = response.body.decode("utf-8")
+
+    assert response.status_code == 200
+    assert "Staff Performance analytics are missing for the current selection." in html
+    assert "No staff analytics available." in html
 
 
 def _write_branch_daily(root: Path, branch: str, report_date: str, *, gross_sales: float) -> None:

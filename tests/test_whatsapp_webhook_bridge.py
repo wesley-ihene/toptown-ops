@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 
+from packages.observability import load_daily_artifact
 import packages.record_store.paths as record_paths
 from packages.signal_contracts.agent_result import AgentResult
 from scripts import whatsapp_webhook_bridge as bridge
@@ -23,7 +24,7 @@ def test_live_webhook_writes_raw_then_invokes_orchestrator(
         return AgentResult(
             agent_name="sales_income_agent",
             payload={
-                "status": "ready",
+                "status": "accepted",
                 "signal_type": "sales_income",
                 "branch": "waigani",
                 "report_date": "2026-04-07",
@@ -50,7 +51,7 @@ def test_live_webhook_writes_raw_then_invokes_orchestrator(
     assert body["ok"] is True
     assert body["raw_written"] is True
     assert body["replay"] is False
-    assert body["orchestrator_status"] == "ready"
+    assert body["orchestrator_status"] == "accepted"
     assert body["agent"] == "sales_income_agent"
     assert body["route"] == "sales"
     assert body["outputs"] == [
@@ -68,6 +69,166 @@ def test_live_webhook_writes_raw_then_invokes_orchestrator(
     assert work_item.payload["replay"] == {"is_replay": False}
     assert work_item.payload["raw_record"]["raw_written"] is True
     assert work_item.payload["ingress_envelope"]["payload"]["text"] == "DAY-END SALES REPORT\nBranch: Waigani"
+
+
+def test_validator_runs_before_orchestrator_and_records_observability(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    call_order: list[str] = []
+
+    def fake_validate_inbound_text(text, *, payload_kind="text", metadata=None):
+        del metadata
+        call_order.append("validator")
+        return {
+            "status": "accepted",
+            "cleaned_text": text,
+            "reasons": [],
+            "warnings": [],
+            "detected_risks": [],
+            "suggested_report_family": "sales",
+            "validator_version": "v1",
+        }
+
+    def fake_process_work_item(work_item):
+        call_order.append("orchestrator")
+        return AgentResult(
+            agent_name="sales_income_agent",
+            payload={
+                "status": "accepted",
+                "signal_type": "sales_income",
+                "branch": "waigani",
+                "report_date": "2026-04-07",
+            },
+        )
+
+    monkeypatch.setattr(bridge, "validate_inbound_text", fake_validate_inbound_text)
+    monkeypatch.setattr(bridge.orchestrator_worker, "process_work_item", fake_process_work_item)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(_meta_payload(message_id="wamid.validate-order-1")).encode("utf-8"),
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    body = json.loads(response.body.decode("utf-8"))
+    observability = load_daily_artifact("pre_ingestion_validation", "2026-04-07", output_root=tmp_path)
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert call_order == ["validator", "orchestrator"]
+    assert len(raw_meta_paths) == 1
+    assert _read_json(raw_meta_paths[0])["pre_ingestion_validation"]["status"] == "accepted"
+    assert observability is not None
+    assert observability["summary"]["accepted"] == 1
+    assert observability["events"][0]["message_id"] == "wamid.validate-order-1"
+
+
+def test_validator_reject_still_writes_raw_txt_and_meta(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    orchestrator_calls = 0
+
+    def fake_validate_inbound_text(text, *, payload_kind="text", metadata=None):
+        del text, payload_kind, metadata
+        return {
+            "status": "rejected",
+            "cleaned_text": "",
+            "reasons": [{"code": "empty_input", "message": "empty"}],
+            "warnings": [],
+            "detected_risks": [],
+            "suggested_report_family": None,
+            "validator_version": "v1",
+        }
+
+    def fake_process_work_item(work_item):
+        nonlocal orchestrator_calls
+        orchestrator_calls += 1
+        return AgentResult(agent_name="orchestrator_agent", payload={"status": "accepted"})
+
+    monkeypatch.setattr(bridge, "validate_inbound_text", fake_validate_inbound_text)
+    monkeypatch.setattr(bridge.orchestrator_worker, "process_work_item", fake_process_work_item)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(_meta_payload(message_id="wamid.reject-1", text="   \r\n\t")).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    raw_text_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.txt")
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["raw_written"] is True
+    assert body["orchestrator_status"] == "skipped"
+    assert body["validator_status"] == "rejected"
+    assert body["validator_reason_summary"] == ["empty_input"]
+    assert orchestrator_calls == 0
+    assert len(raw_text_paths) == 1
+    assert len(raw_meta_paths) == 1
+    assert _read_json(raw_meta_paths[0])["pre_ingestion_validation"]["status"] == "rejected"
+
+
+def test_cleaned_text_is_forwarded_when_validator_cleans_input(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    captured_work_items = []
+    original_text = "  DAY-END SALES REPORT\r\n\r\nBranch: Waigani  "
+    cleaned_text = "DAY-END SALES REPORT\n\nBranch: Waigani"
+
+    def fake_validate_inbound_text(text, *, payload_kind="text", metadata=None):
+        del payload_kind, metadata
+        assert text == original_text
+        return {
+            "status": "cleaned",
+            "cleaned_text": cleaned_text,
+            "reasons": [{"code": "trimmed_whitespace", "message": "trimmed"}],
+            "warnings": [],
+            "detected_risks": [],
+            "suggested_report_family": "sales",
+            "validator_version": "v1",
+        }
+
+    def fake_process_work_item(work_item):
+        captured_work_items.append(work_item)
+        return AgentResult(
+            agent_name="sales_income_agent",
+            payload={
+                "status": "accepted",
+                "signal_type": "sales_income",
+                "branch": "waigani",
+                "report_date": "2026-04-07",
+            },
+        )
+
+    monkeypatch.setattr(bridge, "validate_inbound_text", fake_validate_inbound_text)
+    monkeypatch.setattr(bridge.orchestrator_worker, "process_work_item", fake_process_work_item)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(_meta_payload(message_id="wamid.cleaned-1", text=original_text)).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert len(captured_work_items) == 1
+    assert captured_work_items[0].payload["raw_message"]["text"] == original_text
+    assert captured_work_items[0].payload["cleaned_text"] == cleaned_text
+    assert captured_work_items[0].payload["ingress_envelope"]["payload"]["text"] == cleaned_text
+    assert captured_work_items[0].payload["pre_ingestion_validation"]["status"] == "cleaned"
+    assert _read_json(raw_meta_paths[0])["pre_ingestion_validation"]["status"] == "cleaned"
 
 
 def test_replay_webhook_skips_raw_write_and_invokes_orchestrator(
@@ -144,7 +305,7 @@ def test_duplicate_live_webhook_does_not_duplicate_raw_write_or_dispatch(
         return AgentResult(
             agent_name="sales_income_agent",
             payload={
-                "status": "ready",
+                "status": "accepted",
                 "signal_type": "sales_income",
                 "branch": "waigani",
                 "report_date": "2026-04-07",
@@ -169,29 +330,30 @@ def test_duplicate_live_webhook_does_not_duplicate_raw_write_or_dispatch(
     assert second_body["orchestrator_status"] == "skipped"
 
 
-def test_same_text_with_different_message_id_gets_collision_safe_raw_path(
+def test_same_raw_sha256_with_different_message_ids_is_rejected_within_24_hours(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     _patch_environment(monkeypatch, tmp_path)
-    dispatch_count = 0
-    request_one = json.dumps(_meta_payload(message_id="wamid.live-1", text="Repeated body")).encode("utf-8")
-    request_two = json.dumps(_meta_payload(message_id="wamid.live-2", text="Repeated body")).encode("utf-8")
+    specialist_calls = 0
+    repeated_text = "DAY-END SALES REPORT\nBranch: Waigani\nDate: 2026-04-07\nGross Sales: 1200"
+    request_one = json.dumps(_meta_payload(message_id="wamid.live-1", text=repeated_text)).encode("utf-8")
+    request_two = json.dumps(_meta_payload(message_id="wamid.live-2", text=repeated_text)).encode("utf-8")
 
-    def fake_process_work_item(work_item):
-        nonlocal dispatch_count
-        dispatch_count += 1
+    def fake_dispatch_to_specialist(work_item, *, target_agent):
+        nonlocal specialist_calls
+        specialist_calls += 1
         return AgentResult(
-            agent_name="sales_income_agent",
+            agent_name=target_agent,
             payload={
-                "status": "ready",
+                "status": "accepted",
                 "signal_type": "sales_income",
                 "branch": "waigani",
                 "report_date": "2026-04-07",
             },
         )
 
-    monkeypatch.setattr(bridge.orchestrator_worker, "process_work_item", fake_process_work_item)
+    monkeypatch.setattr(bridge.orchestrator_worker, "_dispatch_to_specialist", fake_dispatch_to_specialist)
 
     first = bridge.dispatch_http_request(method="POST", target="/webhook", body=request_one)
     second = bridge.dispatch_http_request(method="POST", target="/webhook", body=request_two)
@@ -206,7 +368,11 @@ def test_same_text_with_different_message_id_gets_collision_safe_raw_path(
     assert second_body["ok"] is True
     assert first_body["raw_written"] is True
     assert second_body["raw_written"] is True
-    assert dispatch_count == 2
+    assert first_body["duplicate"] is False
+    assert second_body["duplicate"] is True
+    assert second_body["duplicate_reason"] == "duplicate_message"
+    assert second_body["orchestrator_status"] == "duplicate"
+    assert specialist_calls == 1
     assert len(raw_text_paths) == 2
     assert second_body["raw_txt_path"].endswith(".txt")
     assert "__" in Path(second_body["raw_txt_path"]).stem
@@ -222,7 +388,7 @@ def test_webhooks_whatsapp_alias_matches_webhook_post_behavior(
         return AgentResult(
             agent_name="sales_income_agent",
             payload={
-                "status": "ready",
+                "status": "accepted",
                 "signal_type": "sales_income",
                 "branch": "waigani",
                 "report_date": "2026-04-07",
@@ -334,7 +500,7 @@ def test_live_webhook_fans_out_mixed_report_when_split_is_safe(
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["detected_report_type"] == "mixed"
     assert raw_meta["routing_target"] == "fan_out"
-    assert raw_meta["processing_status"] in {"accepted_split", "accepted_with_warning"}
+    assert raw_meta["processing_status"] == "processed"
 
 
 def test_health_endpoint_returns_bridge_status(
@@ -449,6 +615,9 @@ def _patch_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
+    monkeypatch.setattr(record_paths, "REVIEW_DIR", records_dir / "review")
+    monkeypatch.setattr(record_paths, "PROVENANCE_DIR", records_dir / "provenance")
+    monkeypatch.setattr(record_paths, "OBSERVABILITY_DIR", records_dir / "observability")
     monkeypatch.setattr(bridge, "REPO_ROOT", tmp_path)
 
 

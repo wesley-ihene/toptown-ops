@@ -46,7 +46,7 @@ def interpret_throughput(stock_flow: StockFlowInterpretation) -> ThroughputInter
             )
         )
 
-    readiness_status = "ready" if not warnings else "needs_review"
+    readiness_status = "accepted" if not warnings else "needs_review"
     return ThroughputInterpretation(
         release_ratio=round(release_ratio, 4),
         readiness_status=readiness_status,

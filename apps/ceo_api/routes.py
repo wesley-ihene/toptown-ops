@@ -1,4 +1,12 @@
-"""Read-only Phase 5 CEO API routes."""
+"""Read-only Phase 5 CEO API routes.
+
+Wave 1 freeze marker:
+- These routes are frozen for compatibility only.
+- They expose duplicated executive/intelligence views that are slated to move
+  out of TopTown Ops ownership.
+- Do not add new CEO or executive interpretation behavior here.
+- Route hiding is deferred to Wave 2; no behavior change is allowed in Wave 1.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +31,14 @@ from packages.common.executive_alerts import (
 )
 
 SERVICE_NAME = "phase5_ceo_api"
+DEPRECATION_WARNING = (
+    "CEO/executive routes are deprecated compatibility surfaces in TopTown Ops "
+    "and are hidden from normal product exposure in Wave 2."
+)
+DEPRECATION_OWNER_BOUNDARY = (
+    "TopTown Ops remains operator-facing. Executive interpretation belongs "
+    "downstream in IOI Colony."
+)
 
 
 def route_request(path: str, params: Mapping[str, list[str]], *, root: str | None = None) -> tuple[int, dict[str, Any]] | None:
@@ -102,12 +118,12 @@ def route_request(path: str, params: Mapping[str, list[str]], *, root: str | Non
         return _result(payload, error, product="alerts_branch")
 
     if path in {"/api/ceo/catalog", "/api/executive/catalog"}:
-        return HTTPStatus.OK, {
+        return HTTPStatus.OK, _deprecated_response({
             "ok": True,
             "service": SERVICE_NAME,
             "product": "catalog",
             "payload": build_ceo_catalog(root=root),
-        }
+        })
 
     if path == "/api/ceo/dashboard":
         report_date = _query_value(params, "date")
@@ -130,19 +146,28 @@ def route_request(path: str, params: Mapping[str, list[str]], *, root: str | Non
 def _result(payload: dict[str, Any] | None, error: dict[str, Any] | None, *, product: str) -> tuple[int, dict[str, Any]]:
     if payload is None:
         assert error is not None
-        return HTTPStatus.NOT_FOUND, {"ok": False, "service": SERVICE_NAME, **error}
-    return HTTPStatus.OK, {"ok": True, "service": SERVICE_NAME, "product": product, "payload": payload}
+        return HTTPStatus.NOT_FOUND, _deprecated_response({"ok": False, "service": SERVICE_NAME, **error})
+    return HTTPStatus.OK, _deprecated_response({"ok": True, "service": SERVICE_NAME, "product": product, "payload": payload})
 
 
 def _bad_request(product: str, *, needs_branch: bool) -> tuple[int, dict[str, Any]]:
     message = "`date` query parameter is required." if not needs_branch else "`branch` and `date` query parameters are required."
-    return HTTPStatus.BAD_REQUEST, {
+    return HTTPStatus.BAD_REQUEST, _deprecated_response({
         "ok": False,
         "service": SERVICE_NAME,
         "error": "missing_filters",
         "message": message,
         "product": product,
-    }
+    })
+
+
+def _deprecated_response(payload: dict[str, Any]) -> dict[str, Any]:
+    decorated = dict(payload)
+    decorated["deprecated"] = True
+    decorated["warning"] = DEPRECATION_WARNING
+    decorated["owner_boundary"] = DEPRECATION_OWNER_BOUNDARY
+    decorated["operator_routes"] = ["/dashboard", "/api/analytics/*", "/api/dashboard"]
+    return decorated
 
 
 def _query_value(params: Mapping[str, list[str]], key: str) -> str | None:

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from packages.data_governance import read_governance_sidecar
+
 from .paths import RECORDS_DIR, get_structured_path, get_structured_path_for_root
 
 
@@ -45,3 +47,23 @@ def read_structured_record(
     """Backward-compatible wrapper for reading one structured record."""
 
     return read_structured(record_type, branch, record_date, root=root)
+
+
+def read_structured_governance(
+    record_type: str,
+    branch: str,
+    record_date: str,
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Read the governance sidecar for one structured record."""
+
+    if root is None:
+        path = get_structured_path(record_type, branch, record_date)
+    else:
+        path = get_structured_path_for_root(
+            Path(root) / RECORDS_DIR.name / "structured",
+            signal_type=record_type,
+            branch=branch,
+            date=record_date,
+        )
+    return read_governance_sidecar(path)

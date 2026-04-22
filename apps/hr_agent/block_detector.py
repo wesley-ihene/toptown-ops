@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import re
 
 _NUMBERED_LINE_PATTERN = re.compile(r"^\s*(\d+)\s*(?:[.)\-:]+|\s)\s*(.*)$")
+_LABELED_BLOCK_PATTERN = re.compile(r"^\s*(?:[^\w\s]+)?(?:staff|stuff)\s*\.?\s*(\d+)\b[.)\-:]*\s*(.*)$", flags=re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -26,12 +27,14 @@ def split_numbered_blocks(lines: list[str]) -> tuple[list[DetectedBlock], list[s
 
     for line in lines:
         numbered_match = _NUMBERED_LINE_PATTERN.match(line)
-        if numbered_match is not None:
+        labeled_match = _LABELED_BLOCK_PATTERN.match(line)
+        if numbered_match is not None or labeled_match is not None:
+            match = numbered_match or labeled_match
             if current is not None:
                 blocks.append(current)
             current = DetectedBlock(
-                record_number=int(numbered_match.group(1)),
-                header=numbered_match.group(2).strip(),
+                record_number=int(match.group(1)),
+                header=match.group(2).strip(),
             )
             continue
 
@@ -62,6 +65,12 @@ def _is_summary_boundary(line: str) -> bool:
             "g/total",
             "attendance summary",
             "summary",
+            "total items",
+            "total customers assist",
+            "total customers assisted",
+            "the total numbers of items",
+            "thank you",
+            "thanks",
             "present:",
             "p:",
             "off:",

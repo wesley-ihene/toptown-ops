@@ -10,3 +10,4 @@ class AgentResult:
 
     agent_name: str
     payload: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)

@@ -15,6 +15,8 @@ class PerformanceRecord:
     raw_section: str | None = None
     role: str | None = None
     duty_status: str = "on_duty"
+    arrangement_grade: int | None = None
+    display_grade: int | None = None
     performance_grade: int | None = None
     items_moved: int = 0
     assisting_count: int = 0

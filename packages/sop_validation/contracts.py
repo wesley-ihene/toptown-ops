@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from packages.validation import build_rejection
+
 
 @dataclass(slots=True, frozen=True)
 class Rejection:
@@ -16,13 +18,11 @@ class Rejection:
     def to_payload(self) -> dict[str, str]:
         """Return a JSON-safe rejection payload."""
 
-        payload = {
-            "code": self.code,
-            "message": self.message,
-        }
-        if self.field is not None:
-            payload["field"] = self.field
-        return payload
+        return build_rejection(
+            reason_code=self.code,
+            reason_detail=self.message,
+            field=self.field,
+        )
 
 
 @dataclass(slots=True)

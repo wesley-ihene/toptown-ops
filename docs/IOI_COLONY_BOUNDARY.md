@@ -1,8 +1,15 @@
 # IOI Colony Boundary
 
+This document describes the boundary between the two TAOP subsystems:
+
+- TopTown Ops (`toptown-ops`) as the Operations Engine
+- IOI Colony (`ioi-colony`) as the Intelligence Engine
+
+Together they form the TopTown AI Operations Platform (TAOP), but they remain separate repositories with an explicit handoff contract.
+
 ## Audit Result
 
-`ioi-colony` is operating as the downstream intelligence and opportunity layer, but it still contains a substantial legacy raw-WhatsApp ingestion stack and several raw-input fallback assumptions.
+`ioi-colony` is operating as the downstream intelligence and opportunity layer inside TAOP, but it still contains a substantial legacy raw-WhatsApp ingestion stack and several raw-input fallback assumptions.
 
 Its mission and worker model are downstream-oriented:
 
@@ -14,7 +21,7 @@ That is consistent with the blueprint. The remaining issue is not role confusion
 
 ## Confirmed Downstream Role
 
-Current files show that Colony is primarily the intelligence/opportunity system:
+Current files show that Colony is primarily the Intelligence Engine:
 
 - `MISSION.md` defines IOI Colony as an autonomous intelligence system for ranked opportunities.
 - `worker_decision_v2.py` consumes normalized signals and writes opportunity-oriented outputs.
@@ -42,7 +49,7 @@ These files directly ingest, classify, quarantine, or parse WhatsApp-originated 
 - `scripts/parse_whatsapp_attendance.py`
 - `scripts/parse_bale_summary.py`
 
-This is the largest remaining boundary violation relative to the blueprint.
+This is the largest remaining boundary violation relative to the TAOP architecture.
 
 ### 2. Colony cycle health checks still depend on WhatsApp directories and state
 
@@ -77,7 +84,7 @@ That confirms the old boundary is still active rather than merely archived.
 
 ## Boundary Decision
 
-Target boundary:
+Target boundary inside TAOP:
 
 - `toptown-ops` owns raw WhatsApp intake, routing, specialist parsing, and structured records.
 - `ioi-colony` owns normalized-signal consumption, memory, fusion, ranking, and opportunity outputs.

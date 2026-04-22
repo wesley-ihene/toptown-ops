@@ -1,4 +1,8 @@
-"""Read-only Phase 4 dashboard and API server over analytics JSON outputs."""
+"""Read-only operator portal and deprecated executive compatibility server.
+
+Wave 2 keeps operator routes active in TopTown Ops while isolating deprecated
+CEO/executive surfaces behind compatibility routing only.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ from apps.dashboard_ui.routes import render_dashboard_response, render_not_found
 from analytics.phase5_executive import (
     build_ceo_dashboard,
 )
+from packages.feedback_store import build_action_feedback_state
 from packages.common.analytics_loader import (
     build_catalog,
     canonical_branch_or_none,
@@ -29,7 +34,10 @@ SERVICE_NAME = "phase4_dashboard_api"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8010
 HEALTH_ROUTE = "/health"
-DASHBOARD_ROUTES = {"/", "/dashboard"}
+OPERATOR_DASHBOARD_ROUTES = {"/", "/dashboard"}
+DEPRECATED_EXECUTIVE_DASHBOARD_ROUTES = {"/ceo", "/ceo/dashboard"}
+DEPRECATED_EXECUTIVE_API_PREFIXES = ("/api/ceo", "/api/executive")
+COMPATIBILITY_QUERY_PARAM = "compat"
 
 
 @dataclass(slots=True)
@@ -52,6 +60,7 @@ def dispatch_http_request(
     parsed = urlparse(target)
     path = parsed.path or "/"
     params = parse_qs(parsed.query, keep_blank_values=True)
+    compatibility_mode = _compatibility_mode_requested(params) or _compatibility_mode_requested_from_query(parsed.query)
 
     if method != "GET":
         return _json_response(
@@ -75,12 +84,15 @@ def dispatch_http_request(
             },
         )
 
-    result = ceo_route_request(path, params, root=str(root) if root is not None else None)
+    if _is_hidden_deprecated_surface(path) and not compatibility_mode:
+        return _deprecated_surface_hidden_response(path=path)
+
+    result = route_request(path, params, root=str(root) if root is not None else None)
     if result is not None:
         status_code, payload = result
         return _json_response(status_code, payload)
 
-    result = route_request(path, params, root=str(root) if root is not None else None)
+    result = ceo_route_request(path, params, root=str(root) if root is not None else None)
     if result is not None:
         status_code, payload = result
         return _json_response(status_code, payload)
@@ -89,9 +101,9 @@ def dispatch_http_request(
         return _dashboard_json_response(params=params, root=root)
     if path == "/api/ceo/dashboard":
         return _ceo_dashboard_json_response(params=params, root=root)
-    if path in DASHBOARD_ROUTES:
+    if path in OPERATOR_DASHBOARD_ROUTES:
         return _dashboard_response(path=path, params=params, root=root)
-    if path in {"/ceo", "/ceo/dashboard"}:
+    if path in DEPRECATED_EXECUTIVE_DASHBOARD_ROUTES:
         return _ceo_dashboard_response(path=path, params=params, root=root)
 
     if path.startswith("/api/"):
@@ -322,9 +334,16 @@ def _load_bundle(
         "branch": branch,
         "report_date": report_date,
         "staff": staff_payload,
+        "staff_daily": staff_payload,
         "branch_daily": branch_daily_payload,
         "section": section_payload,
+        "section_daily": section_payload,
         "branch_comparison": comparison_payload,
+        "operator_action_state": build_action_feedback_state(
+            report_date,
+            branch=branch,
+            output_root=root,
+        ),
     }
 
 
@@ -334,6 +353,90 @@ def _query_value(params: Mapping[str, list[str]], key: str) -> str | None:
         return None
     value = values[0].strip()
     return value or None
+
+
+def _compatibility_mode_requested(params: Mapping[str, list[str]]) -> bool:
+    requested = _query_value(params, COMPATIBILITY_QUERY_PARAM)
+    if requested is None:
+        return False
+    return requested.lower() in {"1", "true", "yes", "on"}
+
+
+def _compatibility_mode_requested_from_query(query: str) -> bool:
+    for token in query.split("&"):
+        key, _, value = token.partition("=")
+        if key != COMPATIBILITY_QUERY_PARAM:
+            continue
+        if value.lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
+def _is_hidden_deprecated_surface(path: str) -> bool:
+    if path in DEPRECATED_EXECUTIVE_DASHBOARD_ROUTES:
+        return True
+    if path.startswith(DEPRECATED_EXECUTIVE_API_PREFIXES):
+        return True
+    return False
+
+
+def _deprecated_surface_hidden_response(*, path: str) -> PortalHttpResponse:
+    payload = {
+        "ok": False,
+        "service": SERVICE_NAME,
+        "error": "deprecated_surface_hidden",
+        "message": (
+            "Deprecated CEO/executive surfaces are hidden from normal TopTown Ops "
+            f"exposure. Add `{COMPATIBILITY_QUERY_PARAM}=1` only for rollback or "
+            "automation compatibility."
+        ),
+        "path": path,
+        "compatibility_query": f"{COMPATIBILITY_QUERY_PARAM}=1",
+        "operator_routes": ["/dashboard", "/api/analytics/*", "/api/dashboard"],
+    }
+    if path.startswith("/api/"):
+        return _json_response(HTTPStatus.NOT_FOUND, payload)
+    return _html_response(
+        HTTPStatus.NOT_FOUND,
+        f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deprecated Surface Hidden</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: linear-gradient(155deg, #eff6ff, #f8fafc);
+      color: #0f172a;
+    }}
+    article {{
+      max-width: 720px;
+      background: rgba(255, 255, 255, 0.96);
+      border-radius: 20px;
+      padding: 28px;
+      box-shadow: 0 20px 48px rgba(15, 23, 42, 0.12);
+      border: 1px solid rgba(15, 23, 42, 0.08);
+    }}
+    code {{ font-family: "IBM Plex Mono", monospace; }}
+    a {{ color: #0f766e; font-weight: 700; }}
+  </style>
+</head>
+<body>
+  <article>
+    <h1>Deprecated Surface Hidden</h1>
+    <p>CEO/executive compatibility routes are no longer part of normal TopTown Ops product exposure.</p>
+    <p><strong>Route:</strong> {path}</p>
+    <p>Use <code>{COMPATIBILITY_QUERY_PARAM}=1</code> only for rollback or automation compatibility.</p>
+    <p><a href="/dashboard">Back to dashboard</a></p>
+  </article>
+</body>
+</html>""",
+    )
 
 
 def _json_response(status_code: int, payload: Mapping[str, Any]) -> PortalHttpResponse:

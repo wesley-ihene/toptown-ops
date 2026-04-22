@@ -1,6 +1,19 @@
-# Toptown Ops Architecture
+# TopTown Ops Architecture
 
-`toptown-ops` is the upstream coordination layer in front of IOI Colony. It owns intake, orchestration, specialist parsing, upstream review/reject handling, provenance, proposal generation, and observability. It does not own colony intelligence, colony memory, or direct WhatsApp replies.
+`toptown-ops` is part of the TopTown AI Operations Platform (TAOP). Within TAOP, this repository is the Operations Engine. The separate `ioi-colony` repository is the Intelligence Engine. Together they form one integrated platform with an explicit upstream-to-downstream handoff.
+
+This repo owns intake, orchestration, specialist parsing, upstream review/reject handling, provenance, proposal generation, observability, and structured signal export. It does not own downstream intelligence, colony memory, or direct WhatsApp replies.
+
+## Platform Architecture
+
+TopTown AI Operations Platform (TAOP):
+
+- TopTown Ops (Operations Engine): ingestion, normalization, governance, structured outputs
+- IOI Colony (Intelligence Engine): consumes approved signals and produces downstream intelligence
+
+Pipeline:
+
+`WhatsApp -> TopTown Ops -> Governance -> IOI Colony -> Intelligence Outputs`
 
 ## Layered Agent Design
 
@@ -143,7 +156,7 @@ Primary stores:
 
 ## IOI Colony Boundary
 
-The boundary with IOI Colony stays explicit.
+The boundary with `ioi-colony` stays explicit inside TAOP.
 
 `toptown-ops` owns:
 
@@ -154,7 +167,7 @@ The boundary with IOI Colony stays explicit.
 - upstream storage, provenance, proposals, and observability
 - export of standardized downstream signals
 
-IOI Colony owns:
+`ioi-colony` owns:
 
 - normalized signal consumption
 - downstream memory
@@ -162,6 +175,6 @@ IOI Colony owns:
 
 The contract remains one-way:
 
-`toptown-ops -> Signal Outbox / exported signals -> IOI Colony`
+`toptown-ops -> Signal Outbox / exported signals -> ioi-colony`
 
-IOI Colony should not read raw WhatsApp inputs or upstream internal state directly.
+The Intelligence Engine should not read raw WhatsApp inputs or upstream internal state directly.

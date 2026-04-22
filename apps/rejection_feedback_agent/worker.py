@@ -52,7 +52,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
 
     record_payload = {
         "agent": AGENT_NAME,
-        "status": "ready",
+        "status": "accepted",
         "report_type": report_type,
         "branch": branch,
         "report_date": report_date,

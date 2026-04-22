@@ -10,8 +10,10 @@ from apps.hr_agent.record_store import write_structured_record
 from apps.hr_agent.scoring import compute_performance_score
 from apps.hr_agent.warnings import dedupe_warnings, make_warning
 from apps.staff_performance_agent.parser import ParsedStaffPerformanceReport, parse_work_item
+from packages.data_governance import build_governance_context
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
+from packages.validation import ValidationMetadata, normalize_rejections
 
 AGENT_NAME = "staff_performance_agent"
 SIGNAL_TYPE = "hr"
@@ -33,15 +35,30 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
     """Parse, summarize, and persist one staff performance report."""
 
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    candidate_only = _candidate_mode_requested(payload)
     raw_message = payload.get("raw_message")
     if not isinstance(raw_message, dict) or not isinstance(raw_message.get("text"), str) or not raw_message["text"].strip():
         return _failure_result(
-            "The work item raw_message.text field must be present for staff performance parsing."
+            "The work item raw_message.text field must be present for staff performance parsing.",
+            work_item_payload=payload,
         )
 
-    parsed = parse_work_item(work_item)
-    result = build_staff_performance_result(parsed)
-    write_structured_record(result.payload)
+    try:
+        parsed = parse_work_item(work_item)
+        result = build_staff_performance_result(parsed)
+        result.metadata["governance_context"] = build_governance_context(payload)
+    except Exception:
+        result = _failure_result(
+            "The staff performance report could not be parsed safely.",
+            work_item_payload=payload,
+            parser_failure=True,
+        )
+
+    if candidate_only:
+        return result
+
+    write_result = write_structured_record(result.payload, metadata=result.metadata)
+    _apply_governance_result(result, write_result)
     return result
 
 
@@ -92,6 +109,8 @@ def build_staff_performance_result(
                     "raw_section": record.raw_section,
                     "role": record.role,
                     "duty_status": record.duty_status,
+                    "arrangement_grade": record.arrangement_grade,
+                    "display_grade": record.display_grade,
                     "performance_grade": record.performance_grade,
                     "items_moved": record.items_moved,
                     "assisting_count": record.assisting_count,
@@ -129,14 +148,24 @@ def build_staff_performance_result(
             "warnings": [warning.to_payload() for warning in warnings],
             "status": status,
         },
+        metadata=_validation_metadata(
+            stage=source_agent,
+            status=status,
+            warnings=warnings,
+        ),
     )
 
 
-def _failure_result(message: str) -> AgentResult:
+def _failure_result(
+    message: str,
+    *,
+    work_item_payload: dict[str, object],
+    parser_failure: bool = False,
+) -> AgentResult:
     """Return one invalid-input result for staff performance parsing."""
 
     warning = make_warning(
-        code="missing_fields",
+        code="parser_failure" if parser_failure else "missing_fields",
         severity="error",
         message=message,
     )
@@ -161,6 +190,13 @@ def _failure_result(message: str) -> AgentResult:
             "warnings": [warning.to_payload()],
             "status": "invalid_input",
         },
+        metadata=_validation_metadata(
+            stage=AGENT_NAME,
+            status="invalid_input",
+            warnings=[warning],
+            work_item_payload=work_item_payload,
+            parser_failure=parser_failure,
+        ),
     )
 
 
@@ -219,6 +255,42 @@ def _determine_status(
     return "accepted"
 
 
+def _validation_metadata(
+    *,
+    stage: str,
+    status: str,
+    warnings,
+    work_item_payload: dict[str, object] | None = None,
+    parser_failure: bool = False,
+) -> dict[str, object]:
+    """Return sidecar validation metadata for staff performance records."""
+
+    return {
+        "validation": ValidationMetadata(
+            stage=stage,
+            status="passed" if status != "invalid_input" else "rejected",
+            accepted=status != "invalid_input",
+            rejections=normalize_rejections([warning.to_payload() for warning in warnings if warning.severity == "error"]),
+            details={
+                "final_status": status,
+                "parser_failure": parser_failure,
+            },
+        ).to_payload(),
+        "governance_context": build_governance_context(work_item_payload or {}),
+    }
+
+
+def _apply_governance_result(result: AgentResult, write_result: object) -> None:
+    """Project the persisted governance result back onto the live agent payload."""
+
+    governance = getattr(write_result, "governance", None)
+    if governance is None:
+        return
+    result.payload["status"] = governance.status
+    result.payload["export_allowed"] = governance.export_allowed
+    result.payload["governance"] = governance.to_payload()
+
+
 def _review_policy_summary(*, status: str, warnings) -> dict[str, object]:
     """Return a small explicit summary of the review policy outcome."""
 
@@ -228,3 +300,9 @@ def _review_policy_summary(*, status: str, warnings) -> dict[str, object]:
         "warning_count": len(warnings),
         "final_status": status,
     }
+
+
+def _candidate_mode_requested(payload: dict[str, object]) -> bool:
+    """Return whether this worker should stop at candidate generation."""
+
+    return payload.get("governance_mode") == "candidate"

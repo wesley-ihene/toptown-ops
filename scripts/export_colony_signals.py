@@ -17,7 +17,7 @@ from packages.record_store.paths import (
     RECORDS_DIR,
     get_structured_path_for_root,
 )
-from packages.record_store.reader import read_structured
+from packages.record_store.reader import read_structured, read_structured_governance
 from packages.record_store.writer import ensure_directory, write_json_file
 
 CONTRACT_VERSION = "1.0"
@@ -659,6 +659,23 @@ def _export_record_type_result(
     }
     if record is None:
         return result
+    governance = read_structured_governance(
+        record_type,
+        canonical_branch,
+        iso_date,
+        root=source_repo_root,
+    )
+    if governance:
+        export_allowed = governance.get("export_allowed") is True
+        governance_reason = str(governance.get("status") or "governance_export_blocked")
+    else:
+        export_allowed = False
+        governance_reason = "missing_governance_sidecar"
+    if not export_allowed:
+        result["status"] = "skipped"
+        result["reason"] = governance_reason
+        result["governance"] = governance
+        return result
 
     mapper = _mapper_for_record_type(record_type)
     try:
@@ -742,6 +759,11 @@ def _event_warnings(record: Mapping[str, Any]) -> list[Any]:
     if isinstance(warnings, list):
         return list(warnings)
     return []
+
+
+def _legacy_export_allowed(record: Mapping[str, Any]) -> bool:
+    status = record.get("status")
+    return status in {None, "ready", "accepted", "accepted_with_warning"}
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

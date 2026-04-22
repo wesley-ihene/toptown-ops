@@ -25,6 +25,9 @@ def write_provenance_record(
     acceptance_outcome: dict[str, Any],
     downstream_references: dict[str, Any],
     extra: dict[str, Any] | None = None,
+    received_at_utc: str | None = None,
+    completed_at_utc: str | None = None,
+    record_latency: bool = True,
 ) -> str:
     """Write one provenance record and return its path."""
 
@@ -46,16 +49,19 @@ def write_provenance_record(
     if extra:
         payload.update(extra)
     write_json_file(provenance_path, payload)
-    record_processing_event(
-        report_date=report_date,
-        branch=branch,
-        report_type=report_type,
-        outcome=outcome,
-        parse_mode=parse_mode,
-        parser_used=parser_used,
-        confidence=confidence,
-        warnings=[warning for warning in warnings if isinstance(warning, dict)],
-    )
+    if record_latency:
+        record_processing_event(
+            report_date=report_date,
+            branch=branch,
+            report_type=report_type,
+            outcome=outcome,
+            parse_mode=parse_mode,
+            parser_used=parser_used,
+            confidence=confidence,
+            warnings=[warning for warning in warnings if isinstance(warning, dict)],
+            received_at_utc=received_at_utc,
+            completed_at_utc=completed_at_utc,
+        )
     if parse_mode == "fallback":
         from packages.review_learning import generate_fallback_learning_proposals
 

@@ -13,9 +13,11 @@ RAW_WHATSAPP_DIR = RECORDS_DIR / "raw" / "whatsapp"
 STRUCTURED_DIR = RECORDS_DIR / "structured"
 REJECTED_DIR = RECORDS_DIR / "rejected" / "whatsapp"
 REVIEW_DIR = RECORDS_DIR / "review"
+FEEDBACK_DIR = RECORDS_DIR / "feedback"
 PROVENANCE_DIR = RECORDS_DIR / "provenance"
 PROPOSALS_DIR = RECORDS_DIR / "proposals"
 OBSERVABILITY_DIR = RECORDS_DIR / "observability"
+ACTIONS_DIR = RECORDS_DIR / "actions"
 
 
 def get_raw_path(report_type: str) -> Path:
@@ -52,14 +54,39 @@ def get_rejected_path(report_type: str) -> Path:
     return REJECTED_DIR / safe_segment(report_type)
 
 
-def get_review_path(date: str, branch: str, report_type: str) -> Path:
+def get_review_path(
+    date: str,
+    branch: str,
+    report_type: str,
+    *,
+    output_root: str | Path | None = None,
+) -> Path:
     """Return the base path for review items under date/branch/report_type."""
 
+    review_dir = REVIEW_DIR if output_root is None else Path(output_root) / "records" / "review"
     return (
-        REVIEW_DIR
+        review_dir
         / safe_segment(date)
         / safe_segment(branch)
         / safe_segment(report_type)
+    )
+
+
+def get_feedback_path(
+    report_date: str,
+    branch: str,
+    action_id: str,
+    *,
+    output_root: str | Path | None = None,
+) -> Path:
+    """Return the canonical JSON path for one operator feedback artifact."""
+
+    feedback_dir = FEEDBACK_DIR if output_root is None else Path(output_root) / "records" / "feedback"
+    return (
+        feedback_dir
+        / report_date
+        / safe_segment(branch)
+        / f"{safe_segment(action_id)}.json"
     )
 
 
@@ -90,6 +117,45 @@ def get_observability_summary_path(report_date: str) -> Path:
     """Return the daily observability summary artifact path."""
 
     return OBSERVABILITY_DIR / "daily" / safe_segment(report_date) / "summary.json"
+
+
+def get_action_path(
+    report_date: str,
+    branch: str,
+    action_type: str,
+    action_id: str,
+    *,
+    output_root: str | Path | None = None,
+) -> Path:
+    """Return the canonical JSON path for one autonomous action artifact."""
+
+    actions_dir = ACTIONS_DIR if output_root is None else Path(output_root) / "records" / "actions"
+    return (
+        actions_dir
+        / report_date
+        / safe_segment(branch)
+        / safe_segment(action_type)
+        / f"{safe_segment(action_id)}.json"
+    )
+
+
+def get_action_preview_path(
+    report_date: str,
+    branch: str,
+    action_type: str,
+    action_id: str,
+    *,
+    output_root: str | Path | None = None,
+) -> Path:
+    """Return the canonical WhatsApp preview path for one autonomous action artifact."""
+
+    return get_action_path(
+        report_date,
+        branch,
+        action_type,
+        action_id,
+        output_root=output_root,
+    ).with_suffix(".whatsapp.txt")
 
 
 def raw_whatsapp_records_dir(record_type: str | None = None) -> Path:

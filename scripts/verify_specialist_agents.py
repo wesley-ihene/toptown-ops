@@ -78,7 +78,7 @@ def run_sales_test() -> None:
     assert payload["signal_type"] == "sales_income"
     assert payload["source_agent"] == "sales_income_agent"
     assert payload["report_date"] == "2026-04-06"
-    assert payload["status"] == "ready"
+    assert payload["status"] == "accepted"
     assert payload["warnings"] == []
     assert payload["metrics"]["cash_sales"] == 2741.0
     assert payload["metrics"]["eftpos_sales"] == 2991.0

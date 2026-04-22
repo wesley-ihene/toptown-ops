@@ -47,7 +47,7 @@ def test_write_feedback_record_writes_json_and_whatsapp_preview(
         payload={
             "agent": "rejection_feedback_agent",
             "report_type": "sales",
-            "status": "ready",
+            "status": "accepted",
         },
         dry_run=False,
     )
@@ -94,7 +94,7 @@ def test_process_work_item_writes_json_only_in_whatsapp_dry_run(
     )
 
     assert result.agent_name == "rejection_feedback_agent"
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert result.payload["delivery"]["channel"] == "whatsapp"
     assert result.payload["delivery"]["dry_run"] is True
     assert result.payload["delivery"]["dispatch_status"] == "dry_run"

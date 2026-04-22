@@ -394,12 +394,43 @@ def test_export_all_includes_supervisor_control_manifest_entry(tmp_path: Path) -
     assert manifest["summary"]["scanned"] == 5
 
 
+def test_export_skips_when_governance_sidecar_is_missing(tmp_path: Path) -> None:
+    _write_structured_record(
+        tmp_path,
+        "sales_income",
+        "waigani",
+        "2026-04-06",
+        {
+            "branch": "waigani",
+            "report_date": "2026-04-06",
+            "signal_type": "sales_income",
+            "metrics": {"gross_sales": 1200.0},
+            "warnings": [],
+        },
+        write_governance=False,
+    )
+
+    manifest = export_colony_signals.export_one_record_type(
+        "sales_income",
+        "waigani",
+        "2026-04-06",
+        source_root=tmp_path,
+        colony_root=tmp_path / "ioi-colony",
+    )
+
+    assert manifest["results"][0]["status"] == "skipped"
+    assert manifest["results"][0]["reason"] == "missing_governance_sidecar"
+
+
 def _write_structured_record(
     root: Path,
     record_type: str,
     branch: str,
     report_date: str,
     payload: dict[str, object],
+    *,
+    governance: dict[str, object] | None = None,
+    write_governance: bool = True,
 ) -> Path:
     path = (
         root
@@ -411,6 +442,27 @@ def _write_structured_record(
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if write_governance:
+        governance_path = path.with_suffix(".governance.json")
+        governance_payload = {
+            "status": "accepted",
+            "export_allowed": True,
+            "report_family": record_type,
+            "signal_type": str(payload.get("signal_type") or record_type),
+            "branch": branch,
+            "report_date": report_date,
+            "message_id": None,
+            "raw_sha256": None,
+            "normalized_scope": f"{record_type}:{branch}:{report_date}",
+            "semantic_sha256": "seed",
+            "reasons": [],
+            "warnings": [],
+            "source_status": str(payload.get("status") or "accepted"),
+            "duplicate_of": None,
+        }
+        if isinstance(governance, dict):
+            governance_payload.update(governance)
+        governance_path.write_text(json.dumps(governance_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 

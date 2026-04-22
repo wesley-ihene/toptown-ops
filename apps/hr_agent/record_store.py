@@ -9,7 +9,7 @@ from typing import Any
 
 from apps.hr_agent.date_branch_resolver import normalize_report_date
 from apps.hr_agent.field_mapper import canonical_branch_slug
-from packages.record_store.writer import write_structured
+from packages.record_store.writer import write_governed_structured
 
 _SUBTYPE_TO_RECORD_TYPE = {
     "staff_performance": "hr_performance",
@@ -19,7 +19,11 @@ _CANONICAL_BRANCH_PATTERN = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
+def write_structured_record(
+    payload: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> object | None:
     """Persist a valid HR payload as a canonical structured record."""
 
     signal_type = payload.get("signal_type")
@@ -47,11 +51,12 @@ def write_structured_record(payload: Mapping[str, Any]) -> Path | None:
     if canonical_branch is None or iso_report_date is None:
         return None
 
-    return write_structured(
+    return write_governed_structured(
         signal_type=_SUBTYPE_TO_RECORD_TYPE[signal_subtype],
         branch=canonical_branch,
         date=iso_report_date,
         payload=dict(payload),
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
     )
 
 

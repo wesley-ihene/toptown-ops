@@ -1,4 +1,14 @@
-"""Deterministic Phase 5 CEO summaries over existing analytics JSON outputs."""
+"""Deterministic Phase 5 CEO summaries over existing analytics JSON outputs.
+
+Wave 1 freeze marker:
+- This module is frozen in place for compatibility.
+- It represents duplicated executive/intelligence aggregation that belongs
+  downstream in IOI Colony, not canonically in TopTown Ops.
+- Do not expand this module with new executive interpretation logic.
+- Wave 2/3 will hide callers first and remove this layer later.
+
+Runtime behavior is intentionally unchanged in Wave 1.
+"""
 
 from __future__ import annotations
 
@@ -270,7 +280,7 @@ def build_ceo_alerts(report_date: str, *, root: str | None = None) -> tuple[dict
                     branch_name,
                     report_date,
                     "branch_daily",
-                    "Sales input is missing for this branch/date.",
+                    "Sales reporting is incomplete for this branch/date.",
                     source_records,
                 )
             )
@@ -282,7 +292,7 @@ def build_ceo_alerts(report_date: str, *, root: str | None = None) -> tuple[dict
                     branch_name,
                     report_date,
                     "branch_daily",
-                    "Staff input is missing for this branch/date.",
+                    "Staff reporting is incomplete for this branch/date.",
                     source_records,
                 )
             )
@@ -295,7 +305,7 @@ def build_ceo_alerts(report_date: str, *, root: str | None = None) -> tuple[dict
                     branch_name,
                     report_date,
                     "branch_daily",
-                    "Branch analytics reference records still marked needs_review.",
+                    "Branch reporting requires review; confidence reduced.",
                     source_records,
                 )
             )
@@ -308,7 +318,7 @@ def build_ceo_alerts(report_date: str, *, root: str | None = None) -> tuple[dict
                     branch_name,
                     report_date,
                     "branch_daily",
-                    "Branch analytics reference records accepted with warning.",
+                    "Branch reporting was accepted with caution; confidence reduced.",
                     source_records,
                 )
             )
@@ -363,7 +373,7 @@ def build_ceo_alerts(report_date: str, *, root: str | None = None) -> tuple[dict
                     branch_name,
                     report_date,
                     "section_daily",
-                    f"{unresolved_count} unresolved section hotspot(s) remain for this branch.",
+                    f"{unresolved_count} unresolved section issue(s) remain for this branch.",
                     source_records,
                 )
             )
@@ -389,7 +399,7 @@ def build_ceo_alerts(report_date: str, *, root: str | None = None) -> tuple[dict
                     branch_name,
                     report_date,
                     "branch_comparison",
-                    "Branch readiness is degraded because required analytics inputs are missing.",
+                    "Branch reporting is incomplete because required information is missing.",
                     source_records,
                 )
             )

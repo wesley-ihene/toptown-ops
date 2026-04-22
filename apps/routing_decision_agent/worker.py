@@ -43,6 +43,9 @@ def build_routing_decision(
     if family_classification.report_family == "unknown":
         processing_status = "needs_review"
         review_reason = "unknown_report_family"
+    elif family_classification.report_family == "invalid_pricing_card_format":
+        processing_status = "needs_review"
+        review_reason = "invalid_pricing_card_format"
     elif family_route.target_agent is None:
         processing_status = "needs_review"
         review_reason = "family_requires_manual_review"

@@ -20,6 +20,27 @@ def test_normalize_branch_passes_through_canonical_slug() -> None:
     assert result.succeeded is True
 
 
+def test_normalize_branch_resolves_stylized_unicode_header() -> None:
+    result = normalize_branch("𝕎𝔸𝕀𝔾𝔸ℕ𝕀 𝔹ℝ𝔸ℕℂℍ")
+
+    assert result.normalized_value == "waigani"
+    assert result.metadata["matched_alias"] == "waigani branch"
+
+
+def test_normalize_branch_resolves_decorative_punctuation_and_reordered_tokens() -> None:
+    result = normalize_branch("BRANCH::WAIGANI")
+
+    assert result.normalized_value == "waigani"
+    assert result.metadata["matched_alias"] == "waigani branch"
+
+
+def test_normalize_branch_resolves_branch_variant_with_extra_noise() -> None:
+    result = normalize_branch("Shop >>> TTC LAE 5TH STREET BRANCH !!!")
+
+    assert result.normalized_value == "lae_5th_street"
+    assert result.metadata["matched_alias"] == "ttc lae 5th street branch"
+
+
 def test_normalize_report_is_idempotent_for_recoverable_sales_text() -> None:
     raw_text = "\n".join(
         [
@@ -44,6 +65,13 @@ def test_normalize_report_is_idempotent_for_recoverable_sales_text() -> None:
 
 def test_normalize_branch_rejects_unknown_alias() -> None:
     result = normalize_branch("Unknown Satellite Store")
+
+    assert result.normalized_value is None
+    assert result.hard_errors == ["unknown_branch_alias"]
+
+
+def test_normalize_branch_rejects_ambiguous_branch_header() -> None:
+    result = normalize_branch("TTC LAE BRANCH")
 
     assert result.normalized_value is None
     assert result.hard_errors == ["unknown_branch_alias"]

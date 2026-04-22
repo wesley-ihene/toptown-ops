@@ -20,15 +20,22 @@ _PERFORMANCE_STATUS_LINE_PATTERN = re.compile(
     r"^\s*\d+\s*[.)-]?\s*.+?\s*-\s*(?:off|leave|sick|absent|sent home|\d)\b",
     flags=re.IGNORECASE,
 )
+_PERFORMANCE_BLOCK_PATTERN = re.compile(r"^\s*(?:[^\w\s]+)?(?:staff|stuff)\s*\.?\s*\d+\b", flags=re.IGNORECASE)
 _BALE_HEADER_LINE_PATTERN = re.compile(r"^\s*(?:#\s*)?\d+\s*(?:\.\s*|\s+)[A-Za-z]", flags=re.IGNORECASE)
 _CHECKMARK_PATTERN = re.compile(r"[✔✅]")
+_PRICING_CARD_BALE_PATTERN = re.compile(r"\bbale\s*#", flags=re.IGNORECASE)
+_PRICING_CARD_GRADE_LINE_PATTERN = re.compile(r"^\s*[abc]\s*[:=.-]\s*\S", flags=re.IGNORECASE)
 
 FAMILY_PATTERNS: Final[dict[str, tuple[str, ...]]] = {
     "staff_performance": (
         "staff performance report",
+        "stuff performance report",
         "staff peformance report",
+        "stuff peformance report",
         "staff performance rating",
+        "stuff performance rating",
         "staff peformance rating",
+        "stuff peformance rating",
         "update for staff performance",
         "performance assisting",
         "staff assisting customers",
@@ -95,10 +102,15 @@ _PERFORMANCE_MARKERS: Final[tuple[str, ...]] = (
     "total items moved",
     "items sold",
     "item sold",
+    "item assisting",
     "assist",
     "assisting",
     "customers assist",
     "customer assists",
+    "arrangements",
+    "display",
+    "prepared by",
+    "staff name",
     "performance rating",
 )
 _BALE_MARKERS: Final[tuple[str, ...]] = (
@@ -111,6 +123,12 @@ _BALE_MARKERS: Final[tuple[str, ...]] = (
     "total amount",
     "prepared by",
 )
+_PRICING_CARD_RELEASE_INDICATORS: Final[tuple[str, ...]] = (
+    "released to rail",
+    "approved",
+    "sent to floor",
+)
+INVALID_PRICING_CARD_REJECTION_CODE: Final[str] = "invalid_pricing_card_format"
 _SUPERVISOR_MARKERS: Final[tuple[str, ...]] = (
     "cash variance",
     "staffing issues",
@@ -137,6 +155,9 @@ def classify_report_family(text: str, header_result: HeaderNormalizationResult) 
 
     header_lines = header_result.normalized_lines()
     normalized_body = _normalize_text(text)
+    invalid_pricing_card = _detect_invalid_pricing_card_format(text=text, normalized_body=normalized_body)
+    if invalid_pricing_card is not None:
+        return invalid_pricing_card
     evidence_by_family: dict[str, list[str]] = {}
     score_by_family: dict[str, float] = {}
 
@@ -250,6 +271,14 @@ def _family_heuristic_score(*, family: str, text: str, normalized_body: str) -> 
         if rating_count >= 5:
             score += 0.2
             evidence.append(f"body_marker:performance_ratings:{rating_count}")
+        block_count = sum(1 for line in lines if _PERFORMANCE_BLOCK_PATTERN.search(line))
+        if block_count >= 3:
+            score += 0.15
+            evidence.append(f"body_marker:performance_blocks:{block_count}")
+        rubric_hits = _matched_tokens(normalized_body, ("arrangements", "display", "performance", "prepared by"))
+        if len(rubric_hits) >= 3:
+            score += 0.15
+            evidence.append(f"body_marker:performance_rubric:{','.join(rubric_hits[:3])}")
 
     elif family == "pricing_stock_release":
         bale_hits = _matched_tokens(normalized_body, _BALE_MARKERS)
@@ -291,3 +320,39 @@ def _matched_tokens(normalized_body: str, markers: tuple[str, ...]) -> list[str]
         if marker in normalized_body and marker not in hits:
             hits.append(marker)
     return hits
+
+
+def _detect_invalid_pricing_card_format(*, text: str, normalized_body: str) -> FamilyClassification | None:
+    """Return a hard-stop classifier result for non-release bale pricing cards."""
+
+    if any(indicator in normalized_body for indicator in _PRICING_CARD_RELEASE_INDICATORS):
+        return None
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    normalized_lines = [_normalize_text(line) for line in lines]
+    grade_line_count = sum(1 for line in lines if _PRICING_CARD_GRADE_LINE_PATTERN.match(line))
+
+    required_markers = {
+        "bale_header": _PRICING_CARD_BALE_PATTERN.search(text) is not None,
+        "item": any(re.search(r"\bitem\b", line) for line in normalized_lines),
+        "wt": any(re.search(r"\bwt\b", line) for line in normalized_lines),
+        "sales": any(re.search(r"\bsales\b", line) for line in normalized_lines),
+        "pricer": any(re.search(r"\bpricer\b", line) for line in normalized_lines),
+        "grades": grade_line_count >= 3,
+    }
+    if not all(required_markers.values()):
+        return None
+
+    return FamilyClassification(
+        report_family=INVALID_PRICING_CARD_REJECTION_CODE,
+        confidence=1.0,
+        evidence=[
+            "body_marker:pricing_card_bale_header",
+            "body_marker:pricing_card_item_field",
+            "body_marker:pricing_card_weight_field",
+            f"body_marker:pricing_card_grade_lines:{grade_line_count}",
+            "body_marker:pricing_card_sales_field",
+            "body_marker:pricing_card_pricer_field",
+            "body_marker:pricing_card_missing_release_indicator",
+        ],
+    )

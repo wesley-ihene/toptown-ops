@@ -1,4 +1,17 @@
-"""Production-safe CEO analytics over existing structured signals."""
+"""Production-safe CEO analytics over existing structured signals.
+
+Wave 1 freeze marker:
+- This module is frozen against Wave 1 behavior changes.
+- Only documentation/ownership markers should be added here in Wave 1.
+
+Wave 1 ownership note:
+- Deterministic metric computation may remain temporarily in TopTown Ops when
+  it is strictly derived from upstream structured records.
+- Executive interpretation and downstream "what matters / why / what should we
+  do" ownership does not belong in TopTown Ops and should not expand here.
+- Wave 1 keeps this module behavior unchanged while clarifying that it is a
+  computation helper, not the canonical executive intelligence layer.
+"""
 
 from __future__ import annotations
 
@@ -292,7 +305,7 @@ def generate_alerts(summary_dict):
             {
                 "family": "productivity",
                 "code": "conversion_issue",
-                "message": "Traffic converted weakly relative to store footfall.",
+                "message": "Customer conversion is below expectations.",
             }
         )
     if sales_per_staff is not None and sales_per_staff < LOW_SALES_PER_STAFF_THRESHOLD:
@@ -300,7 +313,7 @@ def generate_alerts(summary_dict):
             {
                 "family": "productivity",
                 "code": "labor_productivity_issue",
-                "message": "Sales per staff member is below the review threshold.",
+                "message": "Sales per staff member is below expectations.",
             }
         )
 
@@ -312,7 +325,7 @@ def generate_alerts(summary_dict):
             {
                 "family": "stock_velocity",
                 "code": "slow_stock_movement",
-                "message": "Sales are converting released stock value slowly.",
+                "message": "Inventory released is converting to sales more slowly than expected.",
             }
         )
     if (
@@ -326,7 +339,7 @@ def generate_alerts(summary_dict):
             {
                 "family": "stock_velocity",
                 "code": "stock_shortage_risk",
-                "message": "Sales are strong relative to released stock value.",
+                "message": "Sales are strong relative to current released inventory.",
             }
         )
 
@@ -343,7 +356,7 @@ def generate_alerts(summary_dict):
             {
                 "family": "payroll_efficiency",
                 "code": "labor_inefficiency",
-                "message": "Headcount is high for the revenue generated.",
+                "message": "Current staffing levels are high for the revenue generated.",
             }
         )
     if (
@@ -356,7 +369,7 @@ def generate_alerts(summary_dict):
             {
                 "family": "payroll_efficiency",
                 "code": "understaffed_risk",
-                "message": "Sales are strong relative to the small present headcount.",
+                "message": "Sales are strong relative to the current team size.",
             }
         )
     return alerts
@@ -715,7 +728,7 @@ def _render_markdown_summary(summary: Mapping[str, Any]) -> str:
     lines = [
         f"# CEO Summary: {summary['branch']} ({summary['date']})",
         "",
-        "## Sources available",
+        "## Reporting status",
     ]
     for key in ("sales", "staff", "attendance", "pricing"):
         lines.append(f"- {key}: {_format_bool(summary['sources'].get(key))}")
@@ -778,7 +791,7 @@ def _format_metric(value: Any) -> str:
 
 
 def _format_bool(value: Any) -> str:
-    return "yes" if bool(value) else "no"
+    return "current" if bool(value) else "information not current"
 
 
 if __name__ == "__main__":

@@ -210,15 +210,15 @@ def test_ceo_api_handles_success_and_missing_data_cleanly(tmp_path: Path) -> Non
     _seed_ceo_fixture(tmp_path)
 
     routes = [
-        "/api/ceo/overview?date=2026-04-07",
-        "/api/ceo/branches?date=2026-04-07",
-        "/api/ceo/staff?date=2026-04-07",
-        "/api/ceo/sections?date=2026-04-07",
-        "/api/ceo/alerts?date=2026-04-07",
-        "/api/ceo/alerts/feed?date=2026-04-07",
-        "/api/ceo/alerts/branch?branch=lae_malaita&date=2026-04-07",
-        "/api/ceo/catalog",
-        "/api/ceo/dashboard?branch=lae_malaita&date=2026-04-07",
+        "/api/ceo/overview?date=2026-04-07&compat=1",
+        "/api/ceo/branches?date=2026-04-07&compat=1",
+        "/api/ceo/staff?date=2026-04-07&compat=1",
+        "/api/ceo/sections?date=2026-04-07&compat=1",
+        "/api/ceo/alerts?date=2026-04-07&compat=1",
+        "/api/ceo/alerts/feed?date=2026-04-07&compat=1",
+        "/api/ceo/alerts/branch?branch=lae_malaita&date=2026-04-07&compat=1",
+        "/api/ceo/catalog?compat=1",
+        "/api/ceo/dashboard?branch=lae_malaita&date=2026-04-07&compat=1",
     ]
 
     for target in routes:
@@ -226,10 +226,12 @@ def test_ceo_api_handles_success_and_missing_data_cleanly(tmp_path: Path) -> Non
         body = json.loads(response.body.decode("utf-8"))
         assert response.status_code == 200
         assert body["ok"] is True
+        assert body["deprecated"] is True
+        assert body["operator_routes"] == ["/dashboard", "/api/analytics/*", "/api/dashboard"]
 
     missing = phase4_portal.dispatch_http_request(
         method="GET",
-        target="/api/ceo/overview?date=2026-04-08",
+        target="/api/ceo/overview?date=2026-04-08&compat=1",
         root=tmp_path,
     )
     missing_body = json.loads(missing.body.decode("utf-8"))
@@ -249,7 +251,7 @@ def test_ceo_alert_routes_prefer_file_backed_artifacts_when_present(tmp_path: Pa
 
     alerts_response = phase4_portal.dispatch_http_request(
         method="GET",
-        target="/api/ceo/alerts?date=2026-04-07",
+        target="/api/ceo/alerts?date=2026-04-07&compat=1",
         root=tmp_path,
     )
     alerts_body = json.loads(alerts_response.body.decode("utf-8"))
@@ -259,7 +261,7 @@ def test_ceo_alert_routes_prefer_file_backed_artifacts_when_present(tmp_path: Pa
 
     feed_response = phase4_portal.dispatch_http_request(
         method="GET",
-        target="/api/ceo/alerts/feed?date=2026-04-07",
+        target="/api/ceo/alerts/feed?date=2026-04-07&compat=1",
         root=tmp_path,
     )
     feed_body = json.loads(feed_response.body.decode("utf-8"))
@@ -271,7 +273,7 @@ def test_ceo_alert_routes_prefer_file_backed_artifacts_when_present(tmp_path: Pa
 
     branch_response = phase4_portal.dispatch_http_request(
         method="GET",
-        target="/api/ceo/alerts/branch?branch=lae_malaita&date=2026-04-07",
+        target="/api/ceo/alerts/branch?branch=lae_malaita&date=2026-04-07&compat=1",
         root=tmp_path,
     )
     branch_body = json.loads(branch_response.body.decode("utf-8"))
@@ -345,7 +347,7 @@ def test_executive_alert_builders_emit_missing_input_alerts(tmp_path: Path) -> N
     assert "record_needs_review" in codes
 
 
-def test_ceo_routes_are_wired_through_main_dispatcher(tmp_path: Path) -> None:
+def test_ceo_routes_are_hidden_from_normal_product_exposure(tmp_path: Path) -> None:
     _seed_ceo_fixture(tmp_path)
 
     for target in (
@@ -355,12 +357,30 @@ def test_ceo_routes_are_wired_through_main_dispatcher(tmp_path: Path) -> None:
         response = phase4_portal.dispatch_http_request(method="GET", target=target, root=tmp_path)
         body = json.loads(response.body.decode("utf-8"))
 
+        assert response.status_code == 404
+        assert body["ok"] is False
+        assert body["service"] == "phase4_dashboard_api"
+        assert body["error"] == "deprecated_surface_hidden"
+        assert body["compatibility_query"] == "compat=1"
+
+
+def test_ceo_routes_remain_available_in_explicit_compatibility_mode(tmp_path: Path) -> None:
+    _seed_ceo_fixture(tmp_path)
+
+    for target in (
+        "/api/ceo/overview?date=2026-04-07&compat=1",
+        "/api/executive/overview?date=2026-04-07&compat=1",
+    ):
+        response = phase4_portal.dispatch_http_request(method="GET", target=target, root=tmp_path)
+        body = json.loads(response.body.decode("utf-8"))
+
         assert response.status_code == 200
         assert body["ok"] is True
         assert body["service"] == "phase5_ceo_api"
+        assert body["deprecated"] is True
 
 
-def test_ceo_dashboard_renders_executive_control_sections(tmp_path: Path) -> None:
+def test_ceo_dashboard_is_hidden_without_compatibility_mode(tmp_path: Path) -> None:
     _seed_ceo_fixture(tmp_path)
 
     response = phase4_portal.dispatch_http_request(
@@ -370,16 +390,33 @@ def test_ceo_dashboard_renders_executive_control_sections(tmp_path: Path) -> Non
     )
     html = response.body.decode("utf-8")
 
+    assert response.status_code == 404
+    assert "Deprecated Surface Hidden" in html
+    assert "compat=1" in html
+
+
+def test_ceo_dashboard_renders_executive_control_sections_in_compatibility_mode(tmp_path: Path) -> None:
+    _seed_ceo_fixture(tmp_path)
+
+    response = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/ceo?branch=lae_malaita&date=2026-04-07&compat=1",
+        root=tmp_path,
+    )
+    html = response.body.decode("utf-8")
+
     assert response.status_code == 200
-    assert "TopTown CEO Dashboard" in html
-    assert "Executive Summary Cards" in html
-    assert "Branch Scorecards" in html
-    assert "Staff Leadership View" in html
-    assert "Section Leadership View" in html
-    assert "Executive Alerts Panel" in html
-    assert "/api/ceo/overview?date=2026-04-07" in html
-    assert "/api/ceo/alerts?date=2026-04-07" in html
+    assert "TopTown Deprecated Executive Compatibility View" in html
+    assert "Deprecation Notice" in html
+    assert "Compatibility Summary Cards" in html
+    assert "Branch Compatibility View" in html
+    assert "Staff Compatibility View" in html
+    assert "Section Compatibility View" in html
+    assert "Deprecated Alerts Panel" in html
+    assert "operator dashboard at" in html
+    assert "/api/ceo/overview?date=2026-04-07" not in html
     assert "lae_malaita" in html
+    assert 'name="compat" value="1"' in html
 
 
 def _seed_ceo_fixture(root: Path) -> None:

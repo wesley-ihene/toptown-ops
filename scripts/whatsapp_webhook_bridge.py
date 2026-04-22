@@ -25,9 +25,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from apps.pre_ingestion_validator import validate_inbound_text
 import apps.orchestrator_agent.worker as orchestrator_worker
 from dotenv import load_dotenv
 from packages.common.paths import REPO_ROOT
+from packages.observability import record_pre_ingestion_validation_event
 from packages.record_store.naming import safe_segment
 from packages.record_store.paths import get_raw_path, get_structured_path
 from packages.record_store.writer import write_json_file, write_text_file
@@ -255,14 +257,26 @@ def _extract_direct_envelope(
     payload_block = payload.get("payload")
     candidate = payload_block if isinstance(payload_block, Mapping) else payload
     raw_message = payload.get("raw_message")
-    text = _clean_text(
+    payload_kind = _clean_text(
+        candidate.get("payload_kind")
+        if isinstance(candidate, Mapping)
+        else None
+    ) or _clean_text(candidate.get("type") if isinstance(candidate, Mapping) else None) or "text"
+    text = _text_value(
         candidate.get("text")
         if isinstance(candidate, Mapping)
         else None
     )
     if text is None and isinstance(raw_message, Mapping):
-        text = _clean_text(raw_message.get("text"))
+        text = _text_value(raw_message.get("text"))
     replay = _sanitize_replay(payload.get("replay"))
+    if text is None:
+        if payload_kind != "text":
+            text = ""
+        elif replay.get("is_replay") is True:
+            raise ValueError("explicit replay payload requires `text` or `raw_message.text`")
+        else:
+            return None
     if text is None:
         if replay.get("is_replay") is True:
             raise ValueError("explicit replay payload requires `text` or `raw_message.text`")
@@ -295,6 +309,7 @@ def _extract_direct_envelope(
         or _clean_text(payload.get("raw_txt_path")),
         raw_meta_path=_clean_text(candidate.get("raw_meta_path") if isinstance(candidate, Mapping) else None)
         or _clean_text(payload.get("raw_meta_path")),
+        payload_kind=payload_kind,
     )
 
 
@@ -339,7 +354,12 @@ def _extract_meta_messages(
             for message in messages:
                 if not isinstance(message, Mapping):
                     continue
+                payload_kind = _clean_text(message.get("type")) or "text"
                 text = _extract_meta_text(message)
+                if text is None and payload_kind == "text":
+                    text = ""
+                if text is None and payload_kind != "text":
+                    text = ""
                 if text is None:
                     continue
                 envelopes.append(
@@ -356,6 +376,7 @@ def _extract_meta_messages(
                         display_phone_number=_clean_text(metadata_map.get("display_phone_number")),
                         replay={"is_replay": False},
                         verify_context=verify_context,
+                        payload_kind=payload_kind,
                     )
                 )
     return envelopes
@@ -367,7 +388,7 @@ def _extract_meta_text(message: Mapping[str, Any]) -> str | None:
     text_payload = message.get("text")
     if not isinstance(text_payload, Mapping):
         return None
-    return _clean_text(text_payload.get("body"))
+    return _text_value(text_payload.get("body"))
 
 
 def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
@@ -440,12 +461,46 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             "outputs": [],
         }
 
+    validation_result: dict[str, Any] | None = None
+    if replay.get("is_replay") is not True:
+        validation_result = validate_inbound_text(
+            envelope.text,
+            payload_kind=envelope.payload_kind,
+            metadata={
+                "message_id": envelope.message_id,
+                "received_at": envelope.received_at,
+            },
+        )
+        _record_pre_ingestion_validation(
+            envelope=envelope,
+            raw_record=raw_record,
+            result=validation_result,
+        )
+        _write_pre_ingestion_validation_to_raw_meta(
+            raw_meta_path=raw_record.get("raw_meta_path"),
+            validation_result=validation_result,
+        )
+        if validation_result.get("status") == "rejected":
+            LOGGER.info(
+                "pre-ingestion validation rejected message before orchestration: message_id=%s reasons=%s",
+                envelope.message_id,
+                ",".join(_validation_reason_codes(validation_result)) or "none",
+            )
+            return _validation_rejection_response(
+                envelope=envelope,
+                raw_record=raw_record,
+                raw_sha256=raw_sha256,
+                message_sha256=message_sha256,
+                validation_result=validation_result,
+            )
+
     try:
         work_item = build_work_item(
             envelope=envelope,
             raw_record=raw_record,
             raw_sha256=raw_sha256,
             message_sha256=message_sha256,
+            validation_result=validation_result,
         )
     except Exception as exc:
         LOGGER.exception("whatsapp work item construction failed")
@@ -517,6 +572,7 @@ def build_work_item(
     raw_record: dict[str, Any],
     raw_sha256: str,
     message_sha256: str,
+    validation_result: dict[str, Any] | None = None,
 ) -> WorkItem:
     """Build the existing raw-message work item with a stable ingress envelope."""
 
@@ -528,12 +584,18 @@ def build_work_item(
     if envelope.group_name:
         metadata["branch_hint"] = envelope.group_name
 
+    has_validation = isinstance(validation_result, Mapping)
+    cleaned_text = (
+        validation_result.get("cleaned_text")
+        if has_validation and validation_result.get("status") in {"accepted", "cleaned"}
+        else envelope.text
+    )
     ingress_envelope = {
         "signal_type": "whatsapp_ingress",
         "source_agent": SERVICE_NAME,
         "received_at": envelope.received_at,
         "payload": {
-            "text": envelope.text,
+            "text": cleaned_text,
             "sender_name": envelope.sender_name,
             "sender_phone": envelope.sender_phone,
             "group_name": envelope.group_name,
@@ -556,20 +618,22 @@ def build_work_item(
         },
     }
 
-    return WorkItem(
-        kind="raw_message",
-        payload={
-            "source": envelope.source,
-            "raw_message": {"text": envelope.text},
-            "metadata": metadata,
-            "replay": dict(envelope.replay),
-            "raw_record": dict(raw_record),
-            "ingress_envelope": ingress_envelope,
-            "ingress_policy": {
-                "reject_mixed_reports": False,
-            },
+    work_payload: dict[str, Any] = {
+        "source": envelope.source,
+        "raw_message": {"text": envelope.text},
+        "metadata": metadata,
+        "replay": dict(envelope.replay),
+        "raw_record": dict(raw_record),
+        "ingress_envelope": ingress_envelope,
+        "ingress_policy": {
+            "reject_mixed_reports": False,
         },
-    )
+    }
+    if has_validation:
+        work_payload["cleaned_text"] = cleaned_text
+        work_payload["pre_ingestion_validation"] = dict(validation_result)
+
+    return WorkItem(kind="raw_message", payload=work_payload)
 
 
 def _write_live_raw_record(
@@ -753,12 +817,17 @@ def _success_response(
     status = payload.get("status")
     orchestrator_status = status if isinstance(status, str) else "ok"
     outputs = _outputs_from_result(result)
+    policy_guard = payload.get("policy_guard") if isinstance(payload.get("policy_guard"), Mapping) else {}
+    duplicate = policy_guard.get("duplicate") is True
+    duplicate_reason = _clean_text(policy_guard.get("reason")) if duplicate else None
 
     return {
         "ok": True,
         "ingress": INGRESS_NAME,
         "workspace_root": str(REPO_ROOT),
         "raw_written": raw_record["raw_written"],
+        "duplicate": duplicate,
+        "duplicate_reason": duplicate_reason,
         "replay": envelope.replay.get("is_replay") is True,
         "orchestrator_status": orchestrator_status,
         "route": _route_from_result(result),
@@ -970,6 +1039,101 @@ def _message_sha256(envelope: InboundMessageEnvelope) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _record_pre_ingestion_validation(
+    *,
+    envelope: InboundMessageEnvelope,
+    raw_record: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Persist one daily pre-ingestion validation observability event."""
+
+    report_date = _validation_report_date(envelope.received_at)
+    record_pre_ingestion_validation_event(
+        report_date=report_date,
+        received_at=envelope.received_at,
+        message_id=envelope.message_id,
+        payload_kind=envelope.payload_kind,
+        result=result,
+        raw_txt_path=raw_record.get("raw_txt_path"),
+        raw_meta_path=raw_record.get("raw_meta_path"),
+    )
+
+
+def _write_pre_ingestion_validation_to_raw_meta(
+    *,
+    raw_meta_path: str | None,
+    validation_result: Mapping[str, Any],
+) -> None:
+    """Merge the validator outcome into the existing raw metadata file."""
+
+    if not isinstance(raw_meta_path, str) or not raw_meta_path.strip():
+        return
+
+    path = Path(raw_meta_path)
+    payload = _read_json_file(path)
+    if not payload:
+        return
+    payload["pre_ingestion_validation"] = dict(validation_result)
+    write_json_file(path, payload)
+
+
+def _validation_rejection_response(
+    *,
+    envelope: InboundMessageEnvelope,
+    raw_record: dict[str, Any],
+    raw_sha256: str,
+    message_sha256: str,
+    validation_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the bridge response for early validator rejection."""
+
+    return {
+        "ok": True,
+        "ingress": INGRESS_NAME,
+        "workspace_root": str(REPO_ROOT),
+        "raw_written": raw_record["raw_written"],
+        "duplicate": False,
+        "replay": False,
+        "orchestrator_status": "skipped",
+        "validator_status": validation_result.get("status"),
+        "validator_reason_summary": _validation_reason_codes(validation_result),
+        "route": None,
+        "agent": None,
+        "message_id": envelope.message_id,
+        "message_sha256": message_sha256,
+        "raw_sha256": raw_sha256,
+        "raw_txt_path": raw_record.get("raw_txt_path"),
+        "raw_meta_path": raw_record.get("raw_meta_path"),
+        "outputs": [],
+    }
+
+
+def _validation_reason_codes(validation_result: Mapping[str, Any]) -> list[str]:
+    """Return stable reason codes from one validator payload."""
+
+    reasons = validation_result.get("reasons")
+    if not isinstance(reasons, list):
+        return []
+    codes: list[str] = []
+    for reason in reasons:
+        if not isinstance(reason, Mapping):
+            continue
+        code = reason.get("code")
+        if isinstance(code, str) and code.strip():
+            codes.append(code.strip())
+    return codes
+
+
+def _validation_report_date(received_at: str) -> str:
+    """Return the daily artifact date segment for one received timestamp."""
+
+    try:
+        parsed = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+    except ValueError:
+        return "unknown"
+    return parsed.date().isoformat()
+
+
 def _sanitize_replay(replay: object) -> dict[str, Any]:
     """Keep only explicit replay markers supported by the bridge contract."""
 
@@ -1047,6 +1211,14 @@ def _clean_text(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _text_value(value: object) -> str | None:
+    """Return one string value without trimming text content."""
+
+    if not isinstance(value, str):
+        return None
+    return value
 
 
 def _first_query_value(params: Mapping[str, list[str]], key: str) -> str | None:

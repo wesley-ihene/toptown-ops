@@ -105,13 +105,13 @@ def test_sales_income_normalizes_live_whatsapp_date_and_label_variants(
 
     structured_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-04-10.json"
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert result.payload["branch"] == "lae_5th_street"
     assert result.payload["report_date"] == "2026-04-10"
     assert structured_path.exists()
 
     payload = json.loads(structured_path.read_text(encoding="utf-8"))
-    assert payload["status"] == "ready"
+    assert payload["status"] == "accepted"
     assert payload["branch"] == "lae_5th_street"
     assert payload["report_date"] == "2026-04-10"
     assert payload["metrics"]["gross_sales"] == 1200.0
@@ -141,7 +141,7 @@ def test_sales_income_normalizes_branch_alias_and_messy_money_strings(
         )
     )
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert result.payload["branch"] == "lae_5th_street"
     assert result.payload["report_date"] == "2026-04-10"
     assert result.payload["metrics"]["gross_sales"] == 3489.0
@@ -172,7 +172,7 @@ def test_sales_income_extracts_exact_labeled_whatsapp_values(
 
     structured_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-04-10.json"
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert structured_path.exists()
 
     payload = json.loads(structured_path.read_text(encoding="utf-8"))
@@ -211,7 +211,7 @@ def test_sales_income_extracts_operator_provenance_from_live_whatsapp_shapes(
 
     structured_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-04-10.json"
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert structured_path.exists()
 
     payload = json.loads(structured_path.read_text(encoding="utf-8"))

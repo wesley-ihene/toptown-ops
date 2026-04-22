@@ -17,8 +17,10 @@ from apps.supervisor_control_agent.parser import ParsedSupervisorControlReport, 
 from apps.supervisor_control_agent.record_store import write_structured_record
 from packages.common.paths import OUTBOX_DIR
 from packages.common.warnings import WarningEntry, dedupe_warnings, make_warning
+from packages.data_governance import build_governance_context
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
+from packages.validation import ValidationMetadata, normalize_rejections
 
 AGENT_NAME = "supervisor_control_agent"
 SIGNAL_TYPE = "supervisor_control"
@@ -42,13 +44,21 @@ class SupervisorControlAgentWorker:
 def process_work_item(work_item: WorkItem) -> AgentResult:
     """Return a structured supervisor-control result without raising."""
 
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    candidate_only = _candidate_mode_requested(payload)
+    source = _source_trace(payload)
     try:
-        payload = work_item.payload if isinstance(work_item.payload, dict) else {}
-        source = _source_trace(payload)
         validation_warnings = _validate_input(payload)
         if validation_warnings:
-            result = _build_failure_result(work_item, warnings=validation_warnings, source=source)
-            write_structured_record(result.payload)
+            result = _build_failure_result(
+                work_item,
+                warnings=validation_warnings,
+                source=source,
+                work_item_payload=payload,
+            )
+            if not candidate_only:
+                write_result = write_structured_record(result.payload, metadata=result.metadata)
+                _apply_governance_result(result, write_result)
             _write_result_to_outbox(result)
             return result
 
@@ -63,7 +73,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         if any(warning.severity == "error" for warning in warnings):
             status = "invalid_input"
         else:
-            status = "ready" if not warnings else "needs_review"
+            status = "accepted" if not warnings else "needs_review"
 
         result = AgentResult(
             agent_name=AGENT_NAME,
@@ -91,8 +101,11 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 "warnings": [warning.to_payload() for warning in warnings],
                 "status": status,
             },
+            metadata=_validation_metadata(status=status, warnings=warnings, source=source, work_item_payload=payload),
         )
-        write_structured_record(result.payload)
+        if not candidate_only:
+            write_result = write_structured_record(result.payload, metadata=result.metadata)
+            _apply_governance_result(result, write_result)
         _write_result_to_outbox(result)
         return result
     except Exception:
@@ -100,14 +113,18 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             work_item,
             warnings=[
                 make_warning(
-                    code="missing_fields",
+                    code="parser_failure",
                     severity="error",
-                    message="The work item could not be processed safely.",
+                    message="The supervisor control report could not be parsed safely.",
                 )
             ],
             source=source,
+            work_item_payload=payload,
+            parser_failure=True,
         )
-        write_structured_record(result.payload)
+        if not candidate_only:
+            write_result = write_structured_record(result.payload, metadata=result.metadata)
+            _apply_governance_result(result, write_result)
         _write_result_to_outbox(result)
         return result
 
@@ -156,6 +173,8 @@ def _build_failure_result(
     parsed: ParsedSupervisorControlReport | None = None,
     warnings: list[WarningEntry] | None = None,
     source: str = "live",
+    work_item_payload: Mapping[str, Any] | None = None,
+    parser_failure: bool = False,
 ) -> AgentResult:
     """Return a safe failure result that still matches the output contract."""
 
@@ -196,6 +215,13 @@ def _build_failure_result(
             "warnings": [warning.to_payload() for warning in warning_list],
             "status": "invalid_input",
         },
+        metadata=_validation_metadata(
+            status="invalid_input",
+            warnings=warning_list,
+            source=source,
+            work_item_payload=work_item_payload or {},
+            parser_failure=parser_failure,
+        ),
     )
 
 
@@ -263,3 +289,46 @@ def _build_output_filename(payload: dict[str, Any]) -> str:
     safe_branch = "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in branch)
     safe_date = "".join(character if character.isdigit() or character == "-" else "_" for character in report_date)
     return f"{timestamp}__{safe_branch}__{safe_date}__supervisor_control.json"
+
+
+def _validation_metadata(
+    *,
+    status: str,
+    warnings: list[WarningEntry],
+    source: str,
+    work_item_payload: Mapping[str, Any],
+    parser_failure: bool = False,
+) -> dict[str, object]:
+    """Return sidecar validation metadata for supervisor-control records."""
+
+    return {
+        "validation": ValidationMetadata(
+            stage=AGENT_NAME,
+            status="passed" if status != "invalid_input" else "rejected",
+            accepted=status != "invalid_input",
+            rejections=normalize_rejections([warning.to_payload() for warning in warnings if warning.severity == "error"]),
+            details={
+                "final_status": status,
+                "source": source,
+                "parser_failure": parser_failure,
+            },
+        ).to_payload(),
+        "governance_context": build_governance_context(work_item_payload),
+    }
+
+
+def _candidate_mode_requested(payload: Mapping[str, Any]) -> bool:
+    """Return whether this worker should stop at candidate generation."""
+
+    return payload.get("governance_mode") == "candidate"
+
+
+def _apply_governance_result(result: AgentResult, write_result: object) -> None:
+    """Project the persisted governance result back onto the live agent payload."""
+
+    governance = getattr(write_result, "governance", None)
+    if governance is None:
+        return
+    result.payload["status"] = governance.status
+    result.payload["export_allowed"] = governance.export_allowed
+    result.payload["governance"] = governance.to_payload()

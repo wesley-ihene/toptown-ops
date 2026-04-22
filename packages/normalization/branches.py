@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import unicodedata
 
 from .types import AppliedRule, NormalizedValue
 
@@ -62,7 +63,7 @@ class BranchMatch:
 def normalize_branch_text(value: str) -> str:
     """Return a comparison-safe branch string."""
 
-    lowered = value.casefold().strip()
+    lowered = _compatibility_fold(value).casefold().strip()
     normalized = _NON_ALPHANUMERIC_PATTERN.sub(" ", lowered)
     return " ".join(normalized.split())
 
@@ -91,22 +92,31 @@ def resolve_branch_alias(value: str) -> BranchMatch | None:
             confidence=1.0,
         )
 
+    token_match = _token_bag_match(normalized)
+    if token_match is not None:
+        matched_alias, slug = token_match
+        return BranchMatch(
+            slug=slug,
+            display_name=CANONICAL_BRANCHES.get(slug, slug.replace("_", " ").title()),
+            matched_alias=matched_alias,
+            confidence=0.9,
+        )
+
     partial_matches = [
         alias
         for alias in BRANCH_ALIASES
         if alias in normalized or normalized in alias
     ]
-    if not partial_matches:
-        return None
-
-    matched_alias = max(partial_matches, key=len)
-    slug = BRANCH_ALIASES[matched_alias]
-    return BranchMatch(
-        slug=slug,
-        display_name=CANONICAL_BRANCHES.get(slug, slug.replace("_", " ").title()),
-        matched_alias=matched_alias,
-        confidence=0.85,
-    )
+    if partial_matches:
+        matched_alias = max(partial_matches, key=lambda alias: (len(alias.split()), len(alias)))
+        slug = BRANCH_ALIASES[matched_alias]
+        return BranchMatch(
+            slug=slug,
+            display_name=CANONICAL_BRANCHES.get(slug, slug.replace("_", " ").title()),
+            matched_alias=matched_alias,
+            confidence=0.85,
+        )
+    return None
 
 
 def normalize_branch(raw_value: str) -> NormalizedValue:
@@ -148,3 +158,29 @@ def canonical_branch_slug(value: str) -> str:
         return result.normalized_value
     normalized = normalize_branch_text(value)
     return normalized.replace(" ", "_")
+
+
+def _compatibility_fold(value: str) -> str:
+    """Return one ASCII-friendly representation for noisy Unicode headers."""
+
+    normalized = unicodedata.normalize("NFKD", value)
+    return "".join(character for character in normalized if not unicodedata.combining(character))
+
+
+def _token_bag_match(normalized: str) -> tuple[str, str] | None:
+    """Return one alias match when tokens match exactly despite ordering noise."""
+
+    normalized_tokens = tuple(sorted(token for token in normalized.split() if token))
+    if not normalized_tokens:
+        return None
+
+    matches: list[str] = []
+    for alias, slug in BRANCH_ALIASES.items():
+        alias_tokens = tuple(sorted(token for token in alias.split() if token))
+        if alias_tokens == normalized_tokens:
+            matches.append(alias)
+
+    if len(matches) != 1:
+        return None
+    matched_alias = matches[0]
+    return matched_alias, BRANCH_ALIASES[matched_alias]

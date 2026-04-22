@@ -41,3 +41,21 @@ def test_validate_sales_rejects_invalid_totals_and_served_over_traffic() -> None
 
     assert result.accepted is False
     assert result.rejection_codes == ["invalid_totals", "invalid_numeric_value"]
+
+
+def test_validate_sales_allows_partial_payment_breakdown_without_total_mismatch_rejection() -> None:
+    result = validate_sales(
+        {
+            "branch": "waigani",
+            "report_date": "2026-04-07",
+            "metrics": {
+                "gross_sales": 1200.0,
+                "cash_sales": 600.0,
+                "eftpos_sales": None,
+                "mobile_money_sales": None,
+            },
+        }
+    )
+
+    assert result.accepted is True
+    assert result.rejection_codes == []

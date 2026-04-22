@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 from collections.abc import Mapping
 
@@ -22,18 +24,29 @@ import apps.sales_income_agent.worker as sales_worker
 import apps.staff_performance_agent.worker as staff_performance_worker
 import apps.supervisor_control_agent.worker as supervisor_control_worker
 from packages.common.paths import REPO_ROOT
+from packages.observability import record_replay_event
+import packages.record_store.automation as record_automation
 from packages.record_store.naming import build_rejected_filename, safe_segment
-from packages.record_store.paths import get_rejected_path, get_structured_path
+from packages.record_store.paths import get_rejected_path, get_structured_path, get_structured_path_for_root
 from packages.record_store.writer import ensure_directory, write_json_file, write_structured, write_text_file
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
+from packages.validation import build_validation_audit
 
 SUPPORTED_SOURCES = ("raw", "rejected")
-SUPPORTED_MODES = ("orchestrator", "specialist")
+SUPPORTED_MODES = ("orchestrator", "specialist", "validation")
 SUPPORTED_REPORT_TYPES = ("sales", "bale_release", "hr_attendance", "hr_performance", "supervisor_control", "unknown")
 MANIFEST_STATUS_VALUES = ("structured_written", "rejected", "skipped", "failed")
 LOGS_REPLAY_DIR = REPO_ROOT / "logs" / "replay"
 PROGRESS_EVERY = 10
+VALIDATION_AUDIT_STATUSES = (
+    "stable",
+    "drift_detected",
+    "missing_expected",
+    "unexpected_acceptance",
+    "unexpected_rejection",
+    "error",
+)
 
 REPORT_TYPE_TO_CLASSIFICATION = {
     "sales": "sales",
@@ -125,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest_source = _manifest_source(candidates)
     results: list[dict[str, Any]] = []
+    validation_results: list[dict[str, Any]] = []
     summary = {
         "scanned": scanned_count,
         "replayed": 0,
@@ -142,6 +156,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"progress: {index}/{len(candidates)}")
 
         result = _replay_record(record=record, args=args)
+        if args.mode == "validation":
+            validation = result.get("validation")
+            if isinstance(validation, dict):
+                validation_results.append(validation)
+        else:
+            _record_replay_observability(record=record, args=args, result=result)
         results.append(result)
         summary["replayed"] += 1
         if result["status"] == "structured_written":
@@ -156,6 +176,16 @@ def main(argv: list[str] | None = None) -> int:
         print(_format_console_result(index=index, total=len(candidates), result=result))
 
     finished_at = _utc_timestamp()
+    validation_audit_path: Path | None = None
+    if args.mode == "validation":
+        validation_audit_path = _write_validation_audit(
+            run_id=run_id,
+            started_at=started_at,
+            finished_at=finished_at,
+            source=manifest_source,
+            args=args,
+            results=validation_results,
+        )
     manifest_path = _write_manifest(
         run_id=run_id,
         started_at=started_at,
@@ -166,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
         summary=summary,
     )
     print(f"manifest: {_display_path(manifest_path)}")
+    if validation_audit_path is not None:
+        print(f"validation audit: {_display_path(validation_audit_path)}")
     print(
         "summary:"
         f" scanned={summary['scanned']}"
@@ -175,7 +207,23 @@ def main(argv: list[str] | None = None) -> int:
         f" skipped={summary['skipped']}"
         f" failed={summary['failed']}"
     )
-    return 1 if summary["failed"] else 0
+    if args.mode == "validation":
+        validation_summary = _validation_summary(validation_results)
+        print(
+            "validation summary:"
+            f" total={validation_summary['total']}"
+            f" stable={validation_summary['stable']}"
+            f" drift_detected={validation_summary['drift_detected']}"
+            f" missing_expected={validation_summary['missing_expected']}"
+            f" unexpected_acceptance={validation_summary['unexpected_acceptance']}"
+            f" unexpected_rejection={validation_summary['unexpected_rejection']}"
+            f" error={validation_summary['error']}"
+        )
+    if summary["failed"]:
+        return 1
+    if args.mode == "validation" and args.fail_on_drift:
+        return 1 if any(not _is_stable_validation_result(item) for item in validation_results) else 0
+    return 0
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -204,6 +252,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Resolve routing and outputs without writing structured or rejected files.")
     parser.add_argument("--compare-only", action="store_true", help="Compare replay output against existing structured files without writing them.")
     parser.add_argument("--overwrite", action="store_true", help="Explicitly allow structured overwrite when a canonical file already exists.")
+    parser.add_argument("--write-audit", action="store_true", help="Write or refresh analytics replay validation audit artifacts.")
+    parser.add_argument("--fail-on-drift", action="store_true", help="Exit non-zero when validation finds drift, missing baselines, or validation errors.")
     args = parser.parse_args(argv)
 
     if not any((args.path, args.report_type, args.date, args.branch, args.all)):
@@ -216,6 +266,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--compare-only and --overwrite cannot be combined")
     if args.mode == "specialist" and args.report_type == "unknown":
         parser.error("--mode specialist cannot use --report-type unknown")
+    if args.mode == "validation" and args.compare_only:
+        parser.error("--mode validation cannot use --compare-only")
+    if args.mode == "validation" and args.dry_run:
+        parser.error("--mode validation cannot use --dry-run")
+    if args.mode == "validation" and args.overwrite:
+        parser.error("--mode validation cannot use --overwrite")
+    if args.mode != "validation" and args.write_audit:
+        parser.error("--write-audit is only supported with --mode validation")
+    if args.mode != "validation" and args.fail_on_drift:
+        parser.error("--fail-on-drift is only supported with --mode validation")
     return args
 
 
@@ -354,25 +414,40 @@ def _replay_record(*, record: ArchivedRecord, args: argparse.Namespace) -> dict[
     try:
         work_item = _build_work_item(record=record, resolved=resolved)
         capture = RejectedCapture("", "", None, None)
-        with _suppress_replay_side_effects(capture):
-            if args.mode == "orchestrator":
-                result = orchestrator_worker.process_work_item(work_item)
-            else:
-                result = _run_specialist_mode(work_item=work_item, resolved=resolved)
+        context = _validation_sandbox_context(args)
+        with context as sandbox_root_value:
+            sandbox_root = Path(sandbox_root_value) if sandbox_root_value is not None else None
+            with _suppress_replay_side_effects(
+                capture,
+                suppress_provenance=args.mode == "validation",
+            ):
+                if args.mode in {"orchestrator", "validation"}:
+                    result = orchestrator_worker.process_work_item(work_item)
+                else:
+                    result = _run_specialist_mode(work_item=work_item, resolved=resolved)
 
-        structured_artifacts = _structured_artifacts_from_result(result)
-        entry = _finalize_replay_result(
-            record=record,
-            resolved=resolved,
-            result=result,
-            structured_artifacts=structured_artifacts,
-            rejected_capture=capture if capture.rejection_reason else None,
-            args=args,
-            duration_ms=_duration_ms(started),
-        )
-        return entry
+            structured_artifacts = _structured_artifacts_from_result(result)
+            entry = _finalize_replay_result(
+                record=record,
+                resolved=resolved,
+                result=result,
+                structured_artifacts=structured_artifacts,
+                rejected_capture=capture if capture.rejection_reason else None,
+                args=args,
+                duration_ms=_duration_ms(started),
+                output_root=sandbox_root,
+            )
+            if sandbox_root is not None:
+                entry["validation"] = _build_validation_result(
+                    record=record,
+                    actual_outcome=_capture_validation_actual_outcome(
+                        sandbox_root=sandbox_root,
+                        replay_result=entry,
+                    ),
+                )
+            return entry
     except Exception as exc:
-        return {
+        failed_entry = {
             "file": _display_path(record.text_path),
             "status": "failed",
             "agent": None,
@@ -380,6 +455,17 @@ def _replay_record(*, record: ArchivedRecord, args: argparse.Namespace) -> dict[
             "reason": str(exc),
             "duration_ms": _duration_ms(started),
         }
+        if args.mode == "validation":
+            failed_entry["validation"] = _build_validation_result(
+                record=record,
+                actual_outcome={
+                    "status": "failed",
+                    "reason": str(exc),
+                    "structured_outputs": [],
+                    "rejected_outputs": [],
+                },
+            )
+        return failed_entry
 
 
 def _build_work_item(*, record: ArchivedRecord, resolved: ReplayMetadata) -> WorkItem:
@@ -546,10 +632,15 @@ def _finalize_replay_result(
     rejected_capture: RejectedCapture | None,
     args: argparse.Namespace,
     duration_ms: int,
+    output_root: Path | None = None,
 ) -> dict[str, Any]:
     """Write or skip deferred outputs and return one manifest entry."""
 
-    structured_outcome = _handle_structured_artifacts(structured_artifacts=structured_artifacts, args=args)
+    structured_outcome = _handle_structured_artifacts(
+        structured_artifacts=structured_artifacts,
+        args=args,
+        output_root=output_root,
+    )
     mixed_details = _mixed_result_details(result=result, structured_artifacts=structured_artifacts)
     if structured_outcome["status"] == "structured_written":
         entry = {
@@ -572,6 +663,7 @@ def _finalize_replay_result(
             resolved=resolved,
             rejected_capture=rejected_capture,
             args=args,
+            output_root=output_root,
         )
         if rejected_outcome["status"] == "rejected":
             return {
@@ -615,13 +707,21 @@ def _handle_structured_artifacts(
     *,
     structured_artifacts: list[StructuredArtifact],
     args: argparse.Namespace,
+    output_root: Path | None = None,
 ) -> dict[str, Any]:
     """Apply overwrite, compare-only, and dry-run rules to one or more artifacts."""
 
     if not structured_artifacts:
         return {"status": "skipped", "path": None, "paths": [], "reason": "no_structured_output", "written_count": 0}
 
-    outcomes = [_handle_single_structured_artifact(structured=artifact, args=args) for artifact in structured_artifacts]
+    outcomes = [
+        _handle_single_structured_artifact(
+            structured=artifact,
+            args=args,
+            output_root=output_root,
+        )
+        for artifact in structured_artifacts
+    ]
     first_path = outcomes[0]["path"]
     first_reason = outcomes[0]["reason"]
     written_count = sum(1 for outcome in outcomes if outcome["status"] == "structured_written")
@@ -647,38 +747,44 @@ def _handle_single_structured_artifact(
     *,
     structured: StructuredArtifact,
     args: argparse.Namespace,
+    output_root: Path | None = None,
 ) -> dict[str, Any]:
     """Apply overwrite and dry-run rules to one structured artifact."""
 
-    existing_hash = _file_sha256(structured.path) if structured.path.exists() else None
+    target_path = _resolve_structured_output_path(structured.path, output_root=output_root)
+    existing_hash = _file_sha256(target_path) if target_path.exists() else None
     new_hash = _payload_sha256(structured.payload)
     if args.compare_only:
         compare_reason = "compare_only_missing"
         if existing_hash is not None:
-            compare_reason = "compare_only_same" if _load_json(structured.path) == structured.payload else "compare_only_different"
-        return {"status": "skipped", "path": structured.path, "reason": compare_reason}
-    if structured.path.exists() and not args.overwrite:
-        return {"status": "skipped", "path": structured.path, "reason": "structured_exists_use_overwrite"}
+            compare_reason = "compare_only_same" if _load_json(target_path) == structured.payload else "compare_only_different"
+        return {"status": "skipped", "path": target_path, "reason": compare_reason}
+    if target_path.exists() and not args.overwrite:
+        return {"status": "skipped", "path": target_path, "reason": "structured_exists_use_overwrite"}
     if args.dry_run:
-        if structured.path.exists():
+        if target_path.exists():
             return {
                 "status": "skipped",
-                "path": structured.path,
+                "path": target_path,
                 "reason": f"dry_run_would_overwrite previous_sha256={existing_hash} new_sha256={new_hash}",
             }
-        return {"status": "skipped", "path": structured.path, "reason": f"dry_run_would_write new_sha256={new_hash}"}
+        return {"status": "skipped", "path": target_path, "reason": f"dry_run_would_write new_sha256={new_hash}"}
 
     reason = f"written new_sha256={new_hash}"
-    if structured.path.exists():
+    if target_path.exists():
         reason = f"overwritten previous_sha256={existing_hash} new_sha256={new_hash}"
-    write_structured(
-        structured.path.parent.parent.name,
-        structured.path.parent.name,
-        structured.path.stem,
-        structured.payload,
-        root=structured.path.parents[4],
-    )
-    return {"status": "structured_written", "path": structured.path, "reason": reason}
+    if output_root is None:
+        with _replay_automation_context():
+            write_structured(
+                structured.path.parent.parent.name,
+                structured.path.parent.name,
+                structured.path.stem,
+                structured.payload,
+                root=structured.path.parents[4],
+            )
+    else:
+        write_json_file(target_path, structured.payload)
+    return {"status": "structured_written", "path": target_path, "reason": reason}
 
 
 def _handle_rejected_copy(
@@ -687,13 +793,18 @@ def _handle_rejected_copy(
     resolved: ReplayMetadata,
     rejected_capture: RejectedCapture,
     args: argparse.Namespace,
+    output_root: Path | None = None,
 ) -> dict[str, Any]:
     """Write or report a new rejected quarantine copy for replay failures."""
 
     report_type = _normalize_report_type(rejected_capture.attempted_report_type) or "unknown"
-    rejected_path = get_rejected_path(report_type) / build_rejected_filename(
-        report_type,
-        rejected_capture.rejection_reason,
+    rejected_path = _resolve_rejected_output_path(
+        report_type=report_type,
+        filename=build_rejected_filename(
+            report_type,
+            rejected_capture.rejection_reason,
+        ),
+        output_root=output_root,
     )
     if args.dry_run or args.compare_only:
         return {
@@ -725,30 +836,61 @@ def _handle_rejected_copy(
 
 
 @contextmanager
-def _suppress_replay_side_effects(rejected_capture: RejectedCapture):
+def _suppress_replay_side_effects(
+    rejected_capture: RejectedCapture,
+    *,
+    suppress_provenance: bool = False,
+):
     """Suppress live writes during replay while capturing rejected outcomes."""
 
     patched_attributes: list[tuple[Any, str, Any]] = []
     original_rejected_write = orchestrator_worker._write_rejected_record
+    if suppress_provenance:
+        _patch_optional_callable(
+            patched_attributes,
+            orchestrator_worker,
+            "write_provenance_record",
+            lambda *args, **kwargs: REPO_ROOT / "records" / "provenance" / "replay_suppressed.json",
+        )
+        _patch_optional_callable(
+            patched_attributes,
+            orchestrator_worker,
+            "write_review_item",
+            lambda *args, **kwargs: REPO_ROOT / "records" / "review" / "replay_suppressed.json",
+        )
+    for record_store_module_name in (
+        "sales_record_store",
+        "hr_record_store",
+        "pricing_record_store",
+        "supervisor_record_store",
+    ):
+        record_store_module = getattr(orchestrator_worker, record_store_module_name, None)
+        if record_store_module is not None:
+            _patch_optional_callable(
+                patched_attributes,
+                record_store_module,
+                "write_structured_record",
+                lambda *args, **kwargs: None,
+            )
 
     for worker_module in AGENT_TO_WORKER_MODULE.values():
         _patch_optional_callable(
             patched_attributes,
             worker_module,
             "write_structured_record",
-            lambda payload: None,
+            lambda *args, **kwargs: None,
         )
         _patch_optional_callable(
             patched_attributes,
             worker_module,
             "_write_result_to_outbox",
-            lambda result: REPO_ROOT / "data" / "outbox" / "replay_suppressed.json",
+            lambda *args, **kwargs: REPO_ROOT / "data" / "outbox" / "replay_suppressed.json",
         )
         _patch_optional_callable(
             patched_attributes,
             worker_module,
             "write_signal",
-            lambda result: "",
+            lambda *args, **kwargs: "",
         )
 
     def capture_rejected(
@@ -802,6 +944,59 @@ def _patch_optional_callable(
     setattr(owner, attribute_name, replacement)
 
 
+def _record_replay_observability(
+    *,
+    record: ArchivedRecord,
+    args: argparse.Namespace,
+    result: dict[str, Any],
+) -> None:
+    """Write one replay audit entry when the record date can be resolved."""
+
+    resolved = _resolve_replay_metadata(record=record, args=args)
+    report_date = _record_date(record, resolved)
+    if report_date is None:
+        return
+    record_replay_event(
+        report_date=report_date,
+        mode=args.mode,
+        source=args.source,
+        branch=resolved.branch_hint,
+        validation_mode=_validation_mode(args),
+        result=result,
+        duration_ms=result.get("duration_ms") if isinstance(result.get("duration_ms"), int) else None,
+        output_root=REPO_ROOT,
+    )
+
+
+def _validation_mode(args: argparse.Namespace) -> str:
+    """Return the replay validation/write mode label for observability."""
+
+    if args.compare_only:
+        return "compare_only"
+    if args.dry_run:
+        return "dry_run"
+    if args.mode == "validation":
+        return "validation"
+    if args.overwrite:
+        return "overwrite"
+    return "write"
+
+
+@contextmanager
+def _replay_automation_context():
+    """Mark replay writes so Phase 5B actions stay suppressed by default."""
+
+    previous = os.environ.get(record_automation.REPLAY_AUTOMATION_CONTEXT_ENV_VAR)
+    os.environ[record_automation.REPLAY_AUTOMATION_CONTEXT_ENV_VAR] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(record_automation.REPLAY_AUTOMATION_CONTEXT_ENV_VAR, None)
+        else:
+            os.environ[record_automation.REPLAY_AUTOMATION_CONTEXT_ENV_VAR] = previous
+
+
 def _write_manifest(
     *,
     run_id: str,
@@ -830,8 +1025,11 @@ def _write_manifest(
                 "date": args.date,
                 "limit": args.limit or 0,
                 "batch_size": args.batch_size or 0,
+                "compare_only": args.compare_only,
                 "overwrite": args.overwrite,
                 "dry_run": args.dry_run,
+                "write_audit": args.write_audit,
+                "fail_on_drift": args.fail_on_drift,
             },
             "results": results,
             "summary": summary,
@@ -970,6 +1168,11 @@ def _format_console_result(*, index: int, total: int, result: dict[str, Any]) ->
     segment_count = result.get("segment_count")
     if isinstance(segment_count, int):
         detail_parts.append(f"segments={segment_count}")
+    validation = result.get("validation")
+    if isinstance(validation, Mapping):
+        validation_status = validation.get("status")
+        if isinstance(validation_status, str) and validation_status:
+            detail_parts.append(f"validation={validation_status}")
     detail_suffix = f" | {' | '.join(detail_parts)}" if detail_parts else ""
 
     return (
@@ -1078,6 +1281,341 @@ def _display_path(path: Path) -> str:
         return str(path.relative_to(REPO_ROOT))
     except ValueError:
         return str(path)
+
+
+def _validation_sandbox_context(args: argparse.Namespace):
+    """Return a per-record sandbox context for validation replays."""
+
+    if args.mode != "validation":
+        return nullcontext(None)
+    return tempfile.TemporaryDirectory(prefix="replay_validation_", dir="/tmp")
+
+
+def _resolve_structured_output_path(path: Path, *, output_root: Path | None) -> Path:
+    """Return the live or sandbox structured path for one replay artifact."""
+
+    if output_root is None:
+        return path
+    structured_root = REPO_ROOT / "records" / "structured"
+    relative_path = path.relative_to(structured_root)
+    return get_structured_path_for_root(
+        output_root / "records" / "structured",
+        signal_type=relative_path.parts[0],
+        branch=relative_path.parts[1],
+        date=path.stem,
+    )
+
+
+def _resolve_rejected_output_path(*, report_type: str, filename: str, output_root: Path | None) -> Path:
+    """Return the live or sandbox rejected path for one replay rejection."""
+
+    if output_root is None:
+        return get_rejected_path(report_type) / filename
+    return output_root / "records" / "rejected" / "whatsapp" / safe_segment(report_type) / filename
+
+
+def _build_validation_result(
+    *,
+    record: ArchivedRecord,
+    actual_outcome: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare one sandbox replay result against the controlled expected baseline."""
+
+    baseline_path, expected_outcome = _load_expected_validation_baseline(record)
+    report_family = _validation_report_family(expected_outcome, actual_outcome)
+
+    if expected_outcome is None:
+        return {
+            "source_file": _display_path(record.text_path),
+            "report_family": report_family,
+            "baseline_path": _display_path(baseline_path) if baseline_path is not None else None,
+            "expected_outcome": None,
+            "actual_outcome": actual_outcome,
+            "status": "missing_expected",
+            "reason": "no_controlled_expected_outcome",
+        }
+
+    if actual_outcome.get("status") == "failed":
+        return {
+            "source_file": _display_path(record.text_path),
+            "report_family": report_family,
+            "baseline_path": _display_path(baseline_path) if baseline_path is not None else None,
+            "expected_outcome": expected_outcome,
+            "actual_outcome": actual_outcome,
+            "status": "error",
+            "reason": str(actual_outcome.get("reason") or "validation_execution_failed"),
+        }
+
+    expected_status = expected_outcome.get("status")
+    actual_status = actual_outcome.get("status")
+    if expected_status == "rejected" and actual_status == "structured_written":
+        validation_status = "unexpected_acceptance"
+        reason = "expected_rejection_but_replay_produced_structured_output"
+    elif expected_status == "structured_written" and actual_status == "rejected":
+        validation_status = "unexpected_rejection"
+        reason = "expected_structured_output_but_replay_rejected_input"
+    else:
+        mismatch = _expected_subset_mismatch(expected_outcome, actual_outcome)
+        if mismatch is None:
+            validation_status = "stable"
+            reason = "matches_controlled_expected_outcome"
+        else:
+            validation_status = "drift_detected"
+            reason = mismatch
+
+    return {
+        "source_file": _display_path(record.text_path),
+        "report_family": report_family,
+        "baseline_path": _display_path(baseline_path) if baseline_path is not None else None,
+        "expected_outcome": expected_outcome,
+        "actual_outcome": actual_outcome,
+        "status": validation_status,
+        "reason": reason,
+    }
+
+
+def _load_expected_validation_baseline(record: ArchivedRecord) -> tuple[Path | None, dict[str, Any] | None]:
+    """Load the controlled expected outcome for one replay input when present."""
+
+    for candidate in _validation_baseline_candidates(record):
+        if not candidate.exists():
+            continue
+        payload = _load_json(candidate)
+        if isinstance(payload, dict):
+            return candidate, payload
+    candidates = list(_validation_baseline_candidates(record))
+    return (candidates[0], None) if candidates else (None, None)
+
+
+def _validation_baseline_candidates(record: ArchivedRecord) -> list[Path]:
+    """Return candidate baseline paths for one replay input."""
+
+    source_root = _source_root(record.source)
+    try:
+        relative_path = record.text_path.relative_to(source_root)
+    except ValueError:
+        relative_path = Path(record.text_path.name)
+
+    candidates: list[Path] = []
+    for root in _validation_fixture_roots():
+        candidates.append(root / record.source / relative_path.with_suffix(".expected.json"))
+    return candidates
+
+
+def _validation_fixture_roots() -> tuple[Path, Path]:
+    """Return test-only baseline roots for replay validation."""
+
+    return (
+        REPO_ROOT / "tests" / "fixtures" / "replay_validation",
+        REPO_ROOT / "tests" / "golden_samples" / "replay_validation",
+    )
+
+
+def _capture_validation_actual_outcome(
+    *,
+    sandbox_root: Path,
+    replay_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Capture the replay outputs written into one isolated sandbox."""
+
+    structured_outputs = _capture_sandbox_structured_outputs(sandbox_root)
+    rejected_outputs = _capture_sandbox_rejected_outputs(sandbox_root)
+    outcome = {
+        "status": replay_result.get("status"),
+        "agent": replay_result.get("agent"),
+        "reason": replay_result.get("reason"),
+        "structured_outputs": structured_outputs,
+        "rejected_outputs": rejected_outputs,
+    }
+    report_family = _validation_report_family(None, outcome)
+    if report_family is not None:
+        outcome["report_family"] = report_family
+    return outcome
+
+
+def _capture_sandbox_structured_outputs(sandbox_root: Path) -> list[dict[str, Any]]:
+    """Return structured outputs written during one validation replay."""
+
+    structured_root = sandbox_root / "records" / "structured"
+    if not structured_root.exists():
+        return []
+
+    outputs: list[dict[str, Any]] = []
+    for path in sorted(structured_root.rglob("*.json")):
+        relative_path = path.relative_to(structured_root)
+        if len(relative_path.parts) < 3:
+            continue
+        outputs.append(
+            {
+                "signal_type": relative_path.parts[0],
+                "branch": relative_path.parts[1],
+                "report_date": path.stem,
+                "path": str(relative_path),
+                "payload": _load_json(path),
+            }
+        )
+    return outputs
+
+
+def _capture_sandbox_rejected_outputs(sandbox_root: Path) -> list[dict[str, Any]]:
+    """Return rejected quarantine outputs written during one validation replay."""
+
+    rejected_root = sandbox_root / "records" / "rejected" / "whatsapp"
+    if not rejected_root.exists():
+        return []
+
+    outputs: list[dict[str, Any]] = []
+    for path in sorted(rejected_root.rglob("*.txt")):
+        relative_path = path.relative_to(rejected_root)
+        if len(relative_path.parts) < 2:
+            continue
+        metadata_path = path.with_suffix(".meta.json")
+        metadata = _load_json(metadata_path) if metadata_path.exists() else {}
+        attempted_report_type = metadata.get("attempted_report_type")
+        outputs.append(
+            {
+                "report_type": relative_path.parts[0],
+                "path": str(relative_path),
+                "rejection_reason": metadata.get("rejection_reason"),
+                "attempted_report_type": _normalize_report_type(attempted_report_type)
+                if isinstance(attempted_report_type, str)
+                else None,
+            }
+        )
+    return outputs
+
+
+def _validation_report_family(
+    expected_outcome: dict[str, Any] | None,
+    actual_outcome: dict[str, Any],
+) -> str | None:
+    """Return one report family label for audit rows when it can be inferred."""
+
+    if isinstance(expected_outcome, dict):
+        expected_family = expected_outcome.get("report_family")
+        if isinstance(expected_family, str) and expected_family.strip():
+            return expected_family.strip()
+
+    actual_family = actual_outcome.get("report_family")
+    if isinstance(actual_family, str) and actual_family.strip():
+        return actual_family.strip()
+
+    structured_outputs = actual_outcome.get("structured_outputs")
+    if isinstance(structured_outputs, list) and structured_outputs:
+        families = sorted(
+            {
+                str(item.get("signal_type"))
+                for item in structured_outputs
+                if isinstance(item, Mapping) and isinstance(item.get("signal_type"), str)
+            }
+        )
+        if len(families) == 1:
+            return families[0]
+        if len(families) > 1:
+            return "mixed"
+
+    rejected_outputs = actual_outcome.get("rejected_outputs")
+    if isinstance(rejected_outputs, list) and rejected_outputs:
+        families = sorted(
+            {
+                str(item.get("attempted_report_type") or item.get("report_type"))
+                for item in rejected_outputs
+                if isinstance(item, Mapping)
+                and isinstance(item.get("attempted_report_type") or item.get("report_type"), str)
+            }
+        )
+        if len(families) == 1:
+            return families[0]
+        if len(families) > 1:
+            return "mixed"
+    return None
+
+
+def _expected_subset_mismatch(expected: Any, actual: Any, *, path: str = "$") -> str | None:
+    """Return the first subset mismatch between expected and actual payloads."""
+
+    if isinstance(expected, Mapping):
+        if not isinstance(actual, Mapping):
+            return f"{path} expected object but found {type(actual).__name__}"
+        for key, expected_value in expected.items():
+            if key not in actual:
+                return f"{path}.{key} missing from actual outcome"
+            mismatch = _expected_subset_mismatch(expected_value, actual[key], path=f"{path}.{key}")
+            if mismatch is not None:
+                return mismatch
+        return None
+
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return f"{path} expected list but found {type(actual).__name__}"
+        if len(expected) != len(actual):
+            return f"{path} expected {len(expected)} item(s) but found {len(actual)}"
+        for index, expected_value in enumerate(expected):
+            mismatch = _expected_subset_mismatch(expected_value, actual[index], path=f"{path}[{index}]")
+            if mismatch is not None:
+                return mismatch
+        return None
+
+    if expected != actual:
+        return f"{path} expected {expected!r} but found {actual!r}"
+    return None
+
+
+def _write_validation_audit(
+    *,
+    run_id: str,
+    started_at: str,
+    finished_at: str,
+    source: str,
+    args: argparse.Namespace,
+    results: list[dict[str, Any]],
+) -> Path:
+    """Write one replay validation audit under analytics/replay_audit."""
+
+    audit_dir = REPO_ROOT / "analytics" / "replay_audit"
+    ensure_directory(audit_dir)
+    filters = {
+        "branch": args.branch,
+        "report_type": args.report_type,
+        "date": args.date,
+        "limit": args.limit or 0,
+        "batch_size": args.batch_size or 0,
+        "source": args.source,
+        "write_audit": args.write_audit,
+        "fail_on_drift": args.fail_on_drift,
+    }
+    payload = build_validation_audit(
+        run_id=run_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        source=source,
+        filters=filters,
+        results=results,
+    )
+    dated_path = audit_dir / f"{finished_at[:10]}.json"
+    write_json_file(dated_path, payload)
+    if args.write_audit:
+        write_json_file(audit_dir / "latest.json", payload)
+    return audit_dir / "latest.json" if args.write_audit else dated_path
+
+
+def _validation_summary(results: list[dict[str, Any]]) -> dict[str, int]:
+    """Return summary counts for replay validation audit statuses."""
+
+    summary = {"total": len(results)}
+    for status in VALIDATION_AUDIT_STATUSES:
+        summary[status] = 0
+    for item in results:
+        status = item.get("status")
+        if isinstance(status, str) and status in summary:
+            summary[status] += 1
+    return summary
+
+
+def _is_stable_validation_result(result: dict[str, Any]) -> bool:
+    """Return whether one validation comparison is fully stable."""
+
+    return result.get("status") == "stable"
 
 
 if __name__ == "__main__":

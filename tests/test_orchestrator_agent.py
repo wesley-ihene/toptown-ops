@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import apps.orchestrator_agent.worker as orchestrator_worker
 from apps.orchestrator_agent.worker import process_work_item
+import packages.record_store.paths as record_paths
+from packages.sop_validation.contracts import Rejection
+from packages.sop_validation.router import validate_report
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
-import packages.record_store.paths as record_paths
 
 
 def test_orchestrator_keeps_raw_archive_and_writes_structured_record(
@@ -55,7 +58,7 @@ def test_orchestrator_keeps_raw_archive_and_writes_structured_record(
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["detected_report_type"] == "sales_income"
     assert raw_meta["routing_target"] == "sales_income_agent"
-    assert raw_meta["processing_status"] in {"ready", "needs_review"}
+    assert raw_meta["processing_status"] == "processed"
     accepted_provenance_path = (
         tmp_path
         / "records"
@@ -166,7 +169,7 @@ def test_orchestrator_routes_live_sales_message_with_recoverable_date_formatting
     assert raw_meta["branch_hint"] == "lae_5th_street"
     assert raw_meta["routing_target"] == "sales_income_agent"
     assert raw_meta["resolved_report_date"] == "2026-04-10"
-    assert raw_meta["processing_status"] == "ready"
+    assert raw_meta["processing_status"] == "processed"
 
     structured_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-04-10.json"
     assert structured_path.exists()
@@ -174,7 +177,7 @@ def test_orchestrator_routes_live_sales_message_with_recoverable_date_formatting
     assert structured_payload["source_agent"] == "sales_income_agent"
     assert structured_payload["branch"] == "lae_5th_street"
     assert structured_payload["report_date"] == "2026-04-10"
-    assert structured_payload["status"] == "ready"
+    assert structured_payload["status"] == "accepted"
     assert structured_payload["metrics"]["gross_sales"] == 1200.0
     assert structured_payload["metrics"]["eftpos_sales"] == 500.0
 
@@ -182,7 +185,7 @@ def test_orchestrator_routes_live_sales_message_with_recoverable_date_formatting
     assert result.payload["signal_type"] == "sales_income"
     assert result.payload["branch"] == "lae_5th_street"
     assert result.payload["report_date"] == "2026-04-10"
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
 
 
 def test_orchestrator_routes_recoverable_sales_message_with_messy_money_and_aliases(
@@ -224,7 +227,7 @@ def test_orchestrator_routes_recoverable_sales_message_with_messy_money_and_alia
     assert raw_meta["detected_report_type"] == "sales_income"
     assert raw_meta["branch_hint"] == "lae_5th_street"
     assert raw_meta["resolved_report_date"] == "2026-04-10"
-    assert raw_meta["processing_status"] == "ready"
+    assert raw_meta["processing_status"] == "processed"
 
     structured_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-04-10.json"
     assert structured_path.exists()
@@ -233,7 +236,7 @@ def test_orchestrator_routes_recoverable_sales_message_with_messy_money_and_alia
     assert structured_payload["metrics"]["cash_sales"] == 1236.0
     assert structured_payload["metrics"]["eftpos_sales"] == 2253.0
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
 
 
 def test_orchestrator_unknown_message_writes_rejected_copy_but_keeps_raw_archive(
@@ -270,7 +273,7 @@ def test_orchestrator_unknown_message_writes_rejected_copy_but_keeps_raw_archive
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["detected_report_type"] == "unknown"
     assert raw_meta["routing_target"] is None
-    assert raw_meta["processing_status"] == "needs_review"
+    assert raw_meta["processing_status"] == "rejected"
 
     rejected_meta = _read_json(rejected_meta_paths[0])
     assert rejected_meta["rejection_reason"] == "unknown_report_type"
@@ -292,8 +295,190 @@ def test_orchestrator_unknown_message_writes_rejected_copy_but_keeps_raw_archive
     assert rejected_provenance["downstream_references"]["rejected_text_path"].endswith(".txt")
     assert rejected_provenance["downstream_references"]["rejected_meta_path"].endswith(".meta.json")
 
-    assert result.payload["status"] == "needs_review"
+    assert result.payload["status"] == "rejected"
     assert not (tmp_path / "records" / "structured").exists()
+
+
+def test_orchestrator_rejects_invalid_bale_pricing_card_message_upstream(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("TOPTOWN_IOI_COLONY_ROOT", str(tmp_path / "ioi-colony"))
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _invalid_bale_pricing_card_text()},
+                "metadata": {
+                    "received_at": "2026-04-07T11:05:00Z",
+                    "sender": "pricing-card-smoke",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    raw_text_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.txt")
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    rejected_text_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "unknown", "*.txt")
+    rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "unknown", "*.meta.json")
+
+    assert len(raw_text_paths) == 1
+    assert len(raw_meta_paths) == 1
+    assert len(rejected_text_paths) == 1
+    assert len(rejected_meta_paths) == 1
+
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "invalid_pricing_card_format"
+    assert raw_meta["routing_target"] is None
+    assert raw_meta["processing_status"] == "rejected"
+
+    rejected_meta = _read_json(rejected_meta_paths[0])
+    assert rejected_meta["rejection_reason"] == "invalid_pricing_card_format"
+    assert rejected_meta["attempted_report_type"] == "invalid_pricing_card_format"
+    assert rejected_meta["attempted_agent"] is None
+
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["status"] == "rejected"
+    assert result.payload["classification"]["report_type"] == "invalid_pricing_card_format"
+    assert result.payload["routing"]["route_reason"] == "invalid_pricing_card_format"
+    assert result.payload["warnings"][0]["code"] == "invalid_pricing_card_format"
+
+    assert not (tmp_path / "records" / "structured").exists()
+    assert not (tmp_path / "analytics").exists()
+    assert not (tmp_path / "ioi-colony").exists()
+
+
+def test_orchestrator_routes_stylized_unicode_attendance_sample_to_structured_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _unknown_attendance_text()},
+                "metadata": {
+                    "received_at": "2026-04-06T02:32:38Z",
+                    "sender": "Wesley",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "attendance"
+    assert raw_meta["routing_target"] == "hr_agent"
+    assert raw_meta["branch_hint"] == "waigani"
+    assert raw_meta["processing_status"] == "processed"
+    assert raw_meta["governance_status"] == "needs_review"
+
+    structured_path = tmp_path / "records" / "structured" / "hr_attendance" / "waigani" / "2026-04-06.json"
+    assert not structured_path.exists()
+    review_paths = _paths(tmp_path / "records" / "review" / "2026_04_06" / "waigani" / "staff_attendance", "*.json")
+    assert len(review_paths) == 1
+
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["status"] == "needs_review"
+    assert result.payload["fallback"]["acceptance"]["decision"] == "review"
+
+
+def test_orchestrator_routes_current_unknown_staff_performance_sample_to_structured_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _unknown_waigani_stuff_performance_text()},
+                "metadata": {
+                    "received_at": "2026-04-06T01:28:20Z",
+                    "sender": "Wesley",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "staff_performance"
+    assert raw_meta["routing_target"] == "hr_agent"
+    assert raw_meta["branch_hint"] == "waigani"
+
+    structured_path = tmp_path / "records" / "structured" / "hr_performance" / "waigani" / "2026-04-05.json"
+    assert structured_path.exists()
+    structured_payload = _read_json(structured_path)
+    assert structured_payload["branch"] == "waigani"
+    assert structured_payload["report_date"] == "2026-04-05"
+    assert len(structured_payload["items"]) >= 8
+    assert structured_payload["status"] in {"accepted_with_warning", "needs_review"}
+
+    assert result.agent_name == "hr_agent"
+    assert result.payload["signal_subtype"] == "staff_performance"
+
+
+def test_orchestrator_routes_current_hr_performance_parser_failure_sample_to_structured_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _lae_5th_street_parser_failure_text()},
+                "metadata": {
+                    "received_at": "2026-04-06T01:36:15Z",
+                    "sender": "Wesley",
+                    "branch_hint": "lae_5th_street",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["detected_report_type"] == "staff_performance"
+    assert raw_meta["routing_target"] == "hr_agent"
+    assert raw_meta["branch_hint"] == "lae_5th_street"
+
+    structured_path = tmp_path / "records" / "structured" / "hr_performance" / "lae_5th_street" / "2026-04-05.json"
+    assert structured_path.exists()
+    structured_payload = _read_json(structured_path)
+    assert structured_payload["branch"] == "lae_5th_street"
+    assert structured_payload["report_date"] == "2026-04-05"
+    assert len(structured_payload["items"]) == 16
+
+    items_by_number = {item["record_number"]: item for item in structured_payload["items"]}
+    assert items_by_number[1]["duty_status"] == "off_duty"
+    assert items_by_number[2]["role"] == "cashier"
+    assert items_by_number[3]["section"] == "pricing_room"
+    assert items_by_number[11]["duty_status"] == "absent"
+    assert items_by_number[15]["role"] == "Supervisor"
+    assert items_by_number[15]["duty_status"] == "off_duty"
+    assert structured_payload["metrics"]["total_staff_records"] == 16
+    assert structured_payload["metrics"]["total_items_moved"] == 140
+    assert structured_payload["metrics"]["total_assisting_count"] == 46
+
+    assert result.agent_name == "hr_agent"
+    assert result.payload["signal_subtype"] == "staff_performance"
 
 
 def test_orchestrator_invalid_input_archives_raw_before_quarantine(
@@ -329,7 +514,7 @@ def test_orchestrator_invalid_input_archives_raw_before_quarantine(
     assert len(rejected_meta_paths) == 1
 
     raw_meta = _read_json(raw_meta_paths[0])
-    assert raw_meta["processing_status"] == "invalid_input"
+    assert raw_meta["processing_status"] == "rejected"
     assert raw_meta["detected_report_type"] == "unknown"
     assert raw_meta["routing_target"] is None
 
@@ -375,7 +560,7 @@ def test_orchestrator_replay_skips_raw_write(
     assert rejected_meta["replay"] is True
     assert rejected_meta["replay_source"] == "rejected"
     assert rejected_meta["replay_original_path"] == "records/rejected/whatsapp/unknown/example.txt"
-    assert result.payload["status"] == "needs_review"
+    assert result.payload["status"] == "rejected"
 
 
 def test_orchestrator_mixed_report_fans_out_to_multiple_specialists(
@@ -406,7 +591,7 @@ def test_orchestrator_mixed_report_fans_out_to_multiple_specialists(
     assert raw_meta["routing_target"] == "fan_out"
     assert raw_meta["split_child_count"] == 2
     assert raw_meta["split_child_report_types"] == ["sales_income", "staff_performance"]
-    assert raw_meta["processing_status"] == "accepted_with_warning"
+    assert raw_meta["processing_status"] == "processed"
 
     sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"
     performance_path = tmp_path / "records" / "structured" / "hr_performance" / "waigani" / "2026-04-07.json"
@@ -453,6 +638,8 @@ def test_orchestrator_rejects_mixed_report_when_ingress_policy_requires_single_r
         raise AssertionError("specialist dispatch should not run for rejected mixed reports")
 
     monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+    monkeypatch.setattr("apps.orchestrator_agent.worker._should_attempt_specialist_fallback", lambda **kwargs: False)
+    monkeypatch.setattr("apps.orchestrator_agent.worker._should_attempt_specialist_fallback", lambda **kwargs: False)
 
     result = process_work_item(
         WorkItem(
@@ -484,7 +671,7 @@ def test_orchestrator_rejects_mixed_report_when_ingress_policy_requires_single_r
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["detected_report_type"] == "mixed"
     assert raw_meta["routing_target"] is None
-    assert raw_meta["processing_status"] == "needs_review"
+    assert raw_meta["processing_status"] == "rejected"
     assert raw_meta["routing_review_reason"] == "mixed_reports_rejected_upstream"
 
     rejected_meta = _read_json(rejected_meta_paths[0])
@@ -544,7 +731,7 @@ def test_orchestrator_mixed_report_goes_to_review_when_safe_split_is_not_possibl
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["detected_report_type"] == "mixed"
     assert raw_meta["routing_target"] is None
-    assert raw_meta["processing_status"] == "needs_review"
+    assert raw_meta["processing_status"] == "rejected"
     assert raw_meta["routing_review_reason"] == "mixed_report_split_not_safe"
     assert raw_meta["split_child_count"] == 0
 
@@ -567,12 +754,7 @@ def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
         specialist_calls += 1
         return AgentResult(
             agent_name=target_agent,
-            payload={
-                "status": "ready",
-                "signal_type": "sales_income",
-                "branch": "waigani",
-                "report_date": "2026-04-07",
-            },
+            payload=_valid_sales_candidate_payload(),
         )
 
     monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
@@ -615,6 +797,7 @@ def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
     assert len(rejected_meta_paths) == 1
 
     raw_meta = _read_json(raw_meta_paths[0])
+    assert raw_meta["processing_status"] == "duplicate"
     assert raw_meta["policy_guard"]["action"] == "reject"
     assert raw_meta["policy_guard"]["reason"] == "duplicate_message"
     assert raw_meta["policy_guard"]["duplicate"] is True
@@ -625,9 +808,274 @@ def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
     assert rejected_meta["policy_guard"]["duplicate_basis"] == "policy_guard:passed"
 
     assert second_result.agent_name == "orchestrator_agent"
-    assert second_result.payload["status"] == "needs_review"
+    assert second_result.payload["status"] == "duplicate"
     assert second_result.payload["warnings"][0]["code"] == "duplicate_message"
     assert second_result.payload["policy_guard"]["reason"] == "duplicate_message"
+
+
+def test_orchestrator_rejects_same_raw_sha256_within_24_hours_across_raw_file_boundaries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    specialist_calls = 0
+
+    def fake_dispatch(work_item, *, target_agent):
+        nonlocal specialist_calls
+        specialist_calls += 1
+        return AgentResult(
+            agent_name=target_agent,
+            payload=_valid_sales_candidate_payload(),
+        )
+
+    monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+
+    first_result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_report_text()},
+                "metadata": {
+                    "received_at": "2026-04-07T23:30:00Z",
+                    "sender": "duplicate-hash-smoke-1",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+    second_result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_report_text()},
+                "metadata": {
+                    "received_at": "2026-04-08T10:00:00Z",
+                    "sender": "duplicate-hash-smoke-2",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "sales", "*.meta.json")
+
+    assert first_result.agent_name == "sales_income_agent"
+    assert second_result.agent_name == "orchestrator_agent"
+    assert specialist_calls == 1
+    assert len(raw_meta_paths) == 2
+    assert len(rejected_meta_paths) == 1
+
+    raw_metas = [_read_json(path) for path in raw_meta_paths]
+    duplicate_raw_meta = next(meta for meta in raw_metas if meta.get("policy_guard", {}).get("reason") == "duplicate_message")
+    assert duplicate_raw_meta["raw_sha256"] == raw_metas[0]["raw_sha256"] == raw_metas[1]["raw_sha256"]
+    assert duplicate_raw_meta["processing_status"] == "duplicate"
+    assert duplicate_raw_meta["policy_guard"]["duplicate"] is True
+    assert duplicate_raw_meta["policy_guard"]["duplicate_basis"] == "policy_guard:passed"
+
+    rejected_meta = _read_json(rejected_meta_paths[0])
+    assert rejected_meta["rejection_reason"] == "duplicate_message"
+    assert rejected_meta["policy_guard"]["duplicate"] is True
+
+    assert second_result.payload["status"] == "duplicate"
+    assert second_result.payload["warnings"][0]["code"] == "duplicate_message"
+    assert second_result.payload["policy_guard"]["duplicate"] is True
+    assert (tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json").exists()
+
+
+def test_orchestrator_runs_validation_and_acceptance_before_final_write(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    call_order: list[str] = []
+
+    def fake_dispatch(work_item, *, target_agent):
+        return AgentResult(agent_name=target_agent, payload=_valid_sales_candidate_payload())
+
+    class DummyValidationResult:
+        accepted = True
+        normalized_payload = {"branch": "waigani", "report_date": "2026-04-07"}
+        rejections = []
+
+        def to_payload(self):
+            return {"accepted": True, "status": "accepted", "report_type": "sales", "rejections": [], "normalization": {}}
+
+    class DummyAcceptanceResult:
+        decision = "accept"
+        reason = "test_accept"
+        confidence = 0.95
+
+        def to_payload(self):
+            return {
+                "report_type": "sales",
+                "decision": "accept",
+                "status": "accept",
+                "reason": "test_accept",
+                "confidence": 0.95,
+                "thresholds": {},
+            }
+
+        def governed_status(self, *, warning_codes=None):
+            return "accepted"
+
+    class DummyGovernance:
+        status = "accepted"
+        export_allowed = True
+
+        def to_payload(self):
+            return {"status": "accepted", "export_allowed": True, "reasons": []}
+
+    class DummyWriteResult:
+        governance = DummyGovernance()
+
+    def fake_validate(report_type, payload):
+        call_order.append("validate")
+        return DummyValidationResult()
+
+    def fake_accept(report_type, *, validation_result, work_item_payload):
+        call_order.append("accept")
+        return DummyAcceptanceResult()
+
+    def fake_write(payload, *, metadata=None):
+        call_order.append("write")
+        return DummyWriteResult()
+
+    monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+    monkeypatch.setattr("apps.orchestrator_agent.worker.validate_report", fake_validate)
+    monkeypatch.setattr("apps.orchestrator_agent.worker.decide_acceptance", fake_accept)
+    monkeypatch.setattr("apps.orchestrator_agent.worker.sales_record_store.write_structured_record", fake_write)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_report_text()},
+                "metadata": {"received_at": "2026-04-07T11:00:00Z", "branch_hint": "waigani"},
+            },
+        )
+    )
+
+    assert call_order == ["validate", "accept", "write"]
+    assert result.payload["status"] == "accepted"
+
+
+def test_orchestrator_conflict_blocked_result_enters_review_queue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    structured_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"
+    structured_path.parent.mkdir(parents=True, exist_ok=True)
+    structured_path.write_text(
+        json.dumps(_valid_sales_candidate_payload(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    structured_path.with_suffix(".governance.json").write_text(
+        json.dumps(
+            {
+                "version": "v1",
+                "status": "accepted",
+                "export_allowed": True,
+                "report_family": "sales",
+                "signal_type": "sales_income",
+                "branch": "waigani",
+                "report_date": "2026-04-07",
+                "message_id": "seed-1",
+                "raw_sha256": "seed-raw-1",
+                "normalized_scope": "sales:waigani:2026-04-07",
+                "semantic_sha256": "seed-semantic",
+                "reasons": [],
+                "warnings": [],
+                "source_status": "accepted",
+                "duplicate_of": None,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_dispatch(work_item, *, target_agent):
+        payload = _valid_sales_candidate_payload()
+        payload["metrics"]["gross_sales"] = 1800.0
+        payload["metrics"]["cash_sales"] = 900.0
+        payload["metrics"]["eftpos_sales"] = 900.0
+        return AgentResult(agent_name=target_agent, payload=payload)
+
+    monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+    monkeypatch.setattr("apps.orchestrator_agent.worker._should_attempt_specialist_fallback", lambda **kwargs: False)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_report_text()},
+                "metadata": {"received_at": "2026-04-07T11:00:00Z", "branch_hint": "waigani"},
+            },
+        )
+    )
+
+    review_paths = _paths(tmp_path / "records" / "review" / "2026_04_07" / "waigani" / "sales", "*.json")
+    assert result.payload["status"] == "conflict_blocked"
+    assert len(review_paths) == 1
+    review_payload = _read_json(review_paths[0])
+    assert review_payload["governance"]["status"] == "conflict_blocked"
+    assert review_payload["governance"]["reasons"] == ["conflicting_record_same_scope"]
+
+
+def test_orchestrator_parser_failure_is_recorded_as_governance_reason(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    def fake_dispatch(work_item, *, target_agent):
+        return AgentResult(
+            agent_name=target_agent,
+            payload={
+                "signal_type": "sales_income",
+                "source_agent": "sales_income_agent",
+                "branch": None,
+                "report_date": None,
+                "confidence": 0.0,
+                "metrics": {},
+                "items": [],
+                "warnings": [{"code": "parser_failure", "severity": "error", "message": "parse failed"}],
+                "status": "invalid_input",
+            },
+            metadata={
+                "validation": {
+                    "accepted": False,
+                    "details": {
+                        "parser_failure": True,
+                        "final_status": "invalid_input",
+                    },
+                }
+            },
+        )
+
+    monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+    monkeypatch.setattr("apps.orchestrator_agent.worker._should_attempt_specialist_fallback", lambda **kwargs: False)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_report_text()},
+                "metadata": {"received_at": "2026-04-07T11:00:00Z", "branch_hint": "waigani"},
+            },
+        )
+    )
+
+    assert result.payload["status"] == "rejected"
+    assert "parser_failure" in result.payload["governance"]["reasons"]
 
 
 def test_orchestrator_routes_actual_backlog_attendance_message(
@@ -657,19 +1105,16 @@ def test_orchestrator_routes_actual_backlog_attendance_message(
     assert raw_meta["branch_hint"] == "lae_5th_street"
     assert raw_meta["routing_target"] == "hr_agent"
     assert raw_meta["resolved_report_date"] == "2026-04-05"
-    assert raw_meta["processing_status"] == "needs_review"
+    assert raw_meta["processing_status"] == "processed"
 
-    rejected_unknown_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "unknown", "*.meta.json")
+    rejected_unknown_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp", "**/*.meta.json")
     assert rejected_unknown_paths == []
-    review_paths = _paths(tmp_path / "records" / "review" / "2026_04_05" / "lae_5th_street" / "staff_attendance", "*.json")
-    assert len(review_paths) == 1
+    structured_path = tmp_path / "records" / "structured" / "hr_attendance" / "lae_5th_street" / "2026-04-05.json"
+    assert not structured_path.exists()
 
     assert result.agent_name == "orchestrator_agent"
-    assert result.payload["classification"]["report_type"] == "attendance"
     assert result.payload["status"] == "needs_review"
-    assert result.payload["fallback"]["normalized_report"]["branch"] == "lae_5th_street"
-    assert result.payload["fallback"]["normalized_report"]["report_date"] == "2026-04-05"
-    assert result.payload["fallback"]["normalized_report"]["metrics"]["total_staff_listed"] >= 17
+    assert result.payload["fallback"]["validation"]["accepted"] is True
 
 
 def test_orchestrator_routes_actual_backlog_staff_performance_message(
@@ -707,7 +1152,7 @@ def test_orchestrator_routes_actual_backlog_staff_performance_message(
     assert structured_payload["branch"] == "lae_malaita"
     assert structured_payload["report_date"] == "2026-04-07"
     assert len(structured_payload["items"]) >= 19
-    assert structured_payload["status"] in {"accepted_with_warning", "ready", "needs_review"}
+    assert structured_payload["status"] in {"accepted_with_warning", "accepted", "needs_review"}
 
     assert result.agent_name == "hr_agent"
     assert result.payload["branch"] == "lae_malaita"
@@ -784,22 +1229,19 @@ def test_orchestrator_splits_actual_backlog_sales_and_supervisor_message(
     assert raw_meta["routing_target"] == "fan_out"
     assert raw_meta["split_child_count"] == 2
     assert raw_meta["split_child_report_types"] == ["sales_income", "supervisor_control"]
-    assert raw_meta["processing_status"] in {"accepted_split", "accepted_with_warning"}
+    assert raw_meta["processing_status"] == "rejected"
 
     sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-10.json"
     supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-10.json"
-    assert sales_path.exists()
-    assert supervisor_path.exists()
+    assert not sales_path.exists()
+    assert not supervisor_path.exists()
     assert not (tmp_path / "records" / "structured" / "sales_income" / "ttc_waigani_branch" / "2026-04-10.json").exists()
 
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["classification"]["report_type"] == "mixed"
-    assert result.payload["status"] in {"accepted_split", "accepted_with_warning"}
+    assert result.payload["status"] == "needs_review"
     assert len(result.payload["fanout"]["children"]) == 2
-    assert result.payload["output_paths"] == [
-        "records/structured/sales_income/waigani/2026-04-10.json",
-        "records/structured/supervisor_control/waigani/2026-04-10.json",
-    ]
+    assert result.payload["output_paths"] == []
 
 
 def test_orchestrator_persists_fallback_eligibility_by_report_type_in_raw_metadata(
@@ -817,7 +1259,7 @@ def test_orchestrator_persists_fallback_eligibility_by_report_type_in_raw_metada
             return AgentResult(
                 agent_name=target_agent,
                 payload={
-                    "status": "ready",
+                    "status": "accepted",
                     "signal_type": "supervisor_control",
                     "branch": branch_hint,
                     "report_date": report_date,
@@ -826,7 +1268,7 @@ def test_orchestrator_persists_fallback_eligibility_by_report_type_in_raw_metada
         return AgentResult(
             agent_name=target_agent,
             payload={
-                "status": "ready",
+                "status": "accepted",
                 "signal_type": "sales_income",
                 "branch": branch_hint,
                 "report_date": report_date,
@@ -986,10 +1428,10 @@ def test_orchestrator_strict_needs_review_invokes_fallback_before_final_review(
     def fake_dispatch(work_item, *, target_agent):
         return AgentResult(
             agent_name=target_agent,
-            payload={
-                "status": "needs_review",
-                "warnings": [{"code": "needs_review", "severity": "warning", "message": "strict parse needs review"}],
-            },
+            payload=_valid_sales_candidate_payload(
+                status="needs_review",
+                warnings=[{"code": "needs_review", "severity": "warning", "message": "strict parse needs review"}],
+            ),
         )
 
     def fake_fallback(work_item):
@@ -1041,7 +1483,7 @@ def test_orchestrator_strict_needs_review_invokes_fallback_before_final_review(
 
     assert fallback_calls == 1
     assert result.agent_name == "orchestrator_agent"
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert result.payload["fallback"]["acceptance"]["decision"] == "accept"
 
 
@@ -1146,6 +1588,74 @@ def test_orchestrator_fallback_validation_uses_normalized_report_date(
     assert raw_meta["fallback_validation"]["accepted"] is True
 
 
+def test_orchestrator_fallback_downgrades_resolvable_invalid_report_date_to_warning(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    def fake_dispatch(work_item, *, target_agent):
+        return AgentResult(
+            agent_name=target_agent,
+            payload={
+                "status": "invalid_input",
+                "warnings": [{"code": "missing_fields", "severity": "error", "message": "strict parse failed"}],
+            },
+        )
+
+    def fake_validate(report_type, payload):
+        result = validate_report(report_type, payload)
+        result.accepted = False
+        result.rejections = [
+            Rejection(
+                code="invalid_report_date",
+                message="The payload report_date must use YYYY-MM-DD format.",
+                field="report_date",
+            )
+        ]
+        result.normalized_payload["report_date"] = "2026-04-10"
+        result.normalization["report_date"] = {
+            "raw": "10/04 /26",
+            "normalized": "2026-04-10",
+            "confidence": 1.0,
+        }
+        return result
+
+    monkeypatch.setattr("apps.orchestrator_agent.worker._dispatch_to_specialist", fake_dispatch)
+    monkeypatch.setattr("apps.orchestrator_agent.worker.validate_report", fake_validate)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {
+                    "text": "\n".join(
+                        [
+                            "DAY end sales report",
+                            "Shop: TTC LAE 5TH STREET BRANCH",
+                            "Date: Friday, 10/04 /26",
+                            "Total Sales: 1200",
+                            "Cash Sales: 700",
+                            "Card Sales: 500",
+                            "Main Door: 15",
+                            "Customers Served: 12",
+                        ]
+                    )
+                },
+                "metadata": {
+                    "received_at": "2026-04-10T09:43:59Z",
+                    "sender": "fallback-date-warning",
+                },
+            },
+        )
+    )
+
+    warning_codes = {warning["code"] for warning in result.payload["fallback"]["warnings"]}
+    assert "invalid_report_date" in warning_codes
+    assert result.payload["fallback"]["validation"]["accepted"] is True
+
+
 def test_orchestrator_strict_needs_review_is_not_rejected_when_fallback_fails(
     tmp_path: Path,
     monkeypatch,
@@ -1156,10 +1666,10 @@ def test_orchestrator_strict_needs_review_is_not_rejected_when_fallback_fails(
     def fake_dispatch(work_item, *, target_agent):
         return AgentResult(
             agent_name=target_agent,
-            payload={
-                "status": "needs_review",
-                "warnings": [{"code": "needs_review", "severity": "warning", "message": "strict parse needs review"}],
-            },
+            payload=_valid_sales_candidate_payload(
+                status="needs_review",
+                warnings=[{"code": "needs_review", "severity": "warning", "message": "strict parse needs review"}],
+            ),
         )
 
     def fake_fallback(work_item):
@@ -1212,7 +1722,7 @@ def test_orchestrator_strict_needs_review_is_not_rejected_when_fallback_fails(
     assert len(rejected_meta_paths) == 0
 
     raw_meta = _read_json(raw_meta_paths[0])
-    assert raw_meta["processing_status"] == "needs_review"
+    assert raw_meta["processing_status"] == "processed"
 
 
 def test_orchestrator_high_confidence_fallback_is_accepted_for_allowed_report_type(
@@ -1275,7 +1785,7 @@ def test_orchestrator_high_confidence_fallback_is_accepted_for_allowed_report_ty
         )
     )
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert result.payload["fallback"]["acceptance"]["decision"] == "accept"
     assert _paths(tmp_path / "records" / "review", "*.json") == []
 
@@ -1451,8 +1961,152 @@ def test_orchestrator_fallback_disabled_report_type_does_not_invoke_fallback(
     rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "hr_performance", "*.meta.json")
 
     assert fallback_calls == 0
-    assert result.payload["status"] == "invalid_input"
+    assert result.payload["status"] == "rejected"
     assert len(rejected_meta_paths) == 1
+
+
+def test_orchestrator_uses_cleaned_text_for_routing_and_specialist_processing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    normalized_inputs: list[str] = []
+    specialist_inputs: list[str] = []
+    original_normalize_headers = orchestrator_worker.normalize_headers
+    original_dispatch_to_specialist = orchestrator_worker._dispatch_to_specialist
+    raw_text = "  DAY-END SALES REPORT\r\nBranch: Waigani\r\nDate: 2026-04-07\r\nGross Sales: 1250\r\nCash Sales: 750\r\nEftpos Sales: 500\r\nTraffic: 24\r\nServed: 19\r\nCashier: Alice  "
+    cleaned_text = "DAY-END SALES REPORT\nBranch: Waigani\nDate: 2026-04-07\nGross Sales: 1250\nCash Sales: 750\nEftpos Sales: 500\nTraffic: 24\nServed: 19\nCashier: Alice"
+
+    def capture_normalize_headers(text: str):
+        normalized_inputs.append(text)
+        return original_normalize_headers(text)
+
+    def capture_dispatch_to_specialist(work_item, *, target_agent):
+        specialist_inputs.append(work_item.payload["raw_message"]["text"])
+        return original_dispatch_to_specialist(work_item, target_agent=target_agent)
+
+    monkeypatch.setattr(orchestrator_worker, "normalize_headers", capture_normalize_headers)
+    monkeypatch.setattr(orchestrator_worker, "_dispatch_to_specialist", capture_dispatch_to_specialist)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": raw_text},
+                "cleaned_text": cleaned_text,
+                "pre_ingestion_validation": {
+                    "status": "cleaned",
+                    "cleaned_text": cleaned_text,
+                    "reasons": [{"code": "normalized_line_endings", "message": "normalized"}],
+                    "warnings": [],
+                    "detected_risks": [],
+                    "suggested_report_family": "sales",
+                    "validator_version": "v1",
+                },
+                "metadata": {
+                    "received_at": "2026-04-07T11:00:00Z",
+                    "sender": "validator-smoke",
+                },
+            },
+        )
+    )
+
+    raw_text_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.txt")
+
+    assert result.payload["status"] == "accepted"
+    assert normalized_inputs[0] == cleaned_text
+    assert specialist_inputs == [cleaned_text]
+    assert len(raw_text_paths) == 1
+    assert raw_text_paths[0].read_text(encoding="utf-8") == raw_text.replace("\r\n", "\n")
+
+
+def test_orchestrator_passes_pre_ingestion_validation_metadata_through_safely(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    captured_validation: list[dict[str, object]] = []
+    original_dispatch_to_specialist = orchestrator_worker._dispatch_to_specialist
+    validation_payload = {
+        "status": "accepted",
+        "cleaned_text": "DAY-END SALES REPORT\nBranch: Waigani\nDate: 2026-04-07\nGross Sales: 1250\nCash Sales: 750\nEftpos Sales: 500\nTraffic: 24\nServed: 19\nCashier: Alice",
+        "reasons": [],
+        "warnings": [],
+        "detected_risks": ["mixed_report_risk"],
+        "suggested_report_family": "sales",
+        "validator_version": "v1",
+    }
+
+    def capture_dispatch_to_specialist(work_item, *, target_agent):
+        captured_validation.append(work_item.payload["pre_ingestion_validation"])
+        return original_dispatch_to_specialist(work_item, target_agent=target_agent)
+
+    monkeypatch.setattr(orchestrator_worker, "_dispatch_to_specialist", capture_dispatch_to_specialist)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": validation_payload["cleaned_text"]},
+                "cleaned_text": validation_payload["cleaned_text"],
+                "pre_ingestion_validation": validation_payload,
+                "metadata": {
+                    "received_at": "2026-04-07T11:00:00Z",
+                    "sender": "validator-pass-through",
+                },
+            },
+        )
+    )
+
+    assert result.payload["status"] == "accepted"
+    assert captured_validation == [validation_payload]
+
+
+def test_orchestrator_keeps_existing_behavior_when_validator_metadata_is_absent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    specialist_inputs: list[str] = []
+    original_dispatch_to_specialist = orchestrator_worker._dispatch_to_specialist
+    raw_text = "\n".join(
+        [
+            "DAY-END SALES REPORT",
+            "Branch: Waigani",
+            "Date: 2026-04-07",
+            "Gross Sales: 1250",
+            "Cash Sales: 750",
+            "Eftpos Sales: 500",
+            "Traffic: 24",
+            "Served: 19",
+            "Cashier: Alice",
+        ]
+    )
+
+    def capture_dispatch_to_specialist(work_item, *, target_agent):
+        specialist_inputs.append(work_item.payload["raw_message"]["text"])
+        return original_dispatch_to_specialist(work_item, target_agent=target_agent)
+
+    monkeypatch.setattr(orchestrator_worker, "_dispatch_to_specialist", capture_dispatch_to_specialist)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": raw_text},
+                "metadata": {
+                    "received_at": "2026-04-07T11:00:00Z",
+                    "sender": "baseline-behavior",
+                },
+            },
+        )
+    )
+
+    assert result.payload["status"] == "accepted"
+    assert specialist_inputs == [raw_text]
 
 
 def _patch_record_paths(monkeypatch, tmp_path: Path) -> None:
@@ -1474,6 +2128,31 @@ def _paths(directory: Path, pattern: str) -> list[Path]:
 
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _valid_sales_candidate_payload(
+    *,
+    status: str = "accepted",
+    warnings: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "signal_type": "sales_income",
+        "source_agent": "sales_income_agent",
+        "branch": "waigani",
+        "report_date": "2026-04-07",
+        "confidence": 0.95,
+        "metrics": {
+            "gross_sales": 1200.0,
+            "cash_sales": 700.0,
+            "eftpos_sales": 500.0,
+            "mobile_money_sales": 0.0,
+            "traffic": 12,
+            "served": 10,
+        },
+        "items": [],
+        "warnings": warnings or [],
+        "status": status,
+    }
 
 
 def _live_staff_performance_text() -> str:
@@ -1923,6 +2602,345 @@ def _live_sales_income_text() -> str:
             "Main Door: 15",
             "Customers Served: 12",
             "Remark: Balanced and checked",
+        ]
+    )
+
+
+def _invalid_bale_pricing_card_text() -> str:
+    return "\n".join(
+        [
+            "BALE PRICING CARD",
+            "Branch: Waigani Branch",
+            "Date: 07/04/2026",
+            "Bale # 01",
+            "Item: Ladies Mixed Tops",
+            "Wt: 45kg",
+            "A: 60 pcs",
+            "B: 40 pcs",
+            "C: 15 pcs",
+            "Sales: K1,150.00",
+            "Pricer: Maria Sine",
+        ]
+    )
+
+
+def _unknown_attendance_text() -> str:
+    return "\n".join(
+        [
+            "𝕋𝕋ℂ ℙ𝕆𝕄",
+            "𝕎𝔸𝕀𝔾𝔸ℕ𝕀 𝔹ℝ𝔸ℕℂℍ",
+            "",
+            "MONDAY:06/04/26",
+            "",
+            "STAFFS ATTENDANCE.",
+            "",
+            "1.Alice KOKO = ✔️ ",
+            "2.Grace MASSON= ✔️ ",
+            "3.Fidelma WOBILO= Off ",
+            "4.David YARO = ✔️ ",
+            "5.Agnes TIMOTHY= ✔️ ",
+            "6.Moviyo Alex= ✔️ ",
+            "7.Sabila Seka= ✔️ ",
+            "8.Mitege Laiken= ✔️ ",
+            "9.Xeena Moris= ✔️ ",
+            "10.Anita Tangoi = ✔️ ",
+            "11.Pricilla Billy = ✔️ ",
+            "12.Dorothy Morofa = ✔️ ",
+            "13.Micheal Peter = Off ",
+            "14.Nim Jonnah= ✔️ ",
+            "15.Kahy Magi= ✔️ ",
+            "16.Rebeca Bob= Off ",
+            "17.Mathew Gene= ✔️ ",
+            "18.Privien Keiby = Off ",
+            "19.Milford Timothy = ✔️ ",
+            "20.Bethsien  Ken= ✔️ ",
+            "21.Stanly Mathias = ✔️ ",
+            "22.Debra Wotavo = ✔️ ",
+            "23.Kimson David= ✔️ ",
+            "24.Hendry Ambiu = ✔️ ",
+            "25.Francis Ano = ✔️ ",
+            "26.Gassy Panagu= Off ",
+            "27.Ricky Lomutopa= ✔️ ",
+            "38.Epu Yasa= Off",
+            "39.Florida Dava= ✔️ ",
+            "",
+            "Total staffs Press/=23",
+            "",
+            "Day off/=06",
+            "",
+            "Total staff: 29",
+            "",
+            "Note:",
+            "",
+            "1. Handry Ambui and Nim Jonnah continue to work this morning.",
+            "",
+            "Thanks",
+        ]
+    )
+
+
+def _unknown_waigani_stuff_performance_text() -> str:
+    return "\n".join(
+        [
+            "➡️STUFF PERFORMANCE REPORT... ",
+            "",
+            "BRANCH::WAIGANI   ",
+            "",
+            "Date:: 05/04/2026",
+            "            Sunday",
+            "",
+            "☑️Prepared by :: DAVID YAILO",
+            "",
+            "➡️STUFF 1...",
+            "",
+            "Staff Name > MILFORD ",
+            "",
+            "Section > MANS COTTON PANTS",
+            "",
+            "Item Assisting >  7",
+            "",
+            "Items sold assisting > 130",
+            "",
+            "🔸Arrangements  > 5",
+            "",
+            "🔸DISPLAY > 5",
+            "",
+            "🔸Performance > 5",
+            "",
+            "     ➡️STUFF 2.",
+            "",
+            "Name.. KIMSON",
+            "",
+            "section.. M6PKTS   / PANTS ",
+            "",
+            "Item assisting.. 13",
+            "",
+            "Items sold assisting.. 24",
+            "",
+            "🔹Arrangements... 5",
+            "",
+            "🔹Display.. 5",
+            "",
+            "🔹Performance.. 5",
+            "",
+            "➡️STUFF 3.",
+            "",
+            "Name.. GRACE",
+            "",
+            "Section.. PACIFIC SHIRTS, SHOE",
+            "",
+            "Item assisting.. 6",
+            "",
+            "Item sold assisting.. 55",
+            "",
+            "🔹Arrangements. 5",
+            "🔹Display. 5",
+            "🔹Performance. 5",
+            "",
+            "➡️STUFF 4.",
+            "",
+            "Name.. PRICILLA",
+            "",
+            "Section.. MANS MTSH",
+            "",
+            "Item assisting.. 9",
+            "",
+            "Item sold assisting.. 84",
+            "",
+            "🔹Arrangements. 5",
+            "",
+            "🔹Display. 5",
+            "",
+            "🔹Performance. 5",
+            "",
+            "➡️STUFF 5.",
+            "",
+            "Name.. DOROTHY",
+            "",
+            "Section.. BOYS SECTION",
+            "",
+            "Item assisting.. 17",
+            "",
+            "Item sold assisting.. 63",
+            "",
+            "🔹Arrangements",
+            "",
+            "🔹Display",
+            "",
+            "🔹Performance.. 5",
+            "",
+            "➡️STUFF 6.",
+            "",
+            "Name.. EPU",
+            "",
+            "Section.. MANS SHORTS",
+            "",
+            "Item assisting.. 11",
+            "",
+            "Item sold assisting..77",
+            "",
+            "🔹Arrangements.. 4",
+            "",
+            "🔹Display. 5",
+            "",
+            "🔹Performance. 5",
+            "",
+            "➡️STUFF 7.",
+            "",
+            "Name... GASSY",
+            "",
+            "Section.. MANS BUTTON SHIRTS",
+            "",
+            "Item assisting.. 12",
+            "",
+            "Item sold assisting.. 44",
+            "",
+            "🔹Arrangements.. 5",
+            "🔹Display.. 4",
+            "🔹Performance. 5",
+            "",
+            "➡️STUFF 8.",
+            "",
+            "Name.. MATTHEW",
+            "",
+            "Section.. MANS BUTTON SHIRTS",
+            "",
+            "Item assisting.. ",
+            "Item sold assist..",
+            "",
+            "🔹Arrangements. ",
+            "🔹Display. ",
+            "🔹Performance.",
+            "🔸OFF",
+            "",
+            "➡️STUFF 9.",
+            "",
+            "Name.. NIM",
+            "",
+            "Section.. BEACH WEARS",
+            "",
+            "Item assist.. ",
+            "",
+            "Item sold assist.. ",
+            "",
+            "🔹Arrangement. ",
+            "",
+            "🔹Display. ",
+            "",
+            "🔹Performance. ",
+            "🔸SENT HOME. ",
+            "",
+            "➡️STUFF 10.",
+            "",
+            "Name.. FLORIDA",
+            "",
+            "Section.. SOCCER SHORTS",
+            "",
+            "Item assist.. 5",
+            "Item assist section.. 21",
+            "",
+            "🔹Arrangements. 4",
+            "🔹Display. 5",
+            "🔹Performance. 5",
+        ]
+    )
+
+
+def _lae_5th_street_parser_failure_text() -> str:
+    return "\n".join(
+        [
+            "TTC LAE ",
+            "5th Street branch ",
+            "Sunday 05/04/2026",
+            "",
+            "Update For Staff",
+            "Performance Assisting",
+            "Customers and doing sales for today ",
+            "",
+            "1.Marryane Sakias ={ Pricing cluck}",
+            "=Items sold=OFF ",
+            "=Customers assist=OFF ",
+            "",
+            "2.Imelda Patrick. ={Cashier}",
+            "=Items sold=cashier ",
+            "=Customers assist=cashier",
+            "",
+            "3.Merolyne Tobby. ",
+            "={Pricing room}",
+            "=Items sold=13 ",
+            "=Customers assist=8",
+            "",
+            "4.George Andau .",
+            "{Door Man}",
+            "=Items sold=6",
+            "=Customers assist=4",
+            "",
+            "5.Cloe Wofinga ",
+            "{Skirt and dress section}",
+            "=Items sold=Leave",
+            "=Customers assist=Leave",
+            "",
+            "6.Jacksion Kuri",
+            ".{Beach were sports were , tawel and HHR section}",
+            "=Items sold=13",
+            "=Customers assist=8",
+            "",
+            "7.Doil Wai-ah",
+            "={Mans jeans,  T-shirt,collar  shirt and jacket section}",
+            "=Items sold=33",
+            "=Customers assist=4",
+            "",
+            "8.Jannefer  Golomb.",
+            "{Reflector ,comfles  man's cotton pants and baby blanket section}",
+            "=Items sold=11",
+            "=Customers assist=5",
+            "",
+            "9.Donok Levi",
+            "{Mans shorts and kids girls trecshut section}",
+            "=Items sold=19",
+            "=Customers assist=4",
+            "",
+            "10.Joyce Andrew ",
+            "{Ladies tops , Ladies silk blouse and ladies T-shirt section}",
+            "=Items sold=18",
+            "=Customers assist=6",
+            "",
+            "11.Hazel Arumbu",
+            "{Kids girls jeans, dress, T-shirt and kids boys Jeans, cotton pants, shorts T-shirt section",
+            "=Items sold=AWN",
+            "=Customers assist=AWN",
+            "",
+            "12.Sheebah Ikiso ",
+            "{Ladies Shorts  ,Colour jeans, and ladies Capri section}",
+            "=Items sold=OFF ",
+            "=Customers assist=OFF ",
+            "",
+            "13.Anuty Mina",
+            "{Pricing room}",
+            "Items sold=Absent ",
+            "Customers assist=Absent ",
+            "",
+            "14.Lieb Yawano",
+            "{Ladies jeans section}",
+            "=Items sold =12",
+            "=Customers assist=4",
+            "",
+            "15.Joyce Lovave ",
+            "{Supervisor )",
+            "=OFF ",
+            "",
+            "16.Sandra Daniel",
+            "{Ladies dress and skirt section}",
+            "=Items sold=15",
+            "=Customers assist=3",
+            "",
+            "TOTAL ITEMS SOLD OUT=152",
+            "",
+            "TOTAL CUSTOMERS ASSIST=41",
+            "",
+            "The total numbers of items above are different items sold out by individual Staff with there number of customers assist.",
+            "",
+            "Thank you.",
         ]
     )
 

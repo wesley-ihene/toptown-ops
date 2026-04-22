@@ -16,7 +16,72 @@ from packages.signal_contracts.work_item import WorkItem
 
 _KEY_VALUE_PATTERN = re.compile(r"^\s*([^:=]+)\s*[:=]\s*(.+?)\s*$")
 _NUMBERED_LINE_PATTERN = re.compile(r"^\s*(\d+)\s*(?:[.)\-:]+|\s)\s*(.+?)\s*$")
-_STATUS_PATTERN = re.compile(r"\b(leave|off|present|absent|p|sick|suspended|suspend)\b", flags=re.IGNORECASE)
+_STRICT_RECORD_PATTERN = re.compile(r"^\s*(?P<staff>.+?)\s*(?:=|--+|-|:|\||/)\s*(?P<status>.+?)\s*$")
+_DATE_ONLY_PATTERN = re.compile(r"^\s*\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}\s*$")
+_WEEKDAY_DATE_PATTERN = re.compile(
+    r"^\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}\s*$",
+    flags=re.IGNORECASE,
+)
+_NOTE_HEADER_PATTERN = re.compile(r"^\s*(?:notes?|remarks?)\s*:?\s*(.*?)\s*$", flags=re.IGNORECASE)
+_SUMMARY_METRIC_ALIASES = {
+    "total staff": "total_staff",
+    "total staffs": "total_staff",
+    "staff present": "staff_present",
+    "staffs present": "staff_present",
+    "total staffs present": "staff_present",
+    "present": "staff_present",
+    "p": "staff_present",
+    "not at work": "not_at_work",
+    "staff off": "staff_off",
+    "staffs day off": "staff_off",
+    "day off": "staff_off",
+    "off": "staff_off",
+    "off duty": "staff_off",
+    "staffs lay off": "staff_off",
+    "suspend": "suspend",
+    "suspended": "suspend",
+    "staffs suspend": "suspend",
+    "absent": "absent",
+    "staffs absent with notice": "absent",
+    "staffs absent without": "absent",
+    "leave": "leave",
+    "staffs on leavebreak": "leave",
+    "on leave": "leave",
+    "on leavebreak": "leave",
+    "sick": "sick",
+    "staffs sick": "sick",
+}
+_DECLARED_STATUS_KEYS = {
+    "staff_present": "present",
+    "not_at_work": "not_at_work",
+    "staff_off": "off",
+    "suspend": "suspend",
+    "absent": "absent",
+    "leave": "leave",
+    "sick": "sick",
+}
+_NON_RECORD_PREFIXES = (
+    "top town",
+    "branch",
+    "date",
+    "staff attendance",
+    "attendance",
+    "total",
+    "staff present",
+    "staff off",
+    "not at work",
+    "suspend",
+    "absent",
+    "leave",
+    "sick",
+    "note",
+    "notes",
+    "remark",
+    "remarks",
+    "thankyou",
+    "thank you",
+    "thanks",
+)
 
 
 @dataclass(slots=True)
@@ -38,6 +103,7 @@ class ParsedHrReport:
     report_date: str | None = None
     records: list[ParsedAttendanceRecord] = field(default_factory=list)
     declared_status_totals: dict[str, int] = field(default_factory=dict)
+    declared_summary_metrics: dict[str, int] = field(default_factory=dict)
     declared_total_staff: int | None = None
     raw_branch: str | None = None
     raw_date: str | None = None
@@ -51,11 +117,24 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     raw_text = _raw_text(payload)
     parsed = ParsedHrReport()
+    _seed_routing_metadata(parsed, payload)
+    numbered_record_mode = _has_numbered_attendance_rows(raw_text)
+    note_section_active = False
 
     for raw_line in raw_text.splitlines():
         line = raw_line.strip()
         if not line:
+            note_section_active = False
             continue
+
+        note_match = _NOTE_HEADER_PATTERN.match(line)
+        if note_match is not None:
+            note_section_active = True
+            inline_note = _clean_text(note_match.group(1) or "")
+            if inline_note:
+                parsed.notes.append(inline_note)
+            continue
+
         metadata = _parse_metadata_line(line)
         if metadata is not None:
             field_name, value = metadata
@@ -67,11 +146,33 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
                 parsed.report_date = normalize_report_date(value)
             elif field_name == "total_staff":
                 parsed.declared_total_staff = value
+                parsed.declared_summary_metrics["total_staff"] = value
             elif field_name == "notes":
                 parsed.notes.append(value)
             continue
 
-        record = _parse_record_line(line)
+        explicit_date = _parse_explicit_date_line(line)
+        if explicit_date is not None:
+            parsed.raw_date = line
+            parsed.report_date = explicit_date
+            continue
+
+        summary = _parse_summary_count_line(line)
+        if summary is not None:
+            metric_name, count = summary
+            parsed.declared_summary_metrics[metric_name] = count
+            if metric_name == "total_staff":
+                parsed.declared_total_staff = count
+            declared_status_key = _DECLARED_STATUS_KEYS.get(metric_name)
+            if declared_status_key is not None:
+                parsed.declared_status_totals[declared_status_key] = count
+            continue
+
+        if note_section_active:
+            parsed.notes.append(line)
+            continue
+
+        record = _parse_record_line(line, allow_unnumbered=not numbered_record_mode)
         if record is not None:
             if record.status == "unknown":
                 parsed.warnings.append(
@@ -82,12 +183,6 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
                     )
                 )
             parsed.records.append(record)
-            continue
-
-        summary = _parse_summary_count_line(line)
-        if summary is not None:
-            status, count = summary
-            parsed.declared_status_totals[status] = count
             continue
 
         parsed.notes.append(line)
@@ -121,6 +216,29 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
     return parsed
 
 
+def _seed_routing_metadata(parsed: ParsedHrReport, payload: dict[str, Any]) -> None:
+    """Apply orchestrator-resolved branch/date hints before line parsing."""
+
+    routing = payload.get("routing")
+    if not isinstance(routing, Mapping):
+        return
+
+    branch_hint = routing.get("branch_hint")
+    if isinstance(branch_hint, str) and branch_hint.strip():
+        parsed.branch_slug = branch_hint.strip()
+        if parsed.branch is None:
+            parsed.branch = branch_hint.strip()
+        if parsed.raw_branch is None:
+            parsed.raw_branch = branch_hint.strip()
+
+    normalized_report_date = routing.get("normalized_report_date") or routing.get("report_date")
+    if isinstance(normalized_report_date, str) and normalized_report_date.strip():
+        parsed.report_date = normalized_report_date.strip()
+        if parsed.raw_date is None:
+            raw_report_date = routing.get("raw_report_date")
+            parsed.raw_date = raw_report_date.strip() if isinstance(raw_report_date, str) and raw_report_date.strip() else normalized_report_date.strip()
+
+
 def _parse_metadata_line(line: str) -> tuple[str, Any] | None:
     match = _KEY_VALUE_PATTERN.match(line)
     if match is None:
@@ -148,45 +266,33 @@ def _parse_summary_count_line(line: str) -> tuple[str, int] | None:
     if count is None:
         return None
 
-    canonical_status, _ = normalize_status(raw_key)
-    return (canonical_status, count) if canonical_status is not None else None
+    metric_name = _SUMMARY_METRIC_ALIASES.get(_normalize_key(raw_key))
+    return (metric_name, count) if metric_name is not None else None
 
 
-def _parse_record_line(line: str) -> ParsedAttendanceRecord | None:
+def _parse_record_line(line: str, *, allow_unnumbered: bool) -> ParsedAttendanceRecord | None:
     record_number = None
-    content = line
+    numbered = False
 
     numbered_match = _NUMBERED_LINE_PATTERN.match(line)
     if numbered_match is not None:
         record_number = int(numbered_match.group(1))
         content = numbered_match.group(2).strip()
-
-    normalized_content = re.sub(r"\s+", " ", content).strip(" -|/=")
-    segments = [segment.strip() for segment in re.split(r"\s*(?:\||/|=|-)\s*", normalized_content) if segment.strip()]
-    if len(segments) < 2:
+        numbered = True
+    elif allow_unnumbered:
+        content = line
+    else:
         return None
 
-    status_match = _STATUS_PATTERN.search(content)
-    canonical_status = _canonical_status(status_match.group(1)) if status_match is not None else "unknown"
-    raw_status = status_match.group(1).strip() if status_match is not None else segments[-1]
-
-    staff_name = None
-    for segment in segments:
-        segment_status = _canonical_status(segment)
-        if segment_status is not None:
-            continue
-        if staff_name is None:
-            staff_name = _clean_text(segment)
-            continue
-
-    if staff_name is None:
-        if status_match is not None:
-            staff_name = _clean_text(_STATUS_PATTERN.sub("", content, count=1))
-        else:
-            staff_name = _clean_text(" ".join(segments[:-1]))
-
-    if not staff_name:
+    record_parts = _split_record_content(content)
+    if record_parts is None:
         return None
+
+    staff_name, raw_status = record_parts
+    if _looks_like_non_record_label(staff_name, numbered=numbered):
+        return None
+
+    canonical_status = _canonical_status(raw_status) or "unknown"
 
     return ParsedAttendanceRecord(
         record_number=record_number,
@@ -219,6 +325,42 @@ def _raw_text(payload: dict[str, Any]) -> str:
 def _canonical_status(value: str) -> str | None:
     canonical_status, _ = normalize_status(value)
     return canonical_status
+
+
+def _parse_explicit_date_line(line: str) -> str | None:
+    stripped = line.strip()
+    normalized_key = _normalize_key(stripped)
+    if _DATE_ONLY_PATTERN.match(stripped) or _WEEKDAY_DATE_PATTERN.match(stripped) or normalized_key.startswith("date "):
+        return normalize_report_date(stripped)
+    return None
+
+
+def _split_record_content(content: str) -> tuple[str, str] | None:
+    match = _STRICT_RECORD_PATTERN.match(content)
+    if match is None:
+        return None
+    staff_name = _clean_text(match.group("staff"))
+    raw_status = _clean_text(match.group("status"))
+    if not staff_name or not raw_status:
+        return None
+    return staff_name, raw_status
+
+
+def _has_numbered_attendance_rows(raw_text: str) -> bool:
+    return any(_NUMBERED_LINE_PATTERN.match(line.strip()) for line in raw_text.splitlines())
+
+
+def _looks_like_non_record_label(value: str, *, numbered: bool) -> bool:
+    normalized = _normalize_key(value)
+    if not normalized:
+        return True
+    if any(char.isdigit() for char in normalized):
+        return True
+    if normalized.startswith(_NON_RECORD_PREFIXES):
+        return True
+    if not numbered and len(normalized.split()) == 1:
+        return True
+    return False
 
 
 def _clean_text(value: str) -> str | None:

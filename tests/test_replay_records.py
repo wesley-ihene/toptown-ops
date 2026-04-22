@@ -229,6 +229,7 @@ def test_orchestrator_replay_of_live_staff_performance_raw_file_writes_structure
     manifest = _latest_manifest(tmp_path)
     assert manifest["results"][0]["status"] == "structured_written"
     assert manifest["results"][0]["agent"] == "hr_agent"
+    assert not (tmp_path / "records" / "actions").exists()
 
 
 def test_orchestrator_replay_of_mixed_raw_file_writes_multiple_structured_records(
@@ -346,6 +347,7 @@ def test_orchestrator_replay_of_sales_and_supervisor_control_mixed_file_writes_t
 def _patch_replay_environment(monkeypatch, tmp_path: Path) -> None:
     records_dir = tmp_path / "records"
     monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
+    monkeypatch.setattr(record_paths, "ACTIONS_DIR", records_dir / "actions")
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")

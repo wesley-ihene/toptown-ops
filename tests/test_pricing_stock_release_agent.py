@@ -44,7 +44,7 @@ def test_pricing_stock_release_agent_normalizes_bale_input(tmp_path: Path, monke
 
     structured_path = tmp_path / "records" / "structured" / "pricing_stock_release" / "lae_5th_street" / "2026-04-10.json"
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert result.payload["branch"] == "lae_5th_street"
     assert result.payload["report_date"] == "2026-04-10"
     assert result.payload["metrics"]["total_qty"] == 10

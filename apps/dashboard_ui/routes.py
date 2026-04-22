@@ -1,4 +1,13 @@
-"""Dashboard HTML rendering for Phase 4 operational analytics."""
+"""Dashboard HTML rendering for Phase 4 operational analytics.
+
+Wave 1 operator vs executive boundary note:
+- The operator dashboard remains in TopTown Ops for operational visibility.
+- Its long-term scope is upstream factual operations: what happened, what was
+  recorded, and what operator-facing KPI facts are available.
+- Executive intelligence and interpretive downstream framing belong in IOI
+  Colony and should not expand here.
+- Wave 1 makes no route or rendering behavior changes.
+"""
 
 from __future__ import annotations
 
@@ -24,13 +33,16 @@ def render_dashboard_response(
     staff_daily = bundle.get("staff_daily") or {}
     section_daily = bundle.get("section_daily") or {}
     branch_comparison = bundle.get("branch_comparison") or {}
+    operator_action_state = bundle.get("operator_action_state") or {}
+    action_summary = operator_action_state.get("summary") or {}
+    pending_actions = operator_action_state.get("pending_actions") or []
     branch_options = catalog.get("available_branches") or []
     date_options = catalog.get("available_dates") or []
     branch_query = urlencode({"branch": selected_branch, "date": selected_date})
 
     top_branch = _top_by_operational_score(branch_comparison, highest=True)
     weak_branch = _top_by_operational_score(branch_comparison, highest=False)
-    executive_counts = {
+    operational_summary = {
         "total_branches": len(branch_options),
         "available_dates": len(date_options),
         "top_branch": top_branch["branch"] if top_branch else None,
@@ -128,7 +140,7 @@ def render_dashboard_response(
   <main>
     <header>
       <h1>TopTown Operational Dashboard</h1>
-      <p>Read-only interface over analytics JSON. Branch: {escape(display_branch_name(selected_branch))}. Date: {escape(selected_date)}.</p>
+      <p>Read-only operator interface over analytics JSON. Branch: {escape(display_branch_name(selected_branch))}. Date: {escape(selected_date)}.</p>
     </header>
     <form class="toolbar" method="get" action="/dashboard">
       <section class="panel">
@@ -146,27 +158,63 @@ def render_dashboard_response(
     </form>
     {_render_warnings(warnings)}
     <section class="panel">
-      <h2>Executive Overview</h2>
+      <h2>Operational Overview</h2>
       <div class="card-grid">
-        {_metric_card("Total Branches Available", executive_counts["total_branches"])}
-        {_metric_card("Available Dates", executive_counts["available_dates"])}
-        {_metric_card("Top Branch by Ops Score", display_branch_name(executive_counts["top_branch"]) if executive_counts["top_branch"] else None)}
-        {_metric_card("Weakest Branch by Ops Score", display_branch_name(executive_counts["weakest_branch"]) if executive_counts["weakest_branch"] else None)}
+        {_metric_card("Total Branches Available", operational_summary["total_branches"])}
+        {_metric_card("Available Dates", operational_summary["available_dates"])}
+        {_metric_card("Highest Ops Score Branch", display_branch_name(operational_summary["top_branch"]) if operational_summary["top_branch"] else None)}
+        {_metric_card("Lowest Ops Score Branch", display_branch_name(operational_summary["weakest_branch"]) if operational_summary["weakest_branch"] else None)}
       </div>
       <div class="section-grid">
         <article class="panel">
-          <h3>Branch Comparison Ranking Table</h3>
+          <h3>Branch Comparison Table</h3>
           <table>
             <thead><tr><th>Branch</th><th>Sales</th><th>Ops Score</th><th>Conversion</th></tr></thead>
             <tbody>{_render_branch_scorecards(branch_comparison.get("branch_scorecards") or [], selected_branch)}</tbody>
           </table>
         </article>
         <article class="panel links">
-          <h3>API Routes</h3>
+          <h3>Operator API Routes</h3>
           <p><a href="/api/analytics/staff?{escape(branch_query)}">/api/analytics/staff</a></p>
           <p><a href="/api/analytics/branch_daily?{escape(branch_query)}">/api/analytics/branch_daily</a></p>
           <p><a href="/api/analytics/section?{escape(branch_query)}">/api/analytics/section</a></p>
           <p><a href="/api/analytics/branch_comparison?date={escape(selected_date)}">/api/analytics/branch_comparison</a></p>
+          <p><a href="/api/actions/pending?{escape(branch_query)}">/api/actions/pending</a></p>
+          <p><a href="/api/actions/summary?{escape(branch_query)}">/api/actions/summary</a></p>
+          <p><a href="/api/feedback/summary?{escape(branch_query)}">/api/feedback/summary</a></p>
+        </article>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Operator Action Loop</h2>
+      <div class="card-grid">
+        {_metric_card("Pending Actions", action_summary.get("pending_actions"))}
+        {_metric_card("Acknowledged", action_summary.get("actions_acknowledged"))}
+        {_metric_card("In Progress", action_summary.get("actions_in_progress"))}
+        {_metric_card("Resolved", action_summary.get("actions_resolved"))}
+        {_metric_card("Dismissed", action_summary.get("actions_dismissed"))}
+        {_metric_card("Stale Pending", action_summary.get("stale_pending_actions"))}
+        {_metric_card("Review-Linked", action_summary.get("review_linked_actions"))}
+      </div>
+      <div class="section-grid">
+        <article class="panel">
+          <h3>Pending Actions</h3>
+          <table>
+            <thead><tr><th>Rule</th><th>Status</th><th>Priority</th><th>Assigned</th><th>Review</th></tr></thead>
+            <tbody>{_render_pending_actions(pending_actions)}</tbody>
+          </table>
+        </article>
+        <article class="panel">
+          <h3>Feedback State</h3>
+          <table>
+            <tbody>
+              {_summary_row("Feedback Records", action_summary.get("feedback_records"))}
+              {_summary_row("Feedback Events", action_summary.get("feedback_history_events"))}
+              {_summary_row("Pending Requires Ack", _count_requires_ack(pending_actions))}
+              {_summary_row("Latest Date", selected_date)}
+            </tbody>
+          </table>
+          <p class="subtle">Action files remain the source of truth for generated recommendations. Feedback is recorded separately and displayed here read-only.</p>
         </article>
       </div>
     </section>
@@ -219,7 +267,7 @@ def render_dashboard_response(
         </div>
       </article>
       <article class="panel">
-        <h2>Branch Comparison View</h2>
+        <h2>Branch Comparison Metrics</h2>
         <h3>Ranked by Sales</h3>
         <table><thead><tr><th>Rank</th><th>Branch</th><th>Sales</th></tr></thead><tbody>{_render_rank_rows(branch_comparison.get("ranked_branches_by_sales") or [], "gross_sales")}</tbody></table>
         <h3>Ranked by Conversion</h3>
@@ -312,6 +360,33 @@ def _render_warnings(warnings: list[str]) -> str:
     if not warnings:
         return ""
     return '<section class="warning">' + "".join(f"<p>{escape(warning)}</p>" for warning in warnings) + "</section>"
+
+
+def _render_pending_actions(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<tr><td colspan="5">No pending operator actions.</td></tr>'
+    rendered: list[str] = []
+    for row in rows[:8]:
+        review_label = "linked" if row.get("linked_review_queue_path") else "none"
+        rendered.append(
+            "<tr>"
+            f"<td>{escape(str(row.get('rule_code') or row.get('action_type') or 'unknown'))}</td>"
+            f"<td>{escape(str(row.get('effective_status') or 'pending'))}</td>"
+            f"<td>{escape(str(row.get('priority') or 'n/a'))}</td>"
+            f"<td>{escape(str(row.get('assigned_to') or 'unassigned'))}</td>"
+            f"<td>{escape(review_label)}</td>"
+            "</tr>"
+        )
+    return "".join(rendered)
+
+
+def _summary_row(label: str, value: Any) -> str:
+    rendered = "n/a" if value is None else escape(str(value))
+    return f"<tr><th>{escape(label)}</th><td>{rendered}</td></tr>"
+
+
+def _count_requires_ack(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if row.get("requires_ack") is True)
 
 
 def _render_staff_metric_rows(rows: list[dict[str, Any]], metric: str) -> str:

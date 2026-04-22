@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -40,6 +40,16 @@ class AcceptanceResult:
             "thresholds": dict(self.thresholds),
         }
 
+    def governed_status(self, *, warning_codes: Sequence[str] | None = None) -> str:
+        """Return the baseline governed status implied by acceptance."""
+
+        warnings_present = bool(list(warning_codes or []))
+        if self.decision == "reject":
+            return "rejected"
+        if self.decision == "review":
+            return "needs_review"
+        return "accepted_with_warning" if warnings_present else "accepted"
+
 
 def decide_acceptance(
     report_type: str,
@@ -50,6 +60,7 @@ def decide_acceptance(
     """Return accept/review/reject without duplicating validation rules."""
 
     confidence = _confidence_from_payload(work_item_payload)
+    candidate_status = _candidate_status(work_item_payload)
     thresholds = get_report_policy(report_type).confidence_thresholds
     if not validation_result.accepted:
         return AcceptanceResult(
@@ -67,6 +78,7 @@ def decide_acceptance(
             confidence=confidence,
             thresholds=thresholds.to_payload(),
         )
+    strict_candidate = _is_strict_candidate(work_item_payload)
     if confidence >= thresholds.auto_accept_min:
         return AcceptanceResult(
             report_type=report_type,
@@ -75,7 +87,23 @@ def decide_acceptance(
             confidence=confidence,
             thresholds=thresholds.to_payload(),
         )
+    if strict_candidate and candidate_status in {"accepted", "accepted_with_warning"} and confidence >= thresholds.review_min:
+        return AcceptanceResult(
+            report_type=report_type,
+            decision="accept",
+            reason="strict_candidate_meets_review_floor",
+            confidence=confidence,
+            thresholds=thresholds.to_payload(),
+        )
     if confidence <= thresholds.reject_max:
+        if strict_candidate:
+            return AcceptanceResult(
+                report_type=report_type,
+                decision="review",
+                reason="strict_candidate_below_reject_threshold",
+                confidence=confidence,
+                thresholds=thresholds.to_payload(),
+            )
         return AcceptanceResult(
             report_type=report_type,
             decision="reject",
@@ -113,3 +141,27 @@ def _mapping_value(value: object, field_name: str) -> Any:
     if not isinstance(value, Mapping):
         return None
     return value.get(field_name)
+
+
+def _is_strict_candidate(work_item_payload: Mapping[str, Any]) -> bool:
+    """Return whether this payload represents a strict specialist candidate."""
+
+    parse_mode = work_item_payload.get("parse_mode")
+    if parse_mode == "strict":
+        return True
+    status = work_item_payload.get("status")
+    if isinstance(status, str) and status in {"ready", "needs_review", "accepted", "accepted_with_warning"}:
+        return True
+    return False
+
+
+def _candidate_status(work_item_payload: Mapping[str, Any]) -> str | None:
+    """Return the candidate result status used by shared acceptance."""
+
+    status = work_item_payload.get("status")
+    if isinstance(status, str) and status.strip():
+        return status.strip()
+    normalized_status = _mapping_value(work_item_payload.get("normalized_report"), "status")
+    if isinstance(normalized_status, str) and normalized_status.strip():
+        return normalized_status.strip()
+    return None

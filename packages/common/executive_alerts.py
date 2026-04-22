@@ -1,4 +1,15 @@
-"""File-backed deterministic executive alerts over existing analytics outputs."""
+"""File-backed deterministic executive alerts over existing analytics outputs.
+
+Wave 1 duplication cleanup note:
+- This module is frozen in place for compatibility.
+- It synthesizes executive/intelligence alerts from TopTown analytics, which is
+  duplicated ownership relative to IOI Colony.
+- TopTown Ops remains the upstream operational system; IOI Colony is the long-
+  term owner of interpretive "what matters / why / what next" alerting.
+- Do not add new executive alert semantics here during Wave 1.
+
+Runtime behavior is intentionally unchanged in Wave 1.
+"""
 
 from __future__ import annotations
 
@@ -228,7 +239,7 @@ def _build_branch_alert_artifact(
                 report_date=report_date,
                 source="branch_daily",
                 source_paths=source_paths,
-                message="Sales input is missing for this branch/date.",
+                message="Sales reporting is incomplete for this branch/date.",
                 metrics={"sales_input_missing": True},
             )
         )
@@ -243,7 +254,7 @@ def _build_branch_alert_artifact(
                 report_date=report_date,
                 source="branch_daily",
                 source_paths=source_paths,
-                message="Staff input is missing for this branch/date.",
+                message="Staff reporting is incomplete for this branch/date.",
                 metrics={"staff_input_missing": True},
             )
         )
@@ -261,7 +272,7 @@ def _build_branch_alert_artifact(
                     report_date=report_date,
                     source="branch_daily",
                     source_paths=source_paths,
-                    message="Branch analytics reference records still marked needs_review.",
+                    message="Branch reporting requires review; confidence reduced.",
                     metrics={"record_statuses": needs_review_sources},
                 )
             )
@@ -277,7 +288,7 @@ def _build_branch_alert_artifact(
                     report_date=report_date,
                     source="branch_daily",
                     source_paths=source_paths,
-                    message="Branch analytics reference records accepted with warning.",
+                    message="Branch reporting was accepted with caution; confidence reduced.",
                     metrics={"record_statuses": warning_sources},
                 )
             )
@@ -341,7 +352,7 @@ def _build_branch_alert_artifact(
                 report_date=report_date,
                 source="section_daily",
                 source_paths=source_paths,
-                message=f"{unresolved_count} unresolved section hotspot(s) remain for this branch.",
+                message=f"{unresolved_count} unresolved section issue(s) remain for this branch.",
                 metrics={
                     "unresolved_section_count": unresolved_count,
                     "examples": _string_list(unresolved_section.get("examples")),

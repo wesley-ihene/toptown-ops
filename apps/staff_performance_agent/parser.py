@@ -30,6 +30,13 @@ _NUMBERED_LINE_PATTERN = re.compile(r"^\s*(\d+)\s*(?:[.)\-:]+|\s)\s*(.*)$")
 _PRICE_ROOM_HEADER_PATTERN = re.compile(r"^staff who work in price room\s*:?\s*$", flags=re.IGNORECASE)
 _PRICING_BY_PATTERN = re.compile(r"\bpricing\s*[-:]\s*(.+)$", flags=re.IGNORECASE)
 _PAREN_CONTENT_PATTERN = re.compile(r"\(([^)]+)\)")
+_BRACED_SECTION_PATTERN = re.compile(r"^\s*[=.{(]*\s*([A-Za-z][^{}()]*)\s*[})]?\s*$")
+_NAME_FIELD_PATTERN = re.compile(r"^\s*(?:staff\s+name|name)\s*[:=.\->]+\s*(.+?)\s*$", flags=re.IGNORECASE)
+_HEADER_DETAIL_PATTERN = re.compile(r"^\s*(?P<name>.+?)\s*(?:=\s*)?\{\s*(?P<detail>[^{}]+)\s*[})]?\s*$")
+_PERFORMANCE_METRIC_PATTERN = re.compile(
+    r"^\s*(?:[^\w]*)?(arrangements?|display|performance)\s*[:=.\->]*\s*(.*)$",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -197,14 +204,36 @@ def _parse_performance_block(
     warnings: list[WarningEntry] = []
     unmatched_lines: list[dict[str, Any]] = []
     staff_name, header_detail = _split_header_name_and_detail(block.header)
+    regex_header_name, regex_header_detail = _extract_header_name_and_detail(block.header)
+    if regex_header_name is not None:
+        staff_name = regex_header_name
+    if header_detail is None and regex_header_detail is not None:
+        header_detail = regex_header_detail
     status = resolve_staff_status(header_detail)
+    arrangement_grade = status.performance_grade if _is_arrangement_header(block.header) else None
+    display_grade = status.performance_grade if _is_display_header(block.header) else None
     raw_section = None
-    role = status.role_annotation
+    role = clean_name(status.role_annotation or "")
     items_moved = None
     assisting_count = None
     notes: list[str] = []
 
     for line in block.lines:
+        stripped = line.strip()
+        name_candidate = _extract_named_staff(stripped)
+        if staff_name is None and name_candidate is not None:
+            staff_name = name_candidate
+            continue
+        section_candidate = _extract_braced_section(stripped)
+        if section_candidate is not None and raw_section is None:
+            raw_section = section_candidate
+            section_status = resolve_staff_status(section_candidate)
+            if role is None and section_status.role_annotation is not None:
+                role = section_status.role_annotation
+            if status.duty_status == "on_duty" and section_status.duty_status != "on_duty":
+                status.duty_status = section_status.duty_status
+            continue
+
         canonical = canonicalize_field_line(line)
         if canonical is not None:
             if canonical.key == "section":
@@ -220,13 +249,53 @@ def _parse_performance_block(
                     notes.append(f"section_annotation:{canonical.annotation}")
                 continue
             if canonical.key == "items_moved":
-                items_moved = parse_count(canonical.normalized_value or "")
+                count = parse_count(canonical.normalized_value or "")
+                if count is not None:
+                    items_moved = count
+                    continue
+                role = _apply_annotation_value(
+                    canonical.raw_value,
+                    status=status,
+                    notes=notes,
+                    raw_section=raw_section,
+                    current_role=role,
+                )
                 continue
             if canonical.key == "assist_count":
-                assisting_count = parse_count(canonical.normalized_value or "")
+                count = parse_count(canonical.normalized_value or "")
+                if count is not None:
+                    assisting_count = count
+                    continue
+                role = _apply_annotation_value(
+                    canonical.raw_value,
+                    status=status,
+                    notes=notes,
+                    raw_section=raw_section,
+                    current_role=role,
+                )
                 continue
 
-        stripped = line.strip()
+        metric_name, metric_value = _parse_performance_metric_line(stripped)
+        if metric_name is not None:
+            if metric_name == "arrangement":
+                arrangement_grade = metric_value
+            elif metric_name == "display":
+                display_grade = metric_value
+            elif metric_name == "performance":
+                status.performance_grade = metric_value
+            notes.append(
+                f"{metric_name}_grade:{metric_value}" if metric_value is not None else f"{metric_name}_grade:"
+            )
+            continue
+
+        inline_status = resolve_staff_status(stripped)
+        if _is_standalone_status_line(stripped, inline_status):
+            if inline_status.duty_status != "on_duty":
+                status.duty_status = inline_status.duty_status
+            if role is None and inline_status.role_annotation is not None:
+                role = inline_status.role_annotation
+            notes.append(stripped)
+            continue
         if stripped:
             unmatched_lines.append(
                 {
@@ -237,8 +306,50 @@ def _parse_performance_block(
             )
             notes.append(stripped)
 
-    if staff_name is None or (
-        raw_section is None and items_moved is None and assisting_count is None and status.duty_status == "on_duty"
+    if role is None and _looks_like_role_label(raw_section):
+        role = clean_name(raw_section or "")
+
+    if staff_name is None or _missing_meaningful_record_data(
+        raw_section=raw_section,
+        role=role,
+        items_moved=items_moved,
+        assisting_count=assisting_count,
+        arrangement_grade=arrangement_grade,
+        display_grade=display_grade,
+        performance_grade=status.performance_grade,
+        duty_status=status.duty_status,
+    ):
+        fallback = _regex_extract_block_fields(block)
+        if fallback["staff_name"] is not None:
+            staff_name = fallback["staff_name"]
+        if raw_section is None and fallback["raw_section"] is not None:
+            raw_section = fallback["raw_section"]
+        if role is None and fallback["role"] is not None:
+            role = fallback["role"]
+        if items_moved is None and fallback["items_moved"] is not None:
+            items_moved = fallback["items_moved"]
+        if assisting_count is None and fallback["assisting_count"] is not None:
+            assisting_count = fallback["assisting_count"]
+        if arrangement_grade is None and fallback["arrangement_grade"] is not None:
+            arrangement_grade = fallback["arrangement_grade"]
+        if display_grade is None and fallback["display_grade"] is not None:
+            display_grade = fallback["display_grade"]
+        if status.performance_grade is None and fallback["performance_grade"] is not None:
+            status.performance_grade = fallback["performance_grade"]
+        if status.duty_status == "on_duty" and fallback["duty_status"] != "on_duty":
+            status.duty_status = str(fallback["duty_status"])
+        if fallback["used"]:
+            notes.append("regex_fallback")
+
+    if staff_name is None or _missing_meaningful_record_data(
+        raw_section=raw_section,
+        role=role,
+        items_moved=items_moved,
+        assisting_count=assisting_count,
+        arrangement_grade=arrangement_grade,
+        display_grade=display_grade,
+        performance_grade=status.performance_grade,
+        duty_status=status.duty_status,
     ):
         warnings.append(
             make_warning(
@@ -258,6 +369,8 @@ def _parse_performance_block(
             raw_section=preserved_raw_section,
             role=role,
             duty_status=status.duty_status,
+            arrangement_grade=arrangement_grade,
+            display_grade=display_grade,
             performance_grade=status.performance_grade,
             items_moved=items_moved or 0,
             assisting_count=assisting_count or 0,
@@ -267,6 +380,263 @@ def _parse_performance_block(
         unmatched_lines,
         canonical_section is not None,
     )
+
+
+def _apply_annotation_value(
+    raw_value: str | None,
+    *,
+    status,
+    notes: list[str],
+    raw_section: str | None,
+    current_role: str | None,
+) -> str | None:
+    """Interpret text metric placeholders as duty or role annotations."""
+
+    cleaned = clean_name(raw_value or "")
+    if not cleaned:
+        return current_role
+    resolution = resolve_staff_status(cleaned, raw_section, current_role)
+    if resolution.duty_status != "on_duty":
+        status.duty_status = resolution.duty_status
+    updated_role = current_role
+    if resolution.role_annotation is not None:
+        updated_role = clean_name(resolution.role_annotation) or current_role
+    notes.append(f"annotation:{cleaned}")
+    return updated_role
+
+
+def _extract_braced_section(line: str) -> str | None:
+    """Return one section or role label from loose brace-only lines."""
+
+    match = _BRACED_SECTION_PATTERN.match(line)
+    if match is None:
+        return None
+    candidate = clean_name(match.group(1))
+    if candidate is None:
+        return None
+    lowered = candidate.casefold()
+    if any(
+        token in lowered
+        for token in (
+            "section",
+            "items sold",
+            "customers assist",
+            "item assist",
+            "staff name",
+            "name",
+            "arrangement",
+            "display",
+            "performance",
+        )
+    ):
+        return None
+    return candidate
+
+
+def _extract_named_staff(line: str) -> str | None:
+    """Return one staff name from explicit `Name` field lines."""
+
+    match = _NAME_FIELD_PATTERN.match(line)
+    if match is None:
+        return None
+    return clean_name(match.group(1))
+
+
+def _extract_header_name_and_detail(header: str) -> tuple[str | None, str | None]:
+    """Return one cleaner name/detail split for brace-heavy WhatsApp headers."""
+
+    match = _HEADER_DETAIL_PATTERN.match(header)
+    if match is None:
+        return None, None
+    return _clean_header_token(match.group("name")), _clean_header_token(match.group("detail"))
+
+
+def _parse_performance_metric_line(line: str) -> tuple[str | None, int | None]:
+    """Return one rubric metric label and parsed grade when present."""
+
+    match = _PERFORMANCE_METRIC_PATTERN.match(line)
+    if match is None:
+        return None, None
+    raw_metric = match.group(1).casefold()
+    if raw_metric.startswith("arrangement"):
+        metric_name = "arrangement"
+    else:
+        metric_name = raw_metric
+    return metric_name, parse_count(match.group(2))
+
+
+def _missing_meaningful_record_data(
+    *,
+    raw_section: str | None,
+    role: str | None,
+    items_moved: int | None,
+    assisting_count: int | None,
+    arrangement_grade: int | None,
+    display_grade: int | None,
+    performance_grade: int | None,
+    duty_status: str,
+) -> bool:
+    """Return whether one staff block still lacks usable structured content."""
+
+    return (
+        raw_section is None
+        and role is None
+        and items_moved is None
+        and assisting_count is None
+        and arrangement_grade is None
+        and display_grade is None
+        and performance_grade is None
+        and duty_status == "on_duty"
+    )
+
+
+def _regex_extract_block_fields(block: DetectedBlock) -> dict[str, Any]:
+    """Return one fallback regex extraction pass for malformed performance blocks."""
+
+    extracted: dict[str, Any] = {
+        "used": False,
+        "staff_name": None,
+        "raw_section": None,
+        "role": None,
+        "items_moved": None,
+        "assisting_count": None,
+        "arrangement_grade": None,
+        "display_grade": None,
+        "performance_grade": None,
+        "duty_status": "on_duty",
+    }
+
+    header_name, header_detail = _extract_header_name_and_detail(block.header)
+    if header_name is not None:
+        extracted["staff_name"] = header_name
+        extracted["used"] = True
+    if header_detail is not None:
+        detail_status = resolve_staff_status(header_detail)
+        if detail_status.role_annotation is not None:
+            extracted["role"] = clean_name(detail_status.role_annotation or "")
+        elif not _looks_like_role_label(header_detail):
+            extracted["raw_section"] = header_detail
+        if detail_status.performance_grade is not None:
+            extracted["performance_grade"] = detail_status.performance_grade
+        if detail_status.duty_status != "on_duty":
+            extracted["duty_status"] = detail_status.duty_status
+        extracted["used"] = True
+
+    for line in block.lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if extracted["staff_name"] is None:
+            name_candidate = _extract_named_staff(stripped)
+            if name_candidate is not None:
+                extracted["staff_name"] = name_candidate
+                extracted["used"] = True
+                continue
+
+        if extracted["raw_section"] is None:
+            section_candidate = _extract_braced_section(stripped)
+            if section_candidate is not None:
+                extracted["raw_section"] = section_candidate
+                extracted["used"] = True
+                continue
+
+        canonical = canonicalize_field_line(stripped)
+        if canonical is not None:
+            if canonical.key == "section" and extracted["raw_section"] is None:
+                extracted["raw_section"] = canonical.normalized_value
+                extracted["used"] = extracted["used"] or canonical.normalized_value is not None
+                continue
+            if canonical.key == "items_moved" and extracted["items_moved"] is None:
+                count = parse_count(canonical.normalized_value or "")
+                if count is not None:
+                    extracted["items_moved"] = count
+                    extracted["used"] = True
+                    continue
+                resolution = resolve_staff_status(canonical.raw_value)
+                if extracted["role"] is None and resolution.role_annotation is not None:
+                    extracted["role"] = clean_name(resolution.role_annotation or "")
+                if resolution.duty_status != "on_duty":
+                    extracted["duty_status"] = resolution.duty_status
+                extracted["used"] = True
+                continue
+            if canonical.key == "assist_count" and extracted["assisting_count"] is None:
+                count = parse_count(canonical.normalized_value or "")
+                if count is not None:
+                    extracted["assisting_count"] = count
+                    extracted["used"] = True
+                    continue
+                resolution = resolve_staff_status(canonical.raw_value)
+                if extracted["role"] is None and resolution.role_annotation is not None:
+                    extracted["role"] = clean_name(resolution.role_annotation or "")
+                if resolution.duty_status != "on_duty":
+                    extracted["duty_status"] = resolution.duty_status
+                extracted["used"] = True
+                continue
+
+        metric_name, metric_value = _parse_performance_metric_line(stripped)
+        if metric_name == "arrangement":
+            extracted["arrangement_grade"] = metric_value
+            extracted["used"] = True
+            continue
+        if metric_name == "display":
+            extracted["display_grade"] = metric_value
+            extracted["used"] = True
+            continue
+        if metric_name == "performance":
+            extracted["performance_grade"] = metric_value
+            extracted["used"] = True
+            continue
+
+        resolution = resolve_staff_status(stripped)
+        if resolution.role_annotation is not None and extracted["role"] is None:
+            extracted["role"] = clean_name(resolution.role_annotation or "")
+            extracted["used"] = True
+        if resolution.duty_status != "on_duty":
+            extracted["duty_status"] = resolution.duty_status
+            extracted["used"] = True
+
+    return extracted
+
+
+def _clean_header_token(value: str | None) -> str | None:
+    """Return one trimmed token from a loose numbered header."""
+
+    if value is None:
+        return None
+    return clean_name(value.strip(" .=-:>{}()"))
+
+
+def _is_arrangement_header(value: str) -> bool:
+    """Return whether one header is itself an arrangement metric label."""
+
+    return value.casefold().strip().startswith("arrangement")
+
+
+def _is_display_header(value: str) -> bool:
+    """Return whether one header is itself a display metric label."""
+
+    return value.casefold().strip().startswith("display")
+
+
+def _looks_like_role_label(value: str | None) -> bool:
+    """Return whether one raw section value is better preserved as a role label."""
+
+    if not value:
+        return False
+    lowered = value.casefold()
+    return any(token in lowered for token in ("cashier", "pricing room", "price room", "supervisor"))
+
+
+def _is_standalone_status_line(line: str, resolution) -> bool:
+    """Return whether a leftover line is just a duty/status annotation."""
+
+    lowered = line.casefold().strip(" .=-:>")
+    if not lowered:
+        return False
+    if resolution.duty_status != "on_duty":
+        return True
+    return lowered in {"cashier", "pricing room", "price room", "supervisor"}
 
 
 def _parse_special_assignment_block(
@@ -428,7 +798,9 @@ def _is_special_assignment_block(block: DetectedBlock) -> bool:
     header = block.header.casefold()
     if "pricing-" in header or "pricing:" in header:
         return True
-    return any("items sold" in line.casefold() for line in block.lines)
+    if "slow moving bale" in header or "special price" in header:
+        return True
+    return header.count("(") >= 2 and any("items sold" in line.casefold() for line in block.lines)
 
 
 def _apply_section_resolution_warning(parsed: ParsedStaffPerformanceReport) -> None:

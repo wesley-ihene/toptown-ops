@@ -112,9 +112,21 @@ def _extract_report(*, report_type: str, text: str, payload: dict[str, Any]) -> 
 
     warnings: list[dict[str, str]] = []
     if branch == "unknown":
-        warnings.append(_warning(code="missing_branch", severity="warning", message="Fallback extraction could not resolve a canonical branch."))
+        warnings.append(
+            _warning(
+                code="ambiguous_branch",
+                severity="warning",
+                message="Fallback extraction could not resolve a canonical branch.",
+            )
+        )
     if report_date == "unknown":
-        warnings.append(_warning(code="missing_report_date", severity="warning", message="Fallback extraction could not resolve a report date."))
+        warnings.append(
+            _warning(
+                code="ambiguous_report_date",
+                severity="warning",
+                message="Fallback extraction could not resolve a report date.",
+            )
+        )
 
     if report_type == "sales":
         normalized_report = _extract_sales(lines, branch=branch, report_date=report_date, warnings=warnings)
@@ -155,7 +167,13 @@ def _extract_sales(lines: list[str], *, branch: str, report_date: str, warnings:
         "served": int(_number_from_labels(lines, "served") or 0),
     }
     if not any(metrics.values()):
-        warnings.append(_warning(code="fallback_sparse", severity="warning", message="Fallback sales extraction found only partial metrics."))
+        warnings.append(
+            _warning(
+                code="insufficient_structure",
+                severity="warning",
+                message="Fallback sales extraction found only partial metrics.",
+            )
+        )
     return {
         "branch": branch,
         "report_date": report_date,
@@ -192,7 +210,13 @@ def _extract_bale_summary(lines: list[str], *, branch: str, report_date: str, wa
         items.append(_bale_item(item_index, current_name, current_qty, current_amount))
 
     if not items:
-        warnings.append(_warning(code="fallback_sparse", severity="warning", message="Fallback bale extraction found no explicit item rows."))
+        warnings.append(
+            _warning(
+                code="insufficient_structure",
+                severity="warning",
+                message="Fallback bale extraction found no explicit item rows.",
+            )
+        )
 
     total_qty = int(sum(item["qty"] for item in items))
     total_amount = round(sum(item["amount"] for item in items), 2)
@@ -232,7 +256,13 @@ def _extract_attendance(lines: list[str], *, branch: str, report_date: str, warn
         items.append({"staff_name": match.group("name").strip(), "status": status})
         counts[status] += 1
     if not items:
-        warnings.append(_warning(code="fallback_sparse", severity="warning", message="Fallback attendance extraction found no attendance rows."))
+        warnings.append(
+            _warning(
+                code="insufficient_structure",
+                severity="warning",
+                message="Fallback attendance extraction found no attendance rows.",
+            )
+        )
     return {
         "branch": branch,
         "report_date": report_date,
@@ -290,7 +320,13 @@ def _extract_staff_performance(lines: list[str], *, branch: str, report_date: st
             current_name = None
             current_status = None
     if not items:
-        warnings.append(_warning(code="fallback_sparse", severity="warning", message="Fallback staff-performance extraction found no staff rows."))
+        warnings.append(
+            _warning(
+                code="insufficient_structure",
+                severity="warning",
+                message="Fallback staff-performance extraction found no staff rows.",
+            )
+        )
     return {
         "branch": branch,
         "report_date": report_date,
@@ -333,7 +369,13 @@ def _extract_supervisor_control(lines: list[str], *, branch: str, report_date: s
                 }
             )
     if not items:
-        warnings.append(_warning(code="fallback_sparse", severity="warning", message="Fallback supervisor-control extraction found no exception rows."))
+        warnings.append(
+            _warning(
+                code="insufficient_structure",
+                severity="warning",
+                message="Fallback supervisor-control extraction found no exception rows.",
+            )
+        )
     return {
         "branch": branch,
         "report_date": report_date,

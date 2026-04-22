@@ -1,4 +1,12 @@
-"""HTML rendering for the Phase 5 CEO dashboard."""
+"""HTML rendering for the Phase 5 CEO dashboard.
+
+Wave 1 freeze marker:
+- This UI module is frozen for compatibility only.
+- It renders duplicated executive/intelligence views that are not part of
+  TopTown Ops' final long-term scope.
+- Do not extend executive framing here during Wave 1.
+- Visibility changes are deferred to Wave 2; runtime behavior stays unchanged.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +26,7 @@ def render_ceo_dashboard_response(
     available_branches: list[dict[str, Any]],
     available_dates: list[str],
 ) -> str:
-    """Render the lightweight CEO dashboard page."""
+    """Render the deprecated CEO compatibility page."""
 
     overview = dashboard.get("overview") or {}
     branches = (dashboard.get("branches") or {}).get("branches") or []
@@ -34,7 +42,7 @@ def render_ceo_dashboard_response(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TopTown CEO Dashboard</title>
+  <title>TopTown Deprecated Executive Compatibility View</title>
   <style>
     :root {{
       --ink: #111827;
@@ -118,9 +126,13 @@ def render_ceo_dashboard_response(
 <body>
   <main>
     <header>
-      <h1>TopTown CEO Dashboard</h1>
-      <p>Executive read-only summary from analytics files. Date: {escape(selected_date)}. Focus branch: {escape(display_branch_name(effective_branch)) if effective_branch else "All branches"}.</p>
+      <h1>TopTown Deprecated Executive Compatibility View</h1>
+      <p>This surface is deprecated and hidden from normal TopTown Ops product exposure. Date: {escape(selected_date)}. Focus branch: {escape(display_branch_name(effective_branch)) if effective_branch else "All branches"}.</p>
     </header>
+    <section class="panel">
+      <h2>Deprecation Notice</h2>
+      <p>TopTown Ops now presents the operator dashboard at <a href="/dashboard">/dashboard</a>. Executive interpretation is deprecated here and is scheduled to move downstream to IOI Colony.</p>
+    </section>
     <form class="toolbar" method="get" action="/ceo">
       <section class="panel">
         <label for="branch">Branch</label>
@@ -131,12 +143,13 @@ def render_ceo_dashboard_response(
         <select id="date" name="date">{_render_date_options(available_dates, selected_date)}</select>
       </section>
       <section class="panel">
+        <input type="hidden" name="compat" value="1">
         <label for="apply">Filters</label>
-        <button id="apply" type="submit">Load CEO View</button>
+        <button id="apply" type="submit">Load Deprecated View</button>
       </section>
     </form>
     <section class="panel">
-      <h2>Executive Summary Cards</h2>
+      <h2>Compatibility Summary Cards</h2>
       <div class="cards">
         {_metric_card("Total Sales", overview.get("total_gross_sales"))}
         {_metric_card("Active Staff", overview.get("total_active_staff"))}
@@ -148,14 +161,14 @@ def render_ceo_dashboard_response(
     </section>
     <section class="grid">
       <article class="panel">
-        <h2>Branch Scorecards</h2>
+        <h2>Branch Compatibility View</h2>
         <table>
-          <thead><tr><th>Branch</th><th>Sales</th><th>Ops</th><th>Conversion</th><th>Warnings</th><th>Data</th></tr></thead>
+          <thead><tr><th>Branch</th><th>Sales</th><th>Ops</th><th>Conversion</th><th>Warnings</th><th>Reporting</th></tr></thead>
           <tbody>{_render_branch_rows(branches, effective_branch)}</tbody>
         </table>
       </article>
       <article class="panel">
-        <h2>Staff Leadership View</h2>
+        <h2>Staff Compatibility View</h2>
         <table>
           <tbody>
             {_summary_row("Best Staff", _nested(staff, "best_staff", "staff_name"))}
@@ -169,7 +182,7 @@ def render_ceo_dashboard_response(
         <table><thead><tr><th>Staff</th><th>Branch</th><th>Score</th></tr></thead><tbody>{_render_staff_rows(staff.get("idle_on_duty_staff") or [])}</tbody></table>
       </article>
       <article class="panel">
-        <h2>Section Leadership View</h2>
+        <h2>Section Compatibility View</h2>
         <table>
           <tbody>
             {_summary_row("Strongest Section", _nested(sections, "strongest_section", "section"))}
@@ -185,7 +198,7 @@ def render_ceo_dashboard_response(
         <table><thead><tr><th>Branch</th><th>Count</th><th>Examples</th></tr></thead><tbody>{_render_hotspot_rows(sections.get("unresolved_section_hotspots") or [])}</tbody></table>
       </article>
       <article class="panel">
-        <h2>Executive Alerts Panel</h2>
+        <h2>Deprecated Alerts Panel</h2>
         <h3>Critical Alerts</h3>
         {_render_alerts(alerts.get("critical_alerts") or [], "critical")}
         <h3>Warning Alerts</h3>
@@ -199,20 +212,15 @@ def render_ceo_dashboard_response(
             {_summary_row("Sales", _get(selected_scorecard, "gross_sales"))}
             {_summary_row("Operational Score", _get(selected_scorecard, "operational_score"))}
             {_summary_row("Conversion", _get(selected_scorecard, "conversion_rate"))}
-            {_summary_row("Readiness", _get(selected_scorecard, "readiness_status"))}
-            {_summary_row("Missing Inputs", _format_missing(_get(selected_scorecard, "missing_input_indicators")))}
+            {_summary_row("Reporting Status", _format_reporting_status(_get(selected_scorecard, "readiness_status")))}
+            {_summary_row("Reporting Incomplete", _format_missing(_get(selected_scorecard, "missing_input_indicators")))}
           </tbody>
         </table>
       </article>
       <article class="panel links">
-        <h2>CEO API</h2>
-        <p><a href="/api/ceo/overview?date={escape(selected_date)}">/api/ceo/overview</a></p>
-        <p><a href="/api/ceo/branches?date={escape(selected_date)}">/api/ceo/branches</a></p>
-        <p><a href="/api/ceo/staff?date={escape(selected_date)}">/api/ceo/staff</a></p>
-        <p><a href="/api/ceo/sections?date={escape(selected_date)}">/api/ceo/sections</a></p>
-        <p><a href="/api/ceo/alerts?date={escape(selected_date)}">/api/ceo/alerts</a></p>
-        <p><a href="/api/ceo/catalog">/api/ceo/catalog</a></p>
-        <p><a href="/api/ceo/dashboard?{escape(branch_query)}">/api/ceo/dashboard</a></p>
+        <h2>Compatibility Routing</h2>
+        <p>Direct CEO/executive API routes remain available only for rollback safety and automation compatibility.</p>
+        <p>Normal TopTown Ops usage should stay on the operator dashboard and operator analytics API.</p>
       </article>
     </section>
   </main>
@@ -246,9 +254,9 @@ def _render_branch_rows(rows: list[dict[str, Any]], selected_branch: str | None)
     for row in rows:
         data_label = "complete"
         if row.get("readiness_status") == "data_gap":
-            data_label = "data_gap"
-        elif row.get("readiness_status") != "ready":
-            data_label = "attention"
+            data_label = "reporting incomplete"
+        elif row.get("readiness_status") not in {"ready", "accepted"}:
+            data_label = "confidence reduced"
         branch = str(row.get("branch") or "unknown")
         label = display_branch_name(branch)
         if selected_branch == branch:
@@ -279,7 +287,7 @@ def _render_section_rows(rows: list[dict[str, Any]]) -> str:
 
 def _render_hotspot_rows(rows: list[dict[str, Any]]) -> str:
     if not rows:
-        return '<tr><td colspan="3">No unresolved hotspots.</td></tr>'
+        return '<tr><td colspan="3">No unresolved section issues.</td></tr>'
     return "".join(
         f"<tr><td>{escape(display_branch_name(str(row.get('branch') or 'unknown')))}</td><td>{escape(str(row.get('count')))}</td><td>{escape(', '.join(row.get('examples') or []))}</td></tr>"
         for row in rows
@@ -328,5 +336,21 @@ def _first_name(mapping: Mapping[str, Any] | None, key: str) -> str | None:
 def _format_missing(mapping: Mapping[str, Any] | None) -> str:
     if not isinstance(mapping, Mapping):
         return "n/a"
-    missing = [name for name, value in mapping.items() if value]
+    labels = {
+        "sales_input_missing": "sales reporting",
+        "staff_input_missing": "staff reporting",
+    }
+    missing = [labels.get(name, name) for name, value in mapping.items() if value]
     return ", ".join(missing) if missing else "none"
+
+
+def _format_reporting_status(value: Any) -> str:
+    if value in {"ready", "accepted"}:
+        return "current"
+    if value == "data_gap":
+        return "reporting incomplete"
+    if value == "needs_review":
+        return "confidence reduced"
+    if value is None:
+        return "n/a"
+    return str(value)

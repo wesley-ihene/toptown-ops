@@ -31,7 +31,7 @@ def test_valid_supervisor_control_sample_writes_one_signal_file(tmp_path: Path, 
         )
     )
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     outbox_files = sorted(outbox_path.glob("*.json"))
     assert len(outbox_files) == 1
     event_path = signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json"
@@ -75,7 +75,7 @@ def test_missing_supervisor_confirmation_raises_missing_confirmation(tmp_path: P
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
     assert "missing_confirmation" in warning_codes
     assert len(sorted(outbox_path.glob("*.json"))) == 1
-    assert (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
+    assert not (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
 
 
 def test_unresolved_exception_raises_escalation_required(tmp_path: Path, monkeypatch) -> None:
@@ -105,7 +105,7 @@ def test_unresolved_exception_raises_escalation_required(tmp_path: Path, monkeyp
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
     assert "escalation_required" in warning_codes
     assert len(sorted(outbox_path.glob("*.json"))) == 1
-    assert (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
+    assert not (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
 
 
 def test_checklist_style_supervisor_report_synthesizes_contract_items(tmp_path: Path, monkeypatch) -> None:
@@ -124,7 +124,7 @@ def test_checklist_style_supervisor_report_synthesizes_contract_items(tmp_path: 
         )
     )
 
-    assert result.payload["status"] == "ready"
+    assert result.payload["status"] == "accepted"
     assert result.payload["source"] == "live"
     assert result.payload["sop_compliance"] == "fallback"
     assert result.payload["signal_weight"] == 0.4
