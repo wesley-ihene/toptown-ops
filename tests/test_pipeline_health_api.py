@@ -140,6 +140,182 @@ def test_action_and_feedback_summary_endpoints_are_read_only_and_file_backed(tmp
     assert feedback_summary_body["payload"]["feedback_items"][0]["status"] == "acknowledged"
 
 
+def test_learning_endpoints_return_latest_artifacts_with_stable_schema(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "records" / "learning" / "review_summary" / "2026-04-06.json",
+        {
+            "date": "2026-04-06",
+            "generated_at": "2026-04-06T08:00:00Z",
+            "artifact_type": "review_summary",
+            "report_date": "2026-04-06",
+            "total_review_items": 2,
+        },
+    )
+    _write_json(
+        tmp_path / "records" / "learning" / "review_summary" / "2026-04-07.json",
+        {
+            "date": "2026-04-07",
+            "generated_at": "2026-04-07T08:00:00Z",
+            "artifact_type": "review_summary",
+            "report_date": "2026-04-07",
+            "total_review_items": 4,
+        },
+    )
+    _write_json(
+        tmp_path / "records" / "learning" / "action_effectiveness" / "2026-04-07.json",
+        {
+            "date": "2026-04-07",
+            "generated_at": "2026-04-07T08:05:00Z",
+            "artifact_type": "action_effectiveness",
+            "report_date": "2026-04-07",
+            "total_actions": 3,
+        },
+    )
+    _write_json(
+        tmp_path / "records" / "learning" / "threshold_recommendations" / "2026-04-07.json",
+        {
+            "date": "2026-04-07",
+            "generated_at": "2026-04-07T08:10:00Z",
+            "artifact_type": "threshold_recommendations",
+            "report_date": "2026-04-07",
+            "recommendation_count": 1,
+        },
+    )
+    _write_json(
+        tmp_path / "records" / "learning" / "format_drift" / "2026-04-07.json",
+        {
+            "date": "2026-04-07",
+            "generated_at": "2026-04-07T08:15:00Z",
+            "artifact_type": "format_drift",
+            "report_date": "2026-04-07",
+            "total_raw_records": 5,
+        },
+    )
+
+    review = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/api/learning/review",
+        root=tmp_path,
+    )
+    review_body = json.loads(review.body.decode("utf-8"))
+    assert review.status_code == 200
+    assert review_body == {
+        "status": "ok",
+        "service": "phase4_dashboard_api",
+        "artifact_date": "2026-04-07",
+        "generated_at": "2026-04-07T08:00:00Z",
+        "data": {
+            "artifact_type": "review_summary",
+            "report_date": "2026-04-07",
+            "total_review_items": 4,
+        },
+    }
+
+    actions = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/api/learning/actions",
+        root=tmp_path,
+    )
+    actions_body = json.loads(actions.body.decode("utf-8"))
+    assert actions.status_code == 200
+    assert actions_body["status"] == "ok"
+    assert actions_body["artifact_date"] == "2026-04-07"
+    assert actions_body["generated_at"] == "2026-04-07T08:05:00Z"
+    assert actions_body["data"]["artifact_type"] == "action_effectiveness"
+    assert actions_body["data"]["total_actions"] == 3
+
+    recommendations = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/api/learning/recommendations",
+        root=tmp_path,
+    )
+    recommendations_body = json.loads(recommendations.body.decode("utf-8"))
+    assert recommendations.status_code == 200
+    assert recommendations_body["data"]["artifact_type"] == "threshold_recommendations"
+    assert recommendations_body["data"]["recommendation_count"] == 1
+
+    format_drift = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/api/learning/format-drift",
+        root=tmp_path,
+    )
+    format_drift_body = json.loads(format_drift.body.decode("utf-8"))
+    assert format_drift.status_code == 200
+    assert format_drift_body["data"]["artifact_type"] == "format_drift"
+    assert format_drift_body["data"]["total_raw_records"] == 5
+
+    summary = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/api/learning/summary",
+        root=tmp_path,
+    )
+    summary_body = json.loads(summary.body.decode("utf-8"))
+    assert summary.status_code == 200
+    assert summary_body == {
+        "status": "ok",
+        "service": "phase4_dashboard_api",
+        "artifact_date": "2026-04-07",
+        "generated_at": "2026-04-07T08:15:00Z",
+        "data": {
+            "review": {
+                "artifact_type": "review_summary",
+                "report_date": "2026-04-07",
+                "total_review_items": 4,
+            },
+            "actions": {
+                "artifact_type": "action_effectiveness",
+                "report_date": "2026-04-07",
+                "total_actions": 3,
+            },
+            "recommendations": {
+                "artifact_type": "threshold_recommendations",
+                "report_date": "2026-04-07",
+                "recommendation_count": 1,
+            },
+            "format_drift": {
+                "artifact_type": "format_drift",
+                "report_date": "2026-04-07",
+                "total_raw_records": 5,
+            },
+        },
+    }
+
+
+def test_learning_endpoints_handle_no_data_without_write_side_effects(tmp_path: Path) -> None:
+    before_paths = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    endpoints = [
+        "/api/learning/summary",
+        "/api/learning/review",
+        "/api/learning/actions",
+        "/api/learning/recommendations",
+        "/api/learning/format-drift",
+    ]
+    for endpoint in endpoints:
+        response = phase4_portal.dispatch_http_request(
+            method="GET",
+            target=endpoint,
+            root=tmp_path,
+        )
+        body = json.loads(response.body.decode("utf-8"))
+        assert response.status_code == 200
+        assert body == {
+            "status": "ok",
+            "service": "phase4_dashboard_api",
+            "artifact_date": None,
+            "generated_at": None,
+            "data": {} if endpoint != "/api/learning/summary" else {
+                "review": {},
+                "actions": {},
+                "recommendations": {},
+                "format_drift": {},
+            },
+        }
+
+    after_paths = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after_paths == before_paths
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")

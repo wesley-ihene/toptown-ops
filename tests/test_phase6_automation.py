@@ -302,6 +302,68 @@ def test_action_generation_failure_is_non_blocking_and_export_still_proceeds(tmp
     assert not (tmp_path / "records" / "actions").exists()
 
 
+def test_learning_hook_is_non_blocking_and_existing_export_behavior_remains_unchanged(tmp_path: Path) -> None:
+    colony_root = tmp_path / "ioi-colony"
+    colony_root.mkdir()
+
+    written_path = write_structured(
+        "sales_income",
+        "waigani",
+        "2026-04-07",
+        _sales_income_payload(gross_sales=500.0, traffic=10, served=2, conversion_rate=0.2),
+        root=tmp_path,
+        colony_root=colony_root,
+    )
+
+    assert written_path.exists()
+    manifest = _read_json(
+        colony_root / "SIGNALS" / "normalized" / "waigani" / "2026-04-07" / "_export_manifest.json"
+    )
+    assert manifest["summary"] == {
+        "scanned": 5,
+        "written": 1,
+        "missing": 4,
+        "skipped": 0,
+        "failed": 0,
+    }
+    assert (tmp_path / "records" / "learning" / "review_summary" / "2026-04-07.json").exists()
+    assert (tmp_path / "records" / "learning" / "action_effectiveness" / "2026-04-07.json").exists()
+    assert (tmp_path / "records" / "learning" / "threshold_recommendations" / "2026-04-07.json").exists()
+    assert (tmp_path / "records" / "learning" / "format_drift" / "2026-04-07.json").exists()
+
+
+def test_learning_failures_do_not_break_main_automation(tmp_path: Path, monkeypatch) -> None:
+    colony_root = tmp_path / "ioi-colony"
+    colony_root.mkdir()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("learning engine unavailable")
+
+    monkeypatch.setattr(record_automation, "analyze_review_queue", _boom)
+
+    written_path = write_structured(
+        "sales_income",
+        "waigani",
+        "2026-04-07",
+        _sales_income_payload(gross_sales=500.0, traffic=10, served=2, conversion_rate=0.2),
+        root=tmp_path,
+        colony_root=colony_root,
+    )
+
+    assert written_path.exists()
+    assert (
+        colony_root
+        / "SIGNALS"
+        / "normalized"
+        / "waigani"
+        / "2026-04-07"
+        / "daily_sales_report__waigani__2026-04-07.json"
+    ).exists()
+    assert (tmp_path / "alerts" / "executive" / "2026-04-07" / "summary.json").exists()
+    assert (tmp_path / "records" / "learning" / "action_effectiveness" / "2026-04-07.json").exists()
+    assert not (tmp_path / "records" / "learning" / "review_summary" / "2026-04-07.json").exists()
+
+
 def test_replay_path_triggers_same_postprocess_flow(tmp_path: Path, monkeypatch) -> None:
     colony_root = tmp_path / "ioi-colony"
     colony_root.mkdir()
@@ -357,6 +419,7 @@ def test_replay_path_triggers_same_postprocess_flow(tmp_path: Path, monkeypatch)
     observability = load_daily_artifact("autonomous_actions", "2026-04-07", output_root=tmp_path)
     assert observability is not None
     assert observability["summary"]["actions_suppressed_replay"] == 1
+    assert not (tmp_path / "records" / "learning").exists()
 
 
 def test_replay_suppresses_actions_by_default(tmp_path: Path, monkeypatch) -> None:
@@ -396,6 +459,7 @@ def test_replay_suppresses_actions_by_default(tmp_path: Path, monkeypatch) -> No
     ) == 0
 
     assert not (tmp_path / "records" / "actions").exists()
+    assert not (tmp_path / "records" / "learning").exists()
 
 
 

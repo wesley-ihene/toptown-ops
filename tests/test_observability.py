@@ -10,6 +10,7 @@ from packages.observability import (
     load_daily_artifact,
     record_action_event,
     record_export_event,
+    record_learning_event,
     record_pre_ingestion_validation_event,
     refresh_feedback_summary,
 )
@@ -257,6 +258,76 @@ def test_autonomous_action_observability_records_counters_and_breakdowns(
         "actions_by_priority": {"high": 1},
     }
     assert [event["outcome"] for event in payload["events"]] == ["generated", "skipped", "suppressed_replay"]
+
+
+def test_learning_observability_records_counters_and_events(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    record_learning_event(
+        report_date="2026-04-07",
+        branch="waigani",
+        outcome="completed",
+        review_items_analyzed=3,
+        actions_analyzed=2,
+        threshold_recommendations_generated=1,
+        format_drift_patterns_detected=4,
+        output_root=tmp_path,
+    )
+
+    payload = load_daily_artifact("learning", "2026-04-07", output_root=tmp_path)
+
+    assert payload is not None
+    assert payload["summary"] == {
+        "learning_runs_completed": 1,
+        "learning_runs_suppressed_replay": 0,
+        "review_items_analyzed": 3,
+        "actions_analyzed": 2,
+        "threshold_recommendations_generated": 1,
+        "format_drift_patterns_detected": 4,
+    }
+    assert payload["events"] == [
+        {
+            "branch": "waigani",
+            "outcome": "completed",
+            "review_items_analyzed": 3,
+            "actions_analyzed": 2,
+            "threshold_recommendations_generated": 1,
+            "format_drift_patterns_detected": 4,
+        }
+    ]
+
+    summary = _read_json(tmp_path / "records" / "observability" / "daily" / "2026_04_07" / "summary.json")
+    assert summary["learning"] == payload["summary"]
+
+
+def test_learning_replay_suppression_metric_is_recorded_when_expected(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    record_learning_event(
+        report_date="2026-04-07",
+        branch="waigani",
+        outcome="suppressed_replay",
+        output_root=tmp_path,
+    )
+
+    payload = load_daily_artifact("learning", "2026-04-07", output_root=tmp_path)
+
+    assert payload is not None
+    assert payload["summary"] == {
+        "learning_runs_completed": 0,
+        "learning_runs_suppressed_replay": 1,
+        "review_items_analyzed": 0,
+        "actions_analyzed": 0,
+        "threshold_recommendations_generated": 0,
+        "format_drift_patterns_detected": 0,
+    }
+    assert payload["events"][0]["outcome"] == "suppressed_replay"
 
 
 def test_feedback_summary_tracks_lifecycle_counters_and_stale_pending(

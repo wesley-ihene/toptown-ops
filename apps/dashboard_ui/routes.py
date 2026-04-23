@@ -13,10 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from html import escape
+import json
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 from packages.common.analytics_loader import display_branch_name
+from packages.learning_store import get_learning_artifact_path, read_latest_learning_artifact
 
 
 def render_dashboard_response(
@@ -39,6 +42,7 @@ def render_dashboard_response(
     branch_options = catalog.get("available_branches") or []
     date_options = catalog.get("available_dates") or []
     branch_query = urlencode({"branch": selected_branch, "date": selected_date})
+    learning = _load_learning_bundle(selected_date)
 
     top_branch = _top_by_operational_score(branch_comparison, highest=True)
     weak_branch = _top_by_operational_score(branch_comparison, highest=False)
@@ -134,6 +138,9 @@ def render_dashboard_response(
     }}
     .subtle {{ color: var(--muted); font-size: 0.92rem; }}
     .links a {{ color: var(--accent); text-decoration: none; font-weight: 700; }}
+    .list-note {{ margin: 0; padding-left: 18px; color: var(--ink); }}
+    .list-note li {{ margin: 0 0 8px; }}
+    .kicker {{ color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; }}
   </style>
 </head>
 <body>
@@ -182,6 +189,8 @@ def render_dashboard_response(
           <p><a href="/api/actions/pending?{escape(branch_query)}">/api/actions/pending</a></p>
           <p><a href="/api/actions/summary?{escape(branch_query)}">/api/actions/summary</a></p>
           <p><a href="/api/feedback/summary?{escape(branch_query)}">/api/feedback/summary</a></p>
+          <p><a href="/api/learning/summary">/api/learning/summary</a></p>
+          <p><a href="/api/learning/recommendations">/api/learning/recommendations</a></p>
         </article>
       </div>
     </section>
@@ -215,6 +224,30 @@ def render_dashboard_response(
             </tbody>
           </table>
           <p class="subtle">Action files remain the source of truth for generated recommendations. Feedback is recorded separately and displayed here read-only.</p>
+        </article>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Daily Learning Summary</h2>
+      <p class="subtle">Concise read-only learning highlights from persisted artifacts. No analysis is triggered from the dashboard.</p>
+      <div class="card-grid">
+        {_metric_card("Learning Artifact Date", learning.get("artifact_date"))}
+        {_metric_card("Top Review Hotspot", _top_review_hotspot_label(learning.get("review")))}
+        {_metric_card("Top Recommendation", _top_recommendation_label(learning.get("recommendations")))}
+        {_metric_card("Top Drift Note", _top_drift_note_label(learning.get("format_drift")))}
+      </div>
+      <div class="section-grid">
+        <article class="panel">
+          <div class="kicker">Top Issues</div>
+          {_render_learning_notes(_daily_issue_notes(learning))}
+        </article>
+        <article class="panel">
+          <div class="kicker">Top Recommendations</div>
+          {_render_learning_notes(_daily_recommendation_notes(learning.get("recommendations")))}
+        </article>
+        <article class="panel">
+          <div class="kicker">Risk Notes</div>
+          {_render_learning_notes(_daily_risk_notes(learning))}
         </article>
       </div>
     </section>
@@ -276,6 +309,26 @@ def render_dashboard_response(
         <table><thead><tr><th>Rank</th><th>Branch</th><th>Productivity</th></tr></thead><tbody>{_render_rank_rows(branch_comparison.get("ranked_branches_by_staff_productivity") or [], "staff_productivity_index")}</tbody></table>
         <h3>Ranked by Operational Score</h3>
         <table><thead><tr><th>Rank</th><th>Branch</th><th>Ops Score</th></tr></thead><tbody>{_render_rank_rows(branch_comparison.get("ranked_branches_by_operational_score") or [], "operational_score")}</tbody></table>
+      </article>
+      <article class="panel">
+        <h2>Review Hotspots</h2>
+        <table><thead><tr><th>Branch</th><th>Reviews</th><th>Leading Cause</th></tr></thead><tbody>{_render_review_hotspots(learning.get("review"))}</tbody></table>
+      </article>
+      <article class="panel">
+        <h2>Noisy Rules</h2>
+        <table><thead><tr><th>Rule</th><th>Total</th><th>Dismissed</th><th>Stale</th></tr></thead><tbody>{_render_noisy_rules(learning.get("actions"))}</tbody></table>
+      </article>
+      <article class="panel">
+        <h2>Stale Action Patterns</h2>
+        <table><thead><tr><th>Rule</th><th>Branch</th><th>Status</th><th>Expiry</th></tr></thead><tbody>{_render_stale_action_patterns(learning.get("actions"))}</tbody></table>
+      </article>
+      <article class="panel">
+        <h2>Threshold Recommendations</h2>
+        <table><thead><tr><th>Target</th><th>Current</th><th>Proposed</th><th>Priority</th></tr></thead><tbody>{_render_threshold_recommendations(learning.get("recommendations"))}</tbody></table>
+      </article>
+      <article class="panel">
+        <h2>Formatting Drift Notes</h2>
+        {_render_format_drift_notes(learning.get("format_drift"))}
       </article>
     </section>
   </main>
@@ -378,6 +431,259 @@ def _render_pending_actions(rows: list[dict[str, Any]]) -> str:
             "</tr>"
         )
     return "".join(rendered)
+
+
+def _load_learning_bundle(report_date: str) -> dict[str, Any]:
+    review = _read_learning_artifact_for_date_or_latest("review_summary", report_date)
+    actions = _read_learning_artifact_for_date_or_latest("action_effectiveness", report_date)
+    recommendations = _read_learning_artifact_for_date_or_latest("threshold_recommendations", report_date)
+    format_drift = _read_learning_artifact_for_date_or_latest("format_drift", report_date)
+    artifact_dates = [
+        _artifact_date(payload)
+        for payload in (review, actions, recommendations, format_drift)
+        if isinstance(payload, Mapping)
+    ]
+    return {
+        "artifact_date": max(artifact_dates) if artifact_dates else None,
+        "review": review,
+        "actions": actions,
+        "recommendations": recommendations,
+        "format_drift": format_drift,
+    }
+
+
+def _read_learning_artifact_for_date_or_latest(category: str, report_date: str) -> dict[str, Any] | None:
+    try:
+        dated_path = get_learning_artifact_path(category, report_date)
+    except ValueError:
+        return None
+    payload = _read_json_path(dated_path)
+    if payload is not None:
+        return payload
+    return read_latest_learning_artifact(category)
+
+
+def _read_json_path(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _artifact_date(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("date")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    value = payload.get("report_date")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _top_review_hotspot_label(payload: Any) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    hotspots = payload.get("branch_review_heatmap")
+    if not isinstance(hotspots, list) or not hotspots:
+        return None
+    top = hotspots[0]
+    if not isinstance(top, Mapping):
+        return None
+    return f"{top.get('branch') or 'unknown'} ({top.get('total_reviews') or 0})"
+
+
+def _top_recommendation_label(payload: Any) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    rows = payload.get("recommendations")
+    if not isinstance(rows, list) or not rows:
+        return None
+    first = rows[0]
+    if not isinstance(first, Mapping):
+        return None
+    return str(first.get("recommendation_id") or first.get("target_area") or "n/a")
+
+
+def _top_drift_note_label(payload: Any) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    rows = payload.get("frequent_format_issues")
+    if not isinstance(rows, list) or not rows:
+        return None
+    first = rows[0]
+    if not isinstance(first, Mapping):
+        return None
+    return str(first.get("issue_code") or "n/a")
+
+
+def _daily_issue_notes(learning: Mapping[str, Any]) -> list[str]:
+    notes: list[str] = []
+    review = learning.get("review")
+    if isinstance(review, Mapping):
+        hotspots = review.get("branch_review_heatmap")
+        if isinstance(hotspots, list) and hotspots:
+            top = hotspots[0]
+            if isinstance(top, Mapping):
+                notes.append(
+                    f"Review hotspot: {top.get('branch') or 'unknown'} with {top.get('total_reviews') or 0} review items."
+                )
+    actions = learning.get("actions")
+    if isinstance(actions, Mapping):
+        noisy = actions.get("noisy_rules_candidates")
+        if isinstance(noisy, list) and noisy:
+            top = noisy[0]
+            if isinstance(top, Mapping):
+                notes.append(
+                    f"Noisy rule candidate: {top.get('rule_code') or 'unknown'} with {top.get('total_actions') or 0} actions."
+                )
+    format_drift = learning.get("format_drift")
+    if isinstance(format_drift, Mapping):
+        issues = format_drift.get("frequent_format_issues")
+        if isinstance(issues, list) and issues:
+            top = issues[0]
+            if isinstance(top, Mapping):
+                notes.append(
+                    f"Formatting drift: {top.get('issue_code') or 'unknown'} seen across {top.get('count') or 0} records."
+                )
+    return notes[:3]
+
+
+def _daily_recommendation_notes(payload: Any) -> list[str]:
+    if not isinstance(payload, Mapping):
+        return []
+    rows = payload.get("recommendations")
+    if not isinstance(rows, list) or not rows:
+        return []
+    notes: list[str] = []
+    for row in rows[:3]:
+        if not isinstance(row, Mapping):
+            continue
+        notes.append(
+            f"{row.get('priority') or 'n/a'} priority: {row.get('target_area') or 'unknown'} to {row.get('proposed_threshold') or 'n/a'}."
+        )
+    return notes
+
+
+def _daily_risk_notes(learning: Mapping[str, Any]) -> list[str]:
+    notes: list[str] = []
+    actions = learning.get("actions")
+    if isinstance(actions, Mapping):
+        stale = actions.get("stale_actions_summary")
+        if isinstance(stale, Mapping) and stale.get("count"):
+            notes.append(f"Stale action risk: {stale.get('count')} pending actions are past expiry.")
+    recommendations = learning.get("recommendations")
+    if isinstance(recommendations, Mapping) and recommendations.get("recommendation_count"):
+        notes.append(
+            f"Threshold review required: {recommendations.get('recommendation_count')} human-approved recommendations are pending."
+        )
+    review = learning.get("review")
+    if isinstance(review, Mapping):
+        outcomes = review.get("review_outcomes")
+        if isinstance(outcomes, Mapping) and outcomes.get("still_pending"):
+            notes.append(f"Review backlog: {outcomes.get('still_pending')} items still pending manual resolution.")
+    return notes[:3]
+
+
+def _render_learning_notes(notes: list[str]) -> str:
+    if not notes:
+        return '<p class="subtle">No learning highlights available yet.</p>'
+    return '<ul class="list-note">' + "".join(f"<li>{escape(note)}</li>" for note in notes) + "</ul>"
+
+
+def _render_review_hotspots(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return '<tr><td colspan="3">No review learning artifact available yet.</td></tr>'
+    rows = payload.get("branch_review_heatmap")
+    if not isinstance(rows, list) or not rows:
+        return '<tr><td colspan="3">No review hotspots detected.</td></tr>'
+    rendered: list[str] = []
+    for row in rows[:5]:
+        if not isinstance(row, Mapping):
+            continue
+        reasons = row.get("by_reason")
+        leading_reason = "n/a"
+        if isinstance(reasons, list) and reasons and isinstance(reasons[0], Mapping):
+            leading_reason = str(reasons[0].get("reason") or "n/a")
+        rendered.append(
+            f"<tr><td>{escape(str(row.get('branch') or 'unknown'))}</td><td>{escape(str(row.get('total_reviews') or 0))}</td><td>{escape(leading_reason)}</td></tr>"
+        )
+    return "".join(rendered) or '<tr><td colspan="3">No review hotspots detected.</td></tr>'
+
+
+def _render_noisy_rules(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return '<tr><td colspan="4">No action learning artifact available yet.</td></tr>'
+    rows = payload.get("noisy_rules_candidates")
+    if not isinstance(rows, list) or not rows:
+        return '<tr><td colspan="4">No noisy rules flagged.</td></tr>'
+    return "".join(
+        f"<tr><td>{escape(str(row.get('rule_code') or 'unknown'))}</td><td>{escape(str(row.get('total_actions') or 0))}</td><td>{escape(str(row.get('dismissed_rate') or 0))}</td><td>{escape(str(row.get('stale_pending_rate') or 0))}</td></tr>"
+        for row in rows[:5]
+        if isinstance(row, Mapping)
+    )
+
+
+def _render_stale_action_patterns(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return '<tr><td colspan="4">No action learning artifact available yet.</td></tr>'
+    summary = payload.get("stale_actions_summary")
+    if not isinstance(summary, Mapping):
+        return '<tr><td colspan="4">No stale action patterns available.</td></tr>'
+    rows = summary.get("items")
+    if not isinstance(rows, list) or not rows:
+        return '<tr><td colspan="4">No stale action patterns detected.</td></tr>'
+    return "".join(
+        f"<tr><td>{escape(str(row.get('rule_code') or 'unknown'))}</td><td>{escape(str(row.get('branch') or 'unknown'))}</td><td>{escape(str(row.get('effective_status') or 'pending'))}</td><td>{escape(str(row.get('expires_at') or 'n/a'))}</td></tr>"
+        for row in rows[:5]
+        if isinstance(row, Mapping)
+    )
+
+
+def _render_threshold_recommendations(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return '<tr><td colspan="4">No threshold recommendation artifact available yet.</td></tr>'
+    rows = payload.get("recommendations")
+    if not isinstance(rows, list) or not rows:
+        return '<tr><td colspan="4">No threshold recommendations pending.</td></tr>'
+    return "".join(
+        f"<tr><td>{escape(str(row.get('target_area') or 'unknown'))}</td><td>{escape(str(row.get('current_threshold') or 'n/a'))}</td><td>{escape(str(row.get('proposed_threshold') or 'n/a'))}</td><td>{escape(str(row.get('priority') or 'n/a'))}</td></tr>"
+        for row in rows[:5]
+        if isinstance(row, Mapping)
+    )
+
+
+def _render_format_drift_notes(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return '<p class="subtle">No format drift artifact available yet.</p>'
+    issues = payload.get("frequent_format_issues")
+    notes = payload.get("branch_training_notes")
+    output: list[str] = []
+    if isinstance(issues, list) and issues:
+        output.append("<h3>Frequent Issues</h3><table><thead><tr><th>Issue</th><th>Count</th><th>Branches</th></tr></thead><tbody>")
+        for row in issues[:4]:
+            if not isinstance(row, Mapping):
+                continue
+            output.append(
+                f"<tr><td>{escape(str(row.get('issue_code') or 'unknown'))}</td><td>{escape(str(row.get('count') or 0))}</td><td>{escape(', '.join(str(item) for item in (row.get('branches') or [])) or 'n/a')}</td></tr>"
+            )
+        output.append("</tbody></table>")
+    else:
+        output.append('<p class="subtle">No recurring formatting drift detected.</p>')
+    if isinstance(notes, list) and notes:
+        output.append("<h3>Branch Notes</h3>")
+        output.append(
+            '<ul class="list-note">'
+            + "".join(
+                f"<li><strong>{escape(str(row.get('branch') or 'unknown'))}:</strong> {escape(str(row.get('note') or 'No note'))}</li>"
+                for row in notes[:3]
+                if isinstance(row, Mapping)
+            )
+            + "</ul>"
+        )
+    return "".join(output)
 
 
 def _summary_row(label: str, value: Any) -> str:

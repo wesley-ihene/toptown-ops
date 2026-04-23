@@ -20,6 +20,10 @@ from analytics.phase3 import (
     write_staff_leaderboard_json,
 )
 from apps.autonomous_control_engine import generate_control_actions
+from apps.action_effectiveness_engine import analyze_action_effectiveness
+from apps.format_drift_analyzer import analyze_format_drift
+from apps.review_learning_engine import analyze_review_queue
+from apps.threshold_recommendation_engine import generate_threshold_recommendations
 from packages.action_store import write_action_record
 from packages.common.executive_alerts import write_executive_alert_artifacts
 from packages.common.paths import REPO_ROOT
@@ -32,6 +36,7 @@ from scripts.export_colony_signals import export_all_record_types
 IOI_COLONY_ROOT_ENV_VAR = "TOPTOWN_IOI_COLONY_ROOT"
 REPLAY_AUTOMATION_CONTEXT_ENV_VAR = "TOPTOWN_REPLAY_MODE"
 ENABLE_REPLAY_ACTIONS_ENV_VAR = "TOPTOWN_ENABLE_REPLAY_ACTIONS"
+ENABLE_REPLAY_LEARNING_ENV_VAR = "TOPTOWN_ENABLE_REPLAY_LEARNING"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -247,6 +252,13 @@ def run_post_write_automation(
         status="completed",
     )
 
+    learning_outputs = _run_learning_automation(
+        signal_type=signal_type,
+        branch=branch,
+        report_date=report_date,
+        source_root=source_repo_root,
+    )
+
     return {
         "branch_daily_path": str(branch_daily_path),
         "staff_daily_path": str(staff_path),
@@ -257,6 +269,7 @@ def run_post_write_automation(
         "executive_alert_summary_whatsapp_path": alert_artifacts["summary_whatsapp_path"],
         "executive_alert_branch_paths": alert_artifacts["branch_paths"],
         "executive_alert_branch_whatsapp_paths": alert_artifacts["branch_whatsapp_paths"],
+        "learning_outputs": learning_outputs,
         "export_manifest": export_manifest,
     }
 
@@ -428,6 +441,118 @@ def _run_autonomous_actions(
     }
 
 
+def _run_learning_automation(
+    *,
+    signal_type: str,
+    branch: str,
+    report_date: str,
+    source_root: Path,
+) -> dict[str, Any]:
+    """Run best-effort learning summaries without blocking the main pipeline."""
+
+    learning_context = _learning_context(
+        signal_type=signal_type,
+        report_date=report_date,
+        branch=branch,
+        source_root=source_root,
+    )
+    if learning_context["replay_suppressed"]:
+        _log_event(
+            "info",
+            "learning_automation_suppressed",
+            branch=branch,
+            report_date=report_date,
+            status="suppressed",
+            reason="replay_suppressed",
+        )
+        return {
+            "status": "suppressed_replay",
+            "output_paths": {},
+            "failures": [],
+        }
+
+    _log_event(
+        "info",
+        "learning_automation_started",
+        branch=branch,
+        report_date=report_date,
+        status="started",
+    )
+    outputs: dict[str, str] = {}
+    failures: list[dict[str, str]] = []
+    for engine_name, runner in (
+        ("review_summary", analyze_review_queue),
+        ("action_effectiveness", analyze_action_effectiveness),
+        ("threshold_recommendations", generate_threshold_recommendations),
+        ("format_drift", analyze_format_drift),
+    ):
+        try:
+            result = runner(
+                report_date,
+                output_root=source_root,
+            )
+        except Exception as exc:
+            failures.append({"engine": engine_name, "error": str(exc)})
+            _log_event(
+                "exception",
+                "learning_automation_engine_failed",
+                branch=branch,
+                report_date=report_date,
+                status="failed",
+                engine=engine_name,
+                error=str(exc),
+            )
+            continue
+        output_path = result.get("output_path")
+        if isinstance(output_path, str) and output_path.strip():
+            outputs[engine_name] = output_path
+
+    _log_event(
+        "info",
+        "learning_automation_completed",
+        branch=branch,
+        report_date=report_date,
+        status="completed" if not failures else "completed_with_failures",
+        output_paths=[outputs[key] for key in sorted(outputs)],
+        failure_count=len(failures),
+    )
+    return {
+        "status": "completed" if not failures else "completed_with_failures",
+        "output_paths": outputs,
+        "failures": failures,
+    }
+
+
+def _learning_context(
+    *,
+    signal_type: str,
+    report_date: str,
+    branch: str,
+    source_root: Path,
+) -> dict[str, Any]:
+    """Return whether learning should run for this automation pass."""
+
+    structured_path = get_structured_path_for_root(
+        source_root / "records" / "structured",
+        signal_type=signal_type,
+        branch=branch,
+        date=report_date,
+    )
+    structured_payload = _read_json_or_empty(structured_path)
+    replay = _is_replay_context(structured_payload)
+    return {
+        "replay_suppressed": replay and not _replay_learning_enabled(),
+    }
+
+
+def _read_json_or_empty(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _is_replay_context(structured_payload: dict[str, Any]) -> bool:
     """Return whether autonomous actions should treat this automation run as replay."""
 
@@ -440,4 +565,11 @@ def _replay_actions_enabled() -> bool:
     """Return whether replay runs may emit Phase 5B actions."""
 
     value = os.environ.get(ENABLE_REPLAY_ACTIONS_ENV_VAR, "")
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _replay_learning_enabled() -> bool:
+    """Return whether replay runs may emit Phase 6 learning artifacts."""
+
+    value = os.environ.get(ENABLE_REPLAY_LEARNING_ENV_VAR, "")
     return value.strip().casefold() in {"1", "true", "yes", "on"}

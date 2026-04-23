@@ -359,6 +359,80 @@ def record_action_event(
     return str(_daily_artifact_path("autonomous_actions", report_date, output_root=output_root))
 
 
+def record_learning_event(
+    *,
+    report_date: str,
+    branch: str,
+    outcome: str,
+    review_items_analyzed: int = 0,
+    actions_analyzed: int = 0,
+    threshold_recommendations_generated: int = 0,
+    format_drift_patterns_detected: int = 0,
+    output_root: str | Path | None = None,
+) -> str:
+    """Append one learning-layer observability event into the daily artifact."""
+
+    payload = load_daily_artifact("learning", report_date, output_root=output_root) or {
+        "report_date": report_date,
+        "summary": {
+            "learning_runs_completed": 0,
+            "learning_runs_suppressed_replay": 0,
+            "review_items_analyzed": 0,
+            "actions_analyzed": 0,
+            "threshold_recommendations_generated": 0,
+            "format_drift_patterns_detected": 0,
+        },
+        "events": [],
+    }
+    summary = payload.setdefault("summary", {})
+    summary["learning_runs_completed"] = int(summary.get("learning_runs_completed", 0))
+    summary["learning_runs_suppressed_replay"] = int(summary.get("learning_runs_suppressed_replay", 0))
+    summary["review_items_analyzed"] = int(summary.get("review_items_analyzed", 0))
+    summary["actions_analyzed"] = int(summary.get("actions_analyzed", 0))
+    summary["threshold_recommendations_generated"] = int(summary.get("threshold_recommendations_generated", 0))
+    summary["format_drift_patterns_detected"] = int(summary.get("format_drift_patterns_detected", 0))
+
+    if outcome == "completed":
+        summary["learning_runs_completed"] += 1
+    elif outcome == "suppressed_replay":
+        summary["learning_runs_suppressed_replay"] += 1
+
+    summary["review_items_analyzed"] += max(int(review_items_analyzed), 0)
+    summary["actions_analyzed"] += max(int(actions_analyzed), 0)
+    summary["threshold_recommendations_generated"] += max(int(threshold_recommendations_generated), 0)
+    summary["format_drift_patterns_detected"] += max(int(format_drift_patterns_detected), 0)
+
+    events = payload.setdefault("events", [])
+    if isinstance(events, list):
+        events.append(
+            {
+                "branch": branch,
+                "outcome": outcome,
+                "review_items_analyzed": max(int(review_items_analyzed), 0),
+                "actions_analyzed": max(int(actions_analyzed), 0),
+                "threshold_recommendations_generated": max(int(threshold_recommendations_generated), 0),
+                "format_drift_patterns_detected": max(int(format_drift_patterns_detected), 0),
+            }
+        )
+
+    _write_daily_artifact("learning", report_date, payload, output_root=output_root)
+
+    summary_payload = _load_summary(report_date, output_root=output_root)
+    learning_summary = summary_payload.setdefault("learning", {})
+    learning_summary.update(
+        {
+            "learning_runs_completed": int(summary["learning_runs_completed"]),
+            "learning_runs_suppressed_replay": int(summary["learning_runs_suppressed_replay"]),
+            "review_items_analyzed": int(summary["review_items_analyzed"]),
+            "actions_analyzed": int(summary["actions_analyzed"]),
+            "threshold_recommendations_generated": int(summary["threshold_recommendations_generated"]),
+            "format_drift_patterns_detected": int(summary["format_drift_patterns_detected"]),
+        }
+    )
+    _write_summary(report_date, summary_payload, output_root=output_root)
+    return str(_daily_artifact_path("learning", report_date, output_root=output_root))
+
+
 def refresh_feedback_summary(
     *,
     report_date: str,
@@ -445,6 +519,14 @@ def _load_summary(report_date: str, *, output_root: str | Path | None = None) ->
             "actions_dismissed": 0,
             "review_linked_actions": 0,
             "stale_pending_actions": 0,
+        },
+        "learning": {
+            "learning_runs_completed": 0,
+            "learning_runs_suppressed_replay": 0,
+            "review_items_analyzed": 0,
+            "actions_analyzed": 0,
+            "threshold_recommendations_generated": 0,
+            "format_drift_patterns_detected": 0,
         },
     }
 

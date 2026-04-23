@@ -183,6 +183,68 @@ def test_manifest_is_produced_with_correct_summary_counts(
     }
 
 
+def test_select_records_applies_branch_and_report_type_filters_without_cli_override_bleed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_replay_environment(monkeypatch, tmp_path)
+    waigani_sales = _write_text(
+        tmp_path / "records" / "raw" / "whatsapp" / "unknown" / "2026-04-07__waigani__sample.txt",
+        _sales_report_text(),
+    )
+    _write_json(
+        waigani_sales.with_suffix(".meta.json"),
+        {
+            "branch_hint": "waigani",
+            "detected_report_type": "sales",
+            "received_at": "2026-04-07T11:00:00Z",
+            "source": "whatsapp",
+        },
+    )
+    lae_sales = _write_text(
+        tmp_path / "records" / "raw" / "whatsapp" / "unknown" / "2026-04-07__lae__sample.txt",
+        _sales_report_text(),
+    )
+    _write_json(
+        lae_sales.with_suffix(".meta.json"),
+        {
+            "branch_hint": "lae",
+            "detected_report_type": "sales",
+            "received_at": "2026-04-07T11:05:00Z",
+            "source": "whatsapp",
+        },
+    )
+    waigani_attendance = _write_text(
+        tmp_path / "records" / "raw" / "whatsapp" / "unknown" / "2026-04-07__waigani__attendance.txt",
+        "STAFF ATTENDANCE\nBranch: Waigani Branch\nDate: 07/04/2026",
+    )
+    _write_json(
+        waigani_attendance.with_suffix(".meta.json"),
+        {
+            "branch_hint": "waigani",
+            "detected_report_type": "staff_attendance",
+            "received_at": "2026-04-07T11:10:00Z",
+            "source": "whatsapp",
+        },
+    )
+
+    records, scanned = replay_records._select_records(
+        argparse.Namespace(
+            source="raw",
+            path=[],
+            report_type="sales",
+            date=None,
+            branch="waigani",
+            all=True,
+            limit=None,
+            batch_size=None,
+        )
+    )
+
+    assert scanned == 3
+    assert [record.text_path for record in records] == [waigani_sales.resolve()]
+
+
 def test_orchestrator_replay_of_live_staff_performance_raw_file_writes_structured_record(
     tmp_path: Path,
     monkeypatch,
@@ -342,6 +404,59 @@ def test_orchestrator_replay_of_sales_and_supervisor_control_mixed_file_writes_t
     assert manifest["results"][0]["status"] == "structured_written"
     assert manifest["results"][0]["agent"] == "orchestrator_agent"
     assert len(manifest["results"][0]["output_paths"]) == 2
+
+
+def test_finalize_replay_result_marks_review_lane_outcomes_explicitly(tmp_path: Path) -> None:
+    record = replay_records.ArchivedRecord(
+        text_path=tmp_path / "records" / "raw" / "whatsapp" / "sales" / "2026-04-07__waigani__sample.txt",
+        metadata_path=None,
+        source="raw",
+        source_bucket="sales",
+        text=_sales_report_text(),
+        metadata={},
+    )
+    resolved = replay_records.ReplayMetadata(
+        source="whatsapp",
+        sender="review-smoke",
+        branch_hint="waigani",
+        received_at="2026-04-07T11:00:00Z",
+        report_type="sales",
+        replay={
+            "is_replay": True,
+            "source": "raw",
+            "original_path": "records/raw/whatsapp/sales/2026-04-07__waigani__sample.txt",
+            "replayed_at": "2026-04-23T10:00:00Z",
+        },
+    )
+
+    entry = replay_records._finalize_replay_result(
+        record=record,
+        resolved=resolved,
+        result=replay_records.AgentResult(
+            agent_name="orchestrator_agent",
+            payload={
+                "status": "needs_review",
+                "review_queue": {
+                    "path": "records/review/2026_04_07/waigani/sales/sample.json",
+                    "reason": "confidence_between_review_and_accept_thresholds",
+                },
+                "acceptance": {
+                    "decision": "review",
+                    "reason": "confidence_between_review_and_accept_thresholds",
+                },
+            },
+        ),
+        structured_artifacts=[],
+        rejected_capture=None,
+        args=argparse.Namespace(compare_only=False, dry_run=False, overwrite=False),
+        duration_ms=5,
+    )
+
+    assert entry["status"] == "skipped"
+    assert entry["reason"] == "review_queue_output"
+    assert entry["review_reason"] == "confidence_between_review_and_accept_thresholds"
+    assert entry["review_queue_path"] == "records/review/2026_04_07/waigani/sales/sample.json"
+    assert entry["output_path"] is None
 
 
 def _patch_replay_environment(monkeypatch, tmp_path: Path) -> None:

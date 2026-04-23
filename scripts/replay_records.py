@@ -330,7 +330,7 @@ def _load_archived_record(text_path: Path) -> ArchivedRecord:
 def _matches_filters(*, record: ArchivedRecord, args: argparse.Namespace) -> bool:
     """Return whether a record matches selection filters."""
 
-    resolved = _resolve_replay_metadata(record=record, args=args)
+    resolved = _selection_metadata(record)
     if args.report_type and resolved.report_type != args.report_type:
         return False
     if args.date and _record_date(record, resolved) != args.date:
@@ -338,6 +338,15 @@ def _matches_filters(*, record: ArchivedRecord, args: argparse.Namespace) -> boo
     if args.branch and safe_segment(resolved.branch_hint or "") != safe_segment(args.branch):
         return False
     return True
+
+
+def _selection_metadata(record: ArchivedRecord) -> ReplayMetadata:
+    """Resolve record metadata for archive filtering without CLI overrides."""
+
+    return _resolve_replay_metadata(
+        record=record,
+        args=argparse.Namespace(branch=None, report_type=None),
+    )
 
 
 def _resolve_replay_metadata(*, record: ArchivedRecord, args: argparse.Namespace) -> ReplayMetadata:
@@ -688,17 +697,23 @@ def _finalize_replay_result(
         entry.update(mixed_details)
         return entry
 
+    review_outcome = _review_outcome_details(result) if structured_outcome["reason"] == "no_structured_output" else None
     entry = {
         "file": _display_path(record.text_path),
         "status": "skipped",
         "agent": result.agent_name,
         "output_path": _display_path(structured_outcome["path"]) if structured_outcome["path"] else None,
         "written_count": structured_outcome["written_count"],
-        "reason": structured_outcome["reason"],
+        "reason": "review_queue_output" if review_outcome is not None else structured_outcome["reason"],
         "duration_ms": duration_ms,
     }
     if structured_outcome["paths"]:
         entry["output_paths"] = [_display_path(path) for path in structured_outcome["paths"]]
+    if review_outcome is not None:
+        if review_outcome["review_reason"] is not None:
+            entry["review_reason"] = review_outcome["review_reason"]
+        if review_outcome["review_queue_path"] is not None:
+            entry["review_queue_path"] = review_outcome["review_queue_path"]
     entry.update(mixed_details)
     return entry
 
@@ -740,6 +755,33 @@ def _handle_structured_artifacts(
         "paths": [outcome["path"] for outcome in outcomes if outcome["path"] is not None],
         "written_count": 0,
         "reason": "; ".join(outcome["reason"] for outcome in outcomes),
+    }
+
+
+def _review_outcome_details(result: AgentResult) -> dict[str, str | None] | None:
+    """Return explicit review-lane details for results with no structured outputs."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+
+    review_queue_path = _first_present_string(
+        _mapping_string(payload.get("review_queue"), "path"),
+        _mapping_string(payload.get("fallback"), "review_queue_path"),
+        metadata.get("review_queue_path"),
+    )
+    review_reason = _first_present_string(
+        _mapping_string(payload.get("review_queue"), "reason"),
+        _review_reason_from_acceptance(payload.get("acceptance")),
+        _review_reason_from_acceptance(_mapping_value(payload.get("fallback"), "acceptance")),
+        _review_reason_from_acceptance(metadata.get("acceptance")),
+        _first_governance_reason(payload.get("governance")),
+    )
+
+    if review_queue_path is None and review_reason is None and _result_status(result) != "needs_review":
+        return None
+    return {
+        "review_queue_path": review_queue_path,
+        "review_reason": review_reason or "needs_review",
     }
 
 
@@ -1136,6 +1178,68 @@ def _read_optional_string(metadata: dict[str, Any], key: str) -> str | None:
     value = metadata.get(key)
     if isinstance(value, str) and value.strip():
         return value.strip()
+    return None
+
+
+def _mapping_value(value: object, key: str) -> object:
+    """Return one mapping value when available."""
+
+    if isinstance(value, Mapping):
+        return value.get(key)
+    return None
+
+
+def _mapping_string(value: object, key: str) -> str | None:
+    """Return one stripped string from a mapping field."""
+
+    candidate = _mapping_value(value, key)
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    return None
+
+
+def _first_present_string(*values: object) -> str | None:
+    """Return the first non-empty string value."""
+
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _review_reason_from_acceptance(value: object) -> str | None:
+    """Return one review reason from an acceptance payload."""
+
+    if not isinstance(value, Mapping):
+        return None
+    decision = value.get("decision")
+    status = value.get("status")
+    if decision == "review" or status == "review":
+        return _mapping_string(value, "reason")
+    return None
+
+
+def _first_governance_reason(value: object) -> str | None:
+    """Return the first governance reason when present."""
+
+    if not isinstance(value, Mapping):
+        return None
+    reasons = value.get("reasons")
+    if not isinstance(reasons, list):
+        return None
+    for reason in reasons:
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    return None
+
+
+def _result_status(result: AgentResult) -> str | None:
+    """Return one result status when present."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    status = payload.get("status")
+    if isinstance(status, str) and status.strip():
+        return status.strip()
     return None
 
 
