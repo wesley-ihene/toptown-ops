@@ -175,7 +175,12 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             policy_decision=policy_decision,
         )
 
-    mixed_detection = detect_mixed_content(processing_text)
+    # Mixed-report detection and splitting must use the original raw text.
+    # The human_tolerance layer may normalize/flatten WhatsApp text, which is
+    # useful for field tolerance but unsafe for structural section splitting.
+    split_source_text = _extract_raw_text(payload) or processing_text
+
+    mixed_detection = detect_mixed_content(split_source_text)
     if mixed_detection.is_mixed:
         mixed_policy = evaluate_mixed_report_policy(
             reject_mixed_reports=_reject_mixed_reports(payload)
@@ -226,7 +231,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 ],
                 policy_decision=mixed_policy,
             )
-        split_result = split_report(processing_text, mixed_detection)
+        split_result = split_report(split_source_text, mixed_detection)
         if _can_safely_split_mixed_report(mixed_detection=mixed_detection, split_result=split_result):
             return _process_mixed_work_item(
                 work_item,
