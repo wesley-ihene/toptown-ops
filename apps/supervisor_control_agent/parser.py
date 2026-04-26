@@ -14,6 +14,8 @@ from packages.signal_contracts.work_item import WorkItem
 _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "branch": ("branch", "shop", "location"),
     "report_date": ("date", "report date"),
+    "supervisor": ("supervisor",),
+    "supervisor_confirmation": ("supervisor confirmation",),
     "exception_type": ("exception type", "issue type"),
     "details": ("details", "detail", "description"),
     "action_taken": ("action taken", "action"),
@@ -29,6 +31,25 @@ _CHECKLIST_FIELD_NORMALIZATIONS: dict[str, str] = {
     "pricing or system issues": "Pricing_System_Issues",
     "exceptions escalated to ops manager": "Exceptions",
 }
+_SUPERVISOR_CONTROL_TITLE_ALIASES: frozenset[str] = frozenset(
+    {
+        "supervisor control report",
+        "supervisor control summary",
+    }
+)
+_IGNORABLE_EMPTY_FIELD_NAMES: frozenset[str] = frozenset(
+    {
+        "cash variance",
+        "staffing issues",
+        "stock issues affecting sales",
+        "stock issues",
+        "pricing or system issues",
+        "pricing system issues",
+        "exceptions escalated to ops manager",
+        "exceptions",
+        "supervisor confirmation",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -71,6 +92,8 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
 
         key_value = _parse_key_value(line)
         if key_value is None:
+            if _is_ignorable_empty_field_line(line):
+                continue
             synthesized_entry = _synthesize_exception_entry(line)
             if synthesized_entry is not None:
                 parsed.sop_compliance = "fallback"
@@ -89,6 +112,12 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
             continue
         if field_name == "report_date":
             parsed.report_date = normalize_report_date(value)
+            continue
+        if field_name == "supervisor":
+            parsed.notes.append(f"Supervisor: {value}")
+            continue
+        if field_name == "supervisor_confirmation":
+            parsed.notes.append(f"Supervisor confirmation: {value}")
             continue
         if field_name == "notes":
             parsed.notes.append(value)
@@ -168,6 +197,8 @@ def _normalize_input_line(line: str) -> str:
     """Return one raw input line with canonical field labels and YES/NO values."""
 
     stripped_line = line.strip()
+    if _normalize_key(stripped_line) in _SUPERVISOR_CONTROL_TITLE_ALIASES:
+        return "SUPERVISOR CONTROL REPORT"
     if ":" not in stripped_line:
         return stripped_line
 
@@ -179,7 +210,18 @@ def _normalize_input_line(line: str) -> str:
 
 def _is_title_line(line: str) -> bool:
     lowered = _normalize_key(line)
-    return "supervisor control report" in lowered or lowered == "supervisor control report"
+    return lowered in _SUPERVISOR_CONTROL_TITLE_ALIASES or "supervisor control report" in lowered
+
+
+def _is_ignorable_empty_field_line(line: str) -> bool:
+    """Return whether one blank metadata or checklist line should be skipped."""
+
+    if ":" not in line:
+        return False
+    key, value = line.split(":", 1)
+    if value.strip():
+        return False
+    return _normalize_key(key) in _IGNORABLE_EMPTY_FIELD_NAMES
 
 
 def _parse_key_value(line: str) -> tuple[str, str] | None:

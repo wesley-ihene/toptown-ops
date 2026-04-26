@@ -533,6 +533,7 @@ def record_conversation_llm_event(
     channel: str = "whatsapp",
     branch: str | None = None,
     report_type: str | None = None,
+    event_report_date: str | None = None,
     replay_suppressed: bool = False,
     reason: str | None = None,
     output_root: str | Path | None = None,
@@ -577,6 +578,9 @@ def record_conversation_llm_event(
                 "channel": channel.strip() if isinstance(channel, str) and channel.strip() else "whatsapp",
                 "branch": branch.strip() if isinstance(branch, str) and branch.strip() else None,
                 "report_type": report_type.strip() if isinstance(report_type, str) and report_type.strip() else None,
+                "report_date": event_report_date.strip()
+                if isinstance(event_report_date, str) and event_report_date.strip()
+                else None,
                 "replay_suppressed": bool(replay_suppressed),
                 "reason": reason.strip() if isinstance(reason, str) and reason.strip() else None,
             }

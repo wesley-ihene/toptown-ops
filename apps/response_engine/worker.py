@@ -8,11 +8,15 @@ from difflib import SequenceMatcher
 import hashlib
 import logging
 import os
+from pathlib import Path
+import re
 from typing import Any
 
 from apps.conversation_policy import ALLOWED_RESPONSE_TYPES, reason_text_for_response
 from packages.llm_adapter.openai_client import refine_response_text
 from packages.observability import record_conversation_llm_event
+from packages.normalization.branches import normalize_branch
+from packages.normalization.dates import normalize_report_date
 from packages.taop_feedback import build_rejection_feedback, build_report_feedback, build_review_feedback
 
 CONVERSATION_LLM_ENABLED = False
@@ -26,6 +30,8 @@ _SUPPORTED_REPORT_LINES = (
     "DAILY BALE SUMMARY - RELEASED TO RAIL",
     "SUPERVISOR CONTROL REPORT",
 )
+_BRANCH_LINE_PATTERN = re.compile(r"^\s*branch\s*[:=-]\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
+_DATE_LINE_PATTERN = re.compile(r"^\s*date\s*[:=-]\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
 _LLM_REWRITE_CACHE: dict[str, str] = {}
 logger = logging.getLogger(__name__)
 
@@ -76,9 +82,13 @@ def render_whatsapp_response(response_context: Mapping[str, Any]) -> dict[str, A
 
     feedback_payload = build_report_feedback(response_context)
 
+    structured_feedback: Mapping[str, Any] | None = None
     if feedback_payload is not None:
+        structured_feedback = dict(feedback_payload)
         response_text = _required_text(feedback_payload.get("response_text"), field_name="feedback.response_text")
         feedback = {key: value for key, value in feedback_payload.items() if key != "response_text"}
+        if not feedback:
+            feedback = None
     elif response_type == "accepted_ack":
         response_text = _render_accepted_ack(response_context)
         feedback = None
@@ -107,7 +117,7 @@ def render_whatsapp_response(response_context: Mapping[str, Any]) -> dict[str, A
     response_text = _maybe_refine_response_text(
         base_text=response_text,
         response_context=response_context,
-        structured_feedback=feedback,
+        structured_feedback=structured_feedback,
     )
     rendered = {
         "response_type": response_type,
@@ -218,13 +228,14 @@ def _maybe_refine_response_text(
     structured_feedback: Mapping[str, Any] | None = None,
 ) -> str:
     original_text = base_text
-    report_date = _observability_report_date(response_context)
     response_type = _string_or_none(response_context.get("response_type"))
     channel = _string_or_none(response_context.get("channel")) or "whatsapp"
-    branch = _string_or_none(response_context.get("branch"))
-    report_type = _string_or_none(response_context.get("report_type"))
     reason = _string_or_none(response_context.get("reason"))
     is_replay = bool(response_context.get("is_replay") is True)
+    observability = _conversation_llm_metadata(response_context)
+    report_date = observability["report_date"] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    branch = observability["branch"]
+    report_type = observability["report_type"]
 
     skip_reason = _llm_skip_reason(
         base_text=base_text,
@@ -239,6 +250,7 @@ def _maybe_refine_response_text(
             channel=channel,
             branch=branch,
             report_type=report_type,
+            event_report_date=observability["report_date"],
             replay_suppressed=is_replay,
             reason=skip_reason,
         )
@@ -254,6 +266,7 @@ def _maybe_refine_response_text(
             channel=channel,
             branch=branch,
             report_type=report_type,
+            event_report_date=observability["report_date"],
             replay_suppressed=False,
             reason="cache_hit",
         )
@@ -273,6 +286,7 @@ def _maybe_refine_response_text(
         channel=channel,
         branch=branch,
         report_type=report_type,
+        event_report_date=observability["report_date"],
         replay_suppressed=False,
     )
     try:
@@ -290,6 +304,7 @@ def _maybe_refine_response_text(
             channel=channel,
             branch=branch,
             report_type=report_type,
+            event_report_date=observability["report_date"],
             replay_suppressed=False,
             reason="adapter_failure",
         )
@@ -300,6 +315,7 @@ def _maybe_refine_response_text(
             channel=channel,
             branch=branch,
             report_type=report_type,
+            event_report_date=observability["report_date"],
             replay_suppressed=False,
             reason="adapter_failure",
         )
@@ -317,6 +333,7 @@ def _maybe_refine_response_text(
             channel=channel,
             branch=branch,
             report_type=report_type,
+            event_report_date=observability["report_date"],
             replay_suppressed=False,
         )
         _LLM_REWRITE_CACHE[cache_key] = final_text
@@ -332,6 +349,7 @@ def _maybe_refine_response_text(
         channel=channel,
         branch=branch,
         report_type=report_type,
+        event_report_date=observability["report_date"],
         replay_suppressed=False,
     )
     return original_text
@@ -442,7 +460,7 @@ def _conversation_llm_mode() -> str:
 
 
 def _observability_report_date(response_context: Mapping[str, Any]) -> str:
-    report_date = _format_observability_date(_string_or_none(response_context.get("report_date")))
+    report_date = _conversation_llm_metadata(response_context)["report_date"]
     if report_date is not None:
         return report_date
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -453,6 +471,145 @@ def _format_observability_date(value: str | None) -> str | None:
         return None
     if len(value) >= 10 and value[4] == "-" and value[7] == "-":
         return value[:10]
+    return None
+
+
+def _conversation_llm_metadata(response_context: Mapping[str, Any]) -> dict[str, str | None]:
+    """Return the best available report metadata for LLM observability events."""
+
+    feedback_context = _mapping(response_context.get("feedback_context"))
+    human_tolerance = _mapping(feedback_context.get("human_tolerance"))
+    normalized_fields = _mapping(human_tolerance.get("normalized_fields"))
+    raw_text = _feedback_raw_text(feedback_context)
+
+    branch = _resolved_branch_from_any(
+        response_context.get("branch"),
+        feedback_context.get("branch"),
+        normalized_fields.get("branch"),
+        _branch_from_raw_text(raw_text),
+    )
+    report_date = _resolved_report_date_from_any(
+        response_context.get("report_date"),
+        feedback_context.get("report_date"),
+        normalized_fields.get("date"),
+        _report_date_from_raw_text(raw_text),
+    )
+    report_type = _resolved_report_type_from_any(
+        response_context.get("report_type"),
+        response_context.get("signal_subtype"),
+        response_context.get("signal_type"),
+        feedback_context.get("report_type"),
+        feedback_context.get("signal_subtype"),
+        feedback_context.get("signal_type"),
+        human_tolerance.get("report_type_hint"),
+        _report_type_from_raw_text(raw_text),
+    )
+    return {
+        "branch": branch,
+        "report_date": report_date,
+        "report_type": report_type,
+    }
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _feedback_raw_text(feedback_context: Mapping[str, Any]) -> str | None:
+    text = _string_or_none(feedback_context.get("raw_text"))
+    if text is not None:
+        return text
+    raw_txt_path = _string_or_none(feedback_context.get("raw_txt_path"))
+    if raw_txt_path is None:
+        return None
+    try:
+        loaded = Path(raw_txt_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    stripped = loaded.strip()
+    return stripped or None
+
+
+def _branch_from_raw_text(raw_text: str | None) -> str | None:
+    if raw_text is None:
+        return None
+    match = _BRANCH_LINE_PATTERN.search(raw_text)
+    if match is None:
+        return None
+    return _string_or_none(match.group(1))
+
+
+def _report_date_from_raw_text(raw_text: str | None) -> str | None:
+    if raw_text is None:
+        return None
+    match = _DATE_LINE_PATTERN.search(raw_text)
+    if match is None:
+        return None
+    return _string_or_none(match.group(1))
+
+
+def _resolved_branch_from_any(*values: object) -> str | None:
+    for value in values:
+        text = _string_or_none(value)
+        if text is None or text == "unknown":
+            continue
+        normalized = normalize_branch(text).normalized_value or text.strip()
+        if normalized:
+            return normalized
+    return None
+
+
+def _resolved_report_date_from_any(*values: object) -> str | None:
+    for value in values:
+        text = _string_or_none(value)
+        if text is None:
+            continue
+        normalized = normalize_report_date(text).normalized_value or _format_observability_date(text)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _resolved_report_type_from_any(*values: object) -> str | None:
+    for value in values:
+        text = _string_or_none(value)
+        if text is None:
+            continue
+        normalized = text.strip().casefold().replace("-", "_").replace(" ", "_")
+        if normalized in {"report", "reports", "routing", "unknown"}:
+            continue
+        if normalized in {"sales", "sales_income", "day_end_sales"}:
+            return "sales_income"
+        if normalized in {"attendance", "staff_attendance", "hr_attendance", "hr_staffing"}:
+            return "staff_attendance"
+        if normalized in {"bale_summary", "pricing_stock_release", "bale_release"}:
+            return "bale_summary"
+        if normalized in {"staff_performance", "hr_performance", "performance"}:
+            return "staff_performance"
+        if normalized in {"supervisor_control", "supervisor"}:
+            return "supervisor_control"
+        if normalized == "store_monitoring":
+            return "store_monitoring"
+        return normalized
+    return None
+
+
+def _report_type_from_raw_text(raw_text: str | None) -> str | None:
+    if raw_text is None:
+        return None
+    normalized = raw_text.casefold()
+    if "supervisor control report" in normalized or "supervisor control summary" in normalized:
+        return "supervisor_control"
+    if "daily bale summary" in normalized or "pricing stock release" in normalized:
+        return "bale_summary"
+    if "staff performance report" in normalized:
+        return "staff_performance"
+    if "attendance report" in normalized or "staff attendance" in normalized or "staffs attendance" in normalized:
+        return "staff_attendance"
+    if "day-end sales report" in normalized or "day end sales report" in normalized:
+        return "sales_income"
     return None
 
 

@@ -92,6 +92,91 @@ def test_review_ack_falls_back_safely_when_reason_missing() -> None:
     assert "Additional verification is required" not in rendered["response_text"]
 
 
+def test_review_ack_does_not_infer_branch_failure_from_missing_reply_metadata() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "sales_income",
+            "reason": "mixed_report_split_not_safe",
+            "feedback_context": {
+                "raw_text": "\n".join(
+                    [
+                        "DAY-END SALES REPORT",
+                        "Gross Sales: 1200",
+                        "Cash Sales: 600",
+                    ]
+                ),
+            },
+        }
+    )
+
+    assert "ℹ Branch resolution not surfaced in reply metadata" in rendered["response_text"]
+    assert "❌ Branch not resolved" not in rendered["response_text"]
+    assert "❌ Branch is missing" not in rendered["response_text"]
+
+
+def test_review_ack_missing_branch_uses_deterministic_branch_guidance() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "staff_attendance",
+            "report_date": "2026-04-26",
+            "feedback_context": {
+                "validation": {
+                    "reason_codes": ["missing_branch"],
+                    "rejections": [
+                        {
+                            "reason_code": "missing_branch",
+                            "reason_detail": "Branch could not be resolved from the report.",
+                        }
+                    ],
+                },
+            },
+        }
+    )
+
+    assert "❌ Branch is missing" in rendered["response_text"]
+    assert "1. Branch is missing from the report text." in rendered["response_text"]
+    assert "2. TAOP cannot route the report without a branch." in rendered["response_text"]
+    assert "Add the Branch line and resend." in rendered["response_text"]
+
+
+def test_review_ack_supervisor_control_invalid_format_uses_deterministic_guidance() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "supervisor_control",
+            "branch": "waigani",
+            "report_date": "2026-04-26",
+            "feedback_context": {
+                "validation": {
+                    "reason_codes": ["missing_fields"],
+                    "rejections": [
+                        {
+                            "reason_code": "missing_fields",
+                            "reason_detail": "Supervisor control fields were incomplete.",
+                        }
+                    ],
+                },
+                "warnings": [{"code": "missing_fields", "message": "Supervisor control fields were incomplete."}],
+            },
+        }
+    )
+
+    assert "Supervisor Control Report format did not match the expected structure." in rendered["response_text"]
+    assert "Use the exact Supervisor Control Report fields before resending." in rendered["response_text"]
+    assert "Resend using the exact Supervisor Control Report format." in rendered["response_text"]
+
+
 def test_rejected_fix_request_renders_correctly() -> None:
     rendered = render_whatsapp_response(
         {

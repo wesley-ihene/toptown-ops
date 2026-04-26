@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -275,6 +276,173 @@ def test_non_empty_llm_output_is_used(tmp_path: Path, monkeypatch) -> None:
     assert observability["summary"]["conversation_llm_calls"] == 1
     assert observability["summary"]["conversation_llm_failures"] == 0
     assert observability["summary"]["conversation_llm_fallbacks"] == 0
+
+
+def test_known_review_reason_skips_llm_and_preserves_resolved_observability_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("CONVERSATION_LLM_ENABLED", "true")
+    monkeypatch.setenv("CONVERSATION_LLM_MODE", "rewrite_only")
+    calls = 0
+
+    def track(base_text, context):
+        del base_text, context
+        nonlocal calls
+        calls += 1
+        return "should not run"
+
+    monkeypatch.setattr(worker, "refine_response_text", track)
+
+    rendered = worker.render_whatsapp_response(
+        {
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "routing",
+            "reason": "mixed_report_split_not_safe",
+            "feedback_context": {
+                "raw_text": "\n".join(
+                    [
+                        "Supervisor Control Report",
+                        "Branch: Waigani Branch",
+                        "Date: 07/04/2026",
+                        "Cash variance: No",
+                    ]
+                ),
+            },
+        }
+    )
+    observability = load_daily_artifact("conversation_llm", "2026-04-07", output_root=tmp_path)
+
+    assert calls == 0
+    assert "TAOP detected multiple report sections in one message." in rendered["response_text"]
+    assert observability is not None
+    assert observability["summary"]["conversation_llm_skipped"] == 1
+    assert observability["events"] == [
+        {
+            "outcome": "skipped",
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "branch": "waigani",
+            "report_type": "supervisor_control",
+            "report_date": "2026-04-07",
+            "replay_suppressed": False,
+            "reason": "structured_feedback",
+        }
+    ]
+
+
+def test_known_review_reasons_skip_llm_calls(tmp_path: Path, monkeypatch) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("CONVERSATION_LLM_ENABLED", "true")
+    monkeypatch.setenv("CONVERSATION_LLM_MODE", "rewrite_only")
+    calls = 0
+
+    def track(base_text, context):
+        del base_text, context
+        nonlocal calls
+        calls += 1
+        return "should not run"
+
+    monkeypatch.setattr(worker, "refine_response_text", track)
+
+    current_report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cases = [
+        (
+            {
+                "response_type": "review_ack",
+                "channel": "whatsapp",
+                "should_reply": True,
+                "is_replay": False,
+                "report_type": "sales_income",
+                "branch": "waigani",
+                "report_date": "2026-04-23",
+                "reason": "mixed_child_requires_review",
+            },
+            "2026-04-23",
+        ),
+        (
+            {
+                "response_type": "review_ack",
+                "channel": "whatsapp",
+                "should_reply": True,
+                "is_replay": False,
+                "report_type": "sales_income",
+                "branch": "waigani",
+                "report_date": "2026-04-23",
+                "reason": "mixed_report_split_not_safe",
+            },
+            "2026-04-23",
+        ),
+        (
+            {
+                "response_type": "review_ack",
+                "channel": "whatsapp",
+                "should_reply": True,
+                "is_replay": False,
+                "report_type": "staff_attendance",
+                "report_date": "2026-04-23",
+                "reason": None,
+                "feedback_context": {
+                    "validation": {
+                        "reason_codes": ["missing_branch"],
+                        "rejections": [{"reason_code": "missing_branch", "reason_detail": "Branch missing."}],
+                    },
+                },
+            },
+            "2026-04-23",
+        ),
+        (
+            {
+                "response_type": "review_ack",
+                "channel": "whatsapp",
+                "should_reply": True,
+                "is_replay": False,
+                "report_type": "staff_attendance",
+                "branch": "waigani",
+                "reason": None,
+                "feedback_context": {
+                    "validation": {
+                        "reason_codes": ["missing_report_date"],
+                        "rejections": [{"reason_code": "missing_report_date", "reason_detail": "Date missing."}],
+                    },
+                },
+            },
+            current_report_date,
+        ),
+        (
+            {
+                "response_type": "review_ack",
+                "channel": "whatsapp",
+                "should_reply": True,
+                "is_replay": False,
+                "report_type": "supervisor_control",
+                "branch": "waigani",
+                "report_date": "2026-04-23",
+                "reason": None,
+                "feedback_context": {
+                    "validation": {
+                        "reason_codes": ["missing_fields"],
+                        "rejections": [{"reason_code": "missing_fields", "reason_detail": "Missing fields."}],
+                    },
+                    "warnings": [{"code": "missing_fields", "message": "Missing fields."}],
+                },
+            },
+            "2026-04-23",
+        ),
+    ]
+
+    for context, expected_date in cases:
+        rendered = worker.render_whatsapp_response(context)
+        observability = load_daily_artifact("conversation_llm", expected_date, output_root=tmp_path)
+        assert rendered["response_text"]
+        assert observability is not None
+        assert observability["summary"]["conversation_llm_skipped"] >= 1
+
+    assert calls == 0
 
 
 def test_conversation_llm_enabled_true_env_is_enabled(monkeypatch) -> None:

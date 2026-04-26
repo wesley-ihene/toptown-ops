@@ -61,6 +61,15 @@ _CURRENCY_FRAGMENT_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _QTY_WITH_UNIT_PATTERN = re.compile(r"\b(?P<qty>\d+)\s*(?P<unit>pcs?|pce)\b", flags=re.IGNORECASE)
+_DETERMINISTIC_REVIEW_REASONS = frozenset(
+    {
+        "mixed_child_requires_review",
+        "mixed_report_split_not_safe",
+        "missing_branch",
+        "missing_date",
+        "supervisor_control_invalid_format",
+    }
+)
 
 
 def build_report_feedback(response_context: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -76,6 +85,14 @@ def build_report_feedback(response_context: Mapping[str, Any]) -> dict[str, Any]
     report_type = _canonical_report_type(_reported_type(response_context))
     if report_type == "bale_summary":
         return build_bale_summary_feedback(response_context)
+    if response_type in {"review_ack", "correction_review_ack"}:
+        review_reason = _resolved_review_reason(response_context)
+        if review_reason in _DETERMINISTIC_REVIEW_REASONS:
+            response_context_with_reason = dict(response_context)
+            response_context_with_reason["reason"] = review_reason
+            return {
+                "response_text": build_review_feedback(response_context_with_reason),
+            }
     return None
 
 
@@ -101,14 +118,24 @@ def build_review_feedback(response_context: Mapping[str, Any]) -> str:
         _mapping(feedback_context.get("acceptance")).get("confidence"),
     )
     thresholds = _thresholds_for_report(report_type or "unknown", feedback_context)
+    review_reason = _resolved_review_reason(response_context)
     issues = _generic_review_issues(
-        response_reason=_text(response_context.get("reason")),
+        response_reason=review_reason,
         feedback_context=feedback_context,
         confidence=confidence,
         thresholds=thresholds,
     )
-    validation = _generic_validation_results(report_label=report_label, branch=branch, report_date=report_date)
+    validation = _generic_validation_results(
+        report_label=report_label,
+        branch=branch,
+        report_date=report_date,
+        response_reason=review_reason,
+    )
     normalized_lines = _normalized_by_taop_lines(human_tolerance)
+    action_line = _generic_review_action(
+        response_reason=review_reason,
+        report_label=report_label,
+    )
 
     lines = [
         "⚠️ TAOP REVIEW REQUIRED",
@@ -130,7 +157,7 @@ def build_review_feedback(response_context: Mapping[str, Any]) -> str:
             *issues,
             "",
             "ACTION",
-            "Please correct the issues above and resend.",
+            action_line,
         ]
     )
     if confidence is not None:
@@ -372,10 +399,21 @@ def _generic_validation_results(
     report_label: str,
     branch: str | None,
     report_date: str | None,
+    response_reason: str | None,
 ) -> list[str]:
     results = [f"✔ Report type detected: {report_label}"]
-    results.append("✔ Branch resolved" if branch is not None else "❌ Branch not resolved")
-    results.append("✔ Date resolved" if report_date is not None else "❌ Date not resolved")
+    if branch is not None:
+        results.append("✔ Branch resolved")
+    elif response_reason == "missing_branch":
+        results.append("❌ Branch is missing")
+    else:
+        results.append("ℹ Branch resolution not surfaced in reply metadata")
+    if report_date is not None:
+        results.append("✔ Date resolved")
+    elif response_reason == "missing_date":
+        results.append("❌ Date is missing")
+    else:
+        results.append("ℹ Date resolution not surfaced in reply metadata")
     return results
 
 
@@ -386,6 +424,10 @@ def _generic_review_issues(
     confidence: float | None,
     thresholds: Mapping[str, Any],
 ) -> list[str]:
+    known_reason_issues = _known_review_issue_lines(response_reason)
+    if known_reason_issues:
+        return [f"{index}. {issue}" for index, issue in enumerate(known_reason_issues, start=1)]
+
     issues = _generic_issue_lines(feedback_context=feedback_context)
     auto_accept_min = _float_or_none(thresholds.get("auto_accept_min"))
     if not issues:
@@ -430,6 +472,115 @@ def _generic_rejection_reason(reason: str | None) -> str:
     if reason is None:
         return "Format does not match the expected SOP structure."
     return mapping.get(reason, reason.replace("_", " ").capitalize() + ".")
+
+
+def _resolved_review_reason(response_context: Mapping[str, Any]) -> str | None:
+    feedback_context = _mapping(response_context.get("feedback_context"))
+    report_type = _reported_type(response_context)
+    derived_reason = _derived_review_reason(feedback_context=feedback_context, report_type=report_type)
+    if derived_reason in _DETERMINISTIC_REVIEW_REASONS:
+        return derived_reason
+    explicit_reason = _normalized_review_reason(_text(response_context.get("reason")))
+    if explicit_reason is not None:
+        return explicit_reason
+    return derived_reason
+
+
+def _derived_review_reason(
+    *,
+    feedback_context: Mapping[str, Any],
+    report_type: str | None,
+) -> str | None:
+    codes = _validation_reason_codes(
+        _mapping(feedback_context.get("validation")),
+        _mapping(feedback_context.get("candidate_validation")),
+    )
+    if "missing_branch" in codes:
+        return "missing_branch"
+    if "missing_report_date" in codes or "missing_date" in codes:
+        return "missing_date"
+
+    normalized_report_type = _canonical_report_type(report_type) or report_type
+    if normalized_report_type == "supervisor_control":
+        warning_codes = {
+            code
+            for code in (
+                _text(warning.get("code"))
+                for warning in _mapping_list(feedback_context.get("warnings"))
+            )
+            if code is not None
+        }
+        if {"missing_fields", "parser_failure"} & (codes | warning_codes):
+            return "supervisor_control_invalid_format"
+    return None
+
+
+def _validation_reason_codes(*validation_blocks: Mapping[str, Any]) -> set[str]:
+    codes: set[str] = set()
+    for validation in validation_blocks:
+        reason_codes = validation.get("reason_codes")
+        if isinstance(reason_codes, list):
+            for item in reason_codes:
+                normalized = _normalized_review_reason(_text(item))
+                if normalized is not None:
+                    codes.add(normalized)
+        rejections = validation.get("rejections")
+        if isinstance(rejections, list):
+            for rejection in rejections:
+                if not isinstance(rejection, Mapping):
+                    continue
+                normalized = _normalized_review_reason(
+                    _text(rejection.get("reason_code")) or _text(rejection.get("code"))
+                )
+                if normalized is not None:
+                    codes.add(normalized)
+    return codes
+
+
+def _normalized_review_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    if reason == "missing_report_date":
+        return "missing_date"
+    return reason
+
+
+def _known_review_issue_lines(response_reason: str | None) -> list[str]:
+    mapping = {
+        "mixed_child_requires_review": [
+            "TAOP split the message into multiple reports.",
+            "One split report still needs review before final processing.",
+        ],
+        "mixed_report_split_not_safe": [
+            "TAOP detected multiple report sections in one message.",
+            "The split was not safe enough to process automatically.",
+        ],
+        "missing_branch": [
+            "Branch is missing from the report text.",
+            "TAOP cannot route the report without a branch.",
+        ],
+        "missing_date": [
+            "Report date is missing from the report text.",
+            "TAOP cannot process the report without a date.",
+        ],
+        "supervisor_control_invalid_format": [
+            "Supervisor Control Report format did not match the expected structure.",
+            "Use the exact Supervisor Control Report fields before resending.",
+        ],
+    }
+    issues = mapping.get(response_reason)
+    return list(issues) if issues is not None else []
+
+
+def _generic_review_action(*, response_reason: str | None, report_label: str) -> str:
+    mapping = {
+        "mixed_child_requires_review": "Please resend the report that still needs review as one report per message.",
+        "mixed_report_split_not_safe": "Please resend one report per message using the exact SOP report title.",
+        "missing_branch": "Add the Branch line and resend.",
+        "missing_date": "Add the Date line and resend.",
+        "supervisor_control_invalid_format": "Resend using the exact Supervisor Control Report format.",
+    }
+    return mapping.get(response_reason, "Please correct the issues above and resend.")
 
 
 def _render_bale_summary_feedback_text(

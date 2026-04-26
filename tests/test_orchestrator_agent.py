@@ -677,6 +677,55 @@ def test_orchestrator_mixed_report_fans_out_to_multiple_specialists(
     assert result.payload["fanout"]["children"][1]["branch"] == "waigani"
 
 
+def test_orchestrator_uses_raw_text_for_mixed_split_when_normalized_text_is_flattened(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    raw_text = _mixed_sales_and_performance_text()
+    flattened_normalized_text = " ".join(line.strip() for line in raw_text.splitlines() if line.strip())
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {
+                    "text": raw_text,
+                    "normalized_text": flattened_normalized_text,
+                },
+                "human_tolerance": {
+                    "human_tolerance_applied": True,
+                },
+                "metadata": {
+                    "received_at": "2026-04-07T13:00:00Z",
+                    "sender": "mixed-normalized-text",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+
+    assert raw_meta["detected_report_type"] == "mixed"
+    assert raw_meta["routing_target"] == "fan_out"
+    assert raw_meta["split_child_count"] == 2
+    assert result.payload["classification"]["report_type"] == "mixed"
+    assert result.payload["routing"]["target_agent"] == "fan_out"
+    assert result.payload["routing"]["split_strategy"] == "explicit_report_headers"
+    assert result.payload["status"] == "accepted_with_warning"
+    assert result.payload["segment_count"] == 2
+    assert (
+        tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"
+    ).exists()
+    assert (
+        tmp_path / "records" / "structured" / "hr_performance" / "waigani" / "2026-04-07.json"
+    ).exists()
+
+
 def test_orchestrator_rejects_mixed_report_when_ingress_policy_requires_single_report(
     tmp_path: Path,
     monkeypatch,
