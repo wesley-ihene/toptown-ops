@@ -378,17 +378,69 @@ def test_orchestrator_routes_stylized_unicode_attendance_sample_to_structured_ou
     assert raw_meta["detected_report_type"] == "attendance"
     assert raw_meta["routing_target"] == "hr_agent"
     assert raw_meta["branch_hint"] == "waigani"
+    assert raw_meta["resolved_report_date"] == "2026-04-06"
+    assert raw_meta["raw_report_date"] == "MONDAY:06/04/26"
     assert raw_meta["processing_status"] == "processed"
     assert raw_meta["governance_status"] == "needs_review"
+    assert raw_meta["human_tolerance"]["human_tolerance_applied"] is True
 
     structured_path = tmp_path / "records" / "structured" / "hr_attendance" / "waigani" / "2026-04-06.json"
-    assert not structured_path.exists()
-    review_paths = _paths(tmp_path / "records" / "review" / "2026_04_06" / "waigani" / "staff_attendance", "*.json")
-    assert len(review_paths) == 1
+    assert structured_path.exists()
 
-    assert result.agent_name == "orchestrator_agent"
+    assert result.agent_name == "hr_agent"
+    assert result.payload["branch"] == "waigani"
+    assert result.payload["report_date"] == "2026-04-06"
+    assert result.payload["signal_subtype"] == "staff_attendance"
     assert result.payload["status"] == "needs_review"
-    assert result.payload["fallback"]["acceptance"]["decision"] == "review"
+    warning_codes = {warning["code"] for warning in result.payload["warnings"]}
+    assert "unknown_attendance_status" not in warning_codes
+
+
+def test_orchestrator_human_tolerance_normalizes_real_world_sunday_attendance_input(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _human_tolerant_sunday_attendance_text()},
+                "metadata": {
+                    "received_at": "2026-04-26T02:32:38Z",
+                    "sender": "Wesley",
+                },
+            },
+        )
+    )
+
+    raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    assert len(raw_meta_paths) == 1
+    raw_meta = _read_json(raw_meta_paths[0])
+    structured_path = tmp_path / "records" / "structured" / "hr_attendance" / "waigani" / "2026-04-26.json"
+    item_statuses = {item["staff_name"]: item["status"] for item in result.payload["items"]}
+
+    assert raw_meta["detected_report_type"] == "attendance"
+    assert raw_meta["routing_target"] == "hr_agent"
+    assert raw_meta["branch_hint"] == "waigani"
+    assert raw_meta["resolved_report_date"] == "2026-04-26"
+    assert raw_meta["processing_status"] == "processed"
+    assert raw_meta["human_tolerance"]["normalized_fields"]["report_title"] == "ATTENDANCE REPORT"
+    assert structured_path.exists()
+
+    assert result.agent_name == "hr_agent"
+    assert result.payload["signal_subtype"] == "staff_attendance"
+    assert result.payload["branch"] == "waigani"
+    assert result.payload["report_date"] == "2026-04-26"
+    assert result.payload["status"] == "needs_review"
+    assert item_statuses == {
+        "Alice Koko": "off",
+        "Grace Masson": "leave",
+        "Fidelma Wobilo": "awn",
+        "David Yaro": "transfer",
+    }
 
 
 def test_orchestrator_routes_current_unknown_staff_performance_sample_to_structured_output(
@@ -1110,11 +1162,11 @@ def test_orchestrator_routes_actual_backlog_attendance_message(
     rejected_unknown_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp", "**/*.meta.json")
     assert rejected_unknown_paths == []
     structured_path = tmp_path / "records" / "structured" / "hr_attendance" / "lae_5th_street" / "2026-04-05.json"
-    assert not structured_path.exists()
+    assert structured_path.exists()
 
-    assert result.agent_name == "orchestrator_agent"
+    assert result.agent_name == "hr_agent"
     assert result.payload["status"] == "needs_review"
-    assert result.payload["fallback"]["validation"]["accepted"] is True
+    assert result.payload["signal_subtype"] == "staff_attendance"
 
 
 def test_orchestrator_routes_actual_backlog_staff_performance_message(
@@ -1584,7 +1636,7 @@ def test_orchestrator_fallback_validation_uses_normalized_report_date(
 
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["normalized_report_date"] == "2026-04-10"
-    assert raw_meta["raw_report_date"] == "10/04 /26"
+    assert raw_meta["raw_report_date"] == "Friday, 10/04 /26"
     assert raw_meta["fallback_validation"]["accepted"] is True
 
 
@@ -2675,6 +2727,26 @@ def _unknown_attendance_text() -> str:
             "1. Handry Ambui and Nim Jonnah continue to work this morning.",
             "",
             "Thanks",
+        ]
+    )
+
+
+def _human_tolerant_sunday_attendance_text() -> str:
+    return "\n".join(
+        [
+            "𝕋𝕋ℂ ℙ𝕆𝕄",
+            "𝕎𝔸𝕀𝔾𝔸ℕ𝕀 𝔹ℝ𝔸ℕℂℍ",
+            "",
+            "SUNDAY:26/04/26",
+            "",
+            "STAFFS ATTENDANCE.",
+            "",
+            "1.Alice Koko = DAY OFF",
+            "2.Grace Masson = LEAVE BREAK",
+            "3.Fidelma Wobilo = ABSENT WITH NOTICE",
+            "4.David Yaro = TRANSFER",
+            "",
+            "Total Staff: 4",
         ]
     )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import unicodedata
 
 _DASH_TRANSLATION = str.maketrans(
     {
@@ -49,11 +50,12 @@ def normalize_headers(text: str, *, max_lines: int = 8) -> HeaderNormalizationRe
         stripped = raw_line.strip()
         if not stripped:
             continue
+        normalized_source = _compatibility_fold(stripped)
         candidates.append(
             HeaderCandidate(
                 line_number=index,
                 raw_line=stripped,
-                normalized_line=_normalize_header_line(stripped),
+                normalized_line=_normalize_header_line(normalized_source),
             )
         )
         if len(candidates) >= max_lines:
@@ -71,3 +73,10 @@ def _normalize_header_line(value: str) -> str:
     cleaned = cleaned.replace("(", " ").replace(")", " ")
     normalized = _NON_ALPHANUMERIC_PATTERN.sub(" ", cleaned.casefold())
     return " ".join(normalized.split())
+
+
+def _compatibility_fold(value: str) -> str:
+    """Return one ASCII-friendly representation for noisy Unicode headers."""
+
+    normalized = unicodedata.normalize("NFKD", value)
+    return "".join(character for character in normalized if not unicodedata.combining(character))

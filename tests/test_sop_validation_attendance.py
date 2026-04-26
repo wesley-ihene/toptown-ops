@@ -27,7 +27,7 @@ def test_validate_attendance_accepts_matching_status_counts() -> None:
     assert result.rejection_codes == []
 
 
-def test_validate_attendance_rejects_invalid_status_and_count_mismatch() -> None:
+def test_validate_attendance_groups_richer_statuses_into_metric_buckets() -> None:
     result = validate_attendance(
         {
             "branch": "waigani",
@@ -47,4 +47,9 @@ def test_validate_attendance_rejects_invalid_status_and_count_mismatch() -> None
     )
 
     assert result.accepted is False
-    assert result.rejection_codes == ["invalid_status", "invalid_count_mismatch"]
+    assert result.rejection_codes == ["invalid_count_mismatch", "invalid_count_mismatch"]
+    assert all(rejection.code == "invalid_count_mismatch" for rejection in result.rejections)
+    assert {rejection.field for rejection in result.rejections} == {
+        "metrics.present_count",
+        "metrics.absent_count",
+    }

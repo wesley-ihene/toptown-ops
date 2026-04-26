@@ -7,13 +7,34 @@ import re
 from packages.common.normalizer import parse_count
 from packages.normalization.labels import normalize_label
 
+_CHECKMARK_PATTERN = re.compile(r"[✔✅☑]")
 STATUS_ALIASES: dict[str, tuple[str, ...]] = {
-    "present": ("p", "present"),
-    "off": ("off", "off duty"),
-    "annual_leave": ("anual leave", "annual leave", "leave"),
-    "suspended": ("suspend", "suspended"),
+    "present": ("p", "present", "press", "press/"),
+    "off": ("off", "off duty", "day off"),
+    "leave": ("anual leave", "annual leave", "leave", "on leave", "leave break", "leavebreak"),
+    "suspend": ("suspend", "suspended"),
     "absent": ("absent",),
     "sick": ("sick",),
+    "awn": ("awn", "absent with notice"),
+    "awon": ("awon", "absent without notice", "absent without"),
+    "lay_off": ("lay off", "layoff"),
+    "transfer": ("transfer",),
+    "late": ("late",),
+    "nil": ("nil", "nill"),
+}
+STATUS_BUCKETS: dict[str, str] = {
+    "present": "present",
+    "off": "off",
+    "leave": "leave",
+    "absent": "absent",
+    "sick": "absent",
+    "suspend": "absent",
+    "awn": "absent",
+    "awon": "absent",
+    "late": "absent",
+    "lay_off": "off",
+    "transfer": "off",
+    "nil": "off",
 }
 
 
@@ -33,6 +54,9 @@ def clean_name(raw_value: str) -> str | None:
 def normalize_status(raw_value: str) -> tuple[str | None, str | None]:
     """Return canonical and raw attendance status values when recognized."""
 
+    if _CHECKMARK_PATTERN.search(raw_value):
+        return "present", "P"
+
     label_result = normalize_label(raw_value, report_family="attendance")
     if label_result.succeeded and label_result.normalized_value is not None:
         canonical = {
@@ -40,8 +64,8 @@ def normalize_status(raw_value: str) -> tuple[str | None, str | None]:
             "OFF": "off",
             "LEAVE": "leave",
             "ABSENT": "absent",
-            "SICK": "absent",
-            "SUSPENDED": "absent",
+            "SICK": "sick",
+            "SUSPENDED": "suspend",
         }.get(label_result.normalized_value)
         if canonical is not None:
             return canonical, label_result.normalized_value

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -20,16 +23,30 @@ from analytics.phase3 import (
     write_staff_leaderboard_json,
 )
 from apps.autonomous_control_engine import generate_control_actions
+from apps.conversation_context import load_sender_context, store_sender_interaction
+from apps.conversation_router import route_conversation_response
 from apps.action_effectiveness_engine import analyze_action_effectiveness
 from apps.format_drift_analyzer import analyze_format_drift
+from apps.optimization_engine.worker import generate_optimization_proposals
 from apps.review_learning_engine import analyze_review_queue
+from apps.response_engine import render_whatsapp_response
 from apps.threshold_recommendation_engine import generate_threshold_recommendations
 from packages.action_store import write_action_record
 from packages.common.executive_alerts import write_executive_alert_artifacts
 from packages.common.paths import REPO_ROOT
-from packages.observability import record_action_event, record_export_event, refresh_feedback_summary
+from packages.observability import (
+    record_action_event,
+    record_conversation_reply_event,
+    record_export_event,
+    refresh_feedback_summary,
+)
 from packages.review_queue import write_action_follow_up_item
 from packages.record_store.paths import get_structured_path_for_root
+from packages.response_store import (
+    load_response_artifact,
+    update_response_artifact_dispatch,
+    write_response_artifacts,
+)
 from packages.data_governance import read_governance_sidecar
 from scripts.export_colony_signals import export_all_record_types
 
@@ -37,6 +54,9 @@ IOI_COLONY_ROOT_ENV_VAR = "TOPTOWN_IOI_COLONY_ROOT"
 REPLAY_AUTOMATION_CONTEXT_ENV_VAR = "TOPTOWN_REPLAY_MODE"
 ENABLE_REPLAY_ACTIONS_ENV_VAR = "TOPTOWN_ENABLE_REPLAY_ACTIONS"
 ENABLE_REPLAY_LEARNING_ENV_VAR = "TOPTOWN_ENABLE_REPLAY_LEARNING"
+ENABLE_REPLAY_RESPONSES_ENV_VAR = "TOPTOWN_ENABLE_REPLAY_RESPONSES"
+WHATSAPP_RESPONSE_MODE_ENV_VAR = "TOPTOWN_WHATSAPP_RESPONSE_MODE"
+WHATSAPP_OUTBOUND_MODE_ENV_VAR = "WHATSAPP_OUTBOUND_MODE"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -328,6 +348,191 @@ def log_post_write_failure(
     )
 
 
+def generate_whatsapp_conversation_reply(
+    *,
+    outcome: Mapping[str, Any] | Any,
+    source_message_id: str | None,
+    sender_phone: str | None,
+    replay: bool,
+    source_root: str | Path | None = None,
+    mode: str | None = None,
+    dispatcher: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any] | None:
+    """Generate, persist, and optionally dispatch one Phase C1 WhatsApp reply."""
+
+    stored_context = None
+    if not replay:
+        stored_context = load_sender_context(sender_phone, output_root=source_root)
+    response_context = route_conversation_response(
+        outcome,
+        source_message_id=source_message_id,
+        sender_phone=sender_phone,
+        conversation_context=stored_context,
+    )
+    if not replay:
+        store_sender_interaction(
+            sender_phone=sender_phone,
+            response_context=response_context,
+            output_root=source_root,
+        )
+    return dispatch_whatsapp_response(
+        response_context=response_context,
+        replay=replay,
+        source_root=source_root,
+        mode=mode,
+        dispatcher=dispatcher,
+    )
+
+
+def dispatch_whatsapp_response(
+    *,
+    response_context: Mapping[str, Any],
+    replay: bool | None = None,
+    source_root: str | Path | None = None,
+    mode: str | None = None,
+    dispatcher: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any] | None:
+    """Render, persist, and optionally dispatch one normalized WhatsApp response."""
+
+    source_repo_root = Path(source_root) if source_root is not None else REPO_ROOT
+    rendered = render_whatsapp_response(response_context)
+    response_type = _string_or_none(response_context.get("response_type"))
+    if response_context.get("should_reply") is not True or rendered.get("should_send") is not True or response_type is None:
+        return {
+            "response_id": None,
+            "response_type": response_type,
+            "dispatch_status": "skipped",
+            "json_path": None,
+            "text_path": None,
+        }
+
+    generated_at = _utc_timestamp()
+    dispatch_payload = {
+        **dict(response_context),
+        **rendered,
+        "generated_at": generated_at,
+    }
+    dispatch_payload["response_id"] = _response_id(dispatch_payload)
+    resolved_mode = _conversation_response_mode(mode)
+    is_replay = bool(replay) if replay is not None else bool(response_context.get("is_replay") is True)
+    existing_artifact = _existing_response_artifact(dispatch_payload, output_root=source_repo_root)
+    if existing_artifact is not None:
+        existing_status = _artifact_dispatch_status(existing_artifact)
+        if existing_status in {"sent", "duplicate"}:
+            return {
+                "response_id": existing_artifact["response_id"],
+                "response_type": response_type,
+                "dispatch_status": "duplicate",
+                "json_path": existing_artifact["json_path"],
+                "text_path": existing_artifact["text_path"],
+            }
+        if resolved_mode not in {"live", "dry_run"}:
+            return {
+                "response_id": existing_artifact["response_id"],
+                "response_type": response_type,
+                "dispatch_status": "skipped",
+                "json_path": existing_artifact["json_path"],
+                "text_path": existing_artifact["text_path"],
+            }
+
+    source_message_id = _string_or_none(response_context.get("source_message_id"))
+    sender_phone = _string_or_none(response_context.get("sender_phone"))
+    artifact = write_response_artifacts(
+        {
+            **dispatch_payload,
+            "dispatch_status": "generated",
+            "provider_message_id": None,
+            "dispatch_error": None,
+            "http_status": None,
+        },
+        output_root=source_repo_root,
+        overwrite=existing_artifact is not None,
+    )
+
+    dispatch_status = "generated"
+    dispatch_error = None
+    provider_message_id = None
+    http_status = None
+
+    if is_replay and not _replay_responses_enabled():
+        dispatch_status = "suppressed"
+    elif resolved_mode in {"disabled", "off"}:
+        dispatch_status = "suppressed"
+    elif resolved_mode == "write_only":
+        dispatch_status = "generated"
+    elif resolved_mode == "dry_run":
+        if dispatcher is None:
+            dispatch_status = "dry_run"
+        else:
+            try:
+                dispatch_result = dispatcher(dispatch_payload)
+            except Exception as exc:
+                dispatch_status = "failed"
+                dispatch_error = str(exc)
+                _log_event(
+                    "exception",
+                    "conversation_reply_dispatch_failed",
+                    source_message_id=source_message_id,
+                    sender_phone=sender_phone,
+                    response_type=response_type,
+                    error=str(exc),
+                )
+            else:
+                dispatch_status = _normalized_dispatch_status(dispatch_result)
+                provider_message_id, dispatch_error, http_status = _dispatch_result_fields(dispatch_result)
+    elif resolved_mode == "live" and dispatcher is not None:
+        try:
+            dispatch_result = dispatcher(dispatch_payload)
+        except Exception as exc:
+            dispatch_status = "failed"
+            dispatch_error = str(exc)
+            _log_event(
+                "exception",
+                "conversation_reply_dispatch_failed",
+                source_message_id=source_message_id,
+                sender_phone=sender_phone,
+                response_type=response_type,
+                error=str(exc),
+            )
+        else:
+            dispatch_status = _normalized_dispatch_status(dispatch_result)
+            provider_message_id, dispatch_error, http_status = _dispatch_result_fields(dispatch_result)
+    elif resolved_mode == "live":
+        dispatch_status = "generated"
+
+    if dispatch_status != "generated" or provider_message_id is not None or dispatch_error is not None or http_status is not None:
+        artifact = update_response_artifact_dispatch(
+            artifact["response_id"],
+            dispatch_status=dispatch_status,
+            provider_message_id=provider_message_id,
+            dispatch_error=dispatch_error,
+            http_status=http_status,
+            output_root=source_repo_root,
+        )
+
+    record_conversation_reply_event(
+        report_date=generated_at[:10],
+        branch=_string_or_none(response_context.get("branch")),
+        response_type=response_type,
+        dispatch_status=dispatch_status,
+        source_message_id=source_message_id,
+        governance_status=_string_or_none(response_context.get("governance_status")),
+        report_type=_string_or_none(response_context.get("report_type")),
+        replay_suppressed=is_replay and dispatch_status == "suppressed",
+        reason=_string_or_none(response_context.get("reason")),
+        conversation_date=_string_or_none(response_context.get("report_date")),
+        outcome=_string_or_none(response_context.get("observability_outcome")),
+        output_root=source_repo_root,
+    )
+    return {
+        "response_id": artifact["response_id"],
+        "response_type": response_type,
+        "dispatch_status": dispatch_status,
+        "json_path": artifact["json_path"],
+        "text_path": artifact["text_path"],
+    }
+
+
 def _log_event(level: str, event: str, **fields: Any) -> None:
     payload = {"event": event, **fields}
     message = json.dumps(payload, sort_keys=True, ensure_ascii=True)
@@ -485,6 +690,7 @@ def _run_learning_automation(
         ("action_effectiveness", analyze_action_effectiveness),
         ("threshold_recommendations", generate_threshold_recommendations),
         ("format_drift", analyze_format_drift),
+        ("optimization_proposals", generate_optimization_proposals),
     ):
         try:
             result = runner(
@@ -573,3 +779,114 @@ def _replay_learning_enabled() -> bool:
 
     value = os.environ.get(ENABLE_REPLAY_LEARNING_ENV_VAR, "")
     return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _replay_responses_enabled() -> bool:
+    """Return whether replay runs may emit outbound conversational replies."""
+
+    value = os.environ.get(ENABLE_REPLAY_RESPONSES_ENV_VAR, "")
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _conversation_response_mode(explicit_mode: str | None = None) -> str:
+    """Return the active conversation response dispatch mode."""
+
+    candidate = explicit_mode if isinstance(explicit_mode, str) else os.environ.get(
+        WHATSAPP_OUTBOUND_MODE_ENV_VAR,
+        os.environ.get(WHATSAPP_RESPONSE_MODE_ENV_VAR, "write_only"),
+    )
+    normalized = candidate.strip().casefold()
+    if normalized in {"write_only", "dry_run", "live", "disabled", "off"}:
+        return normalized
+    return "write_only"
+
+
+def _normalized_dispatch_status(result: Any) -> str:
+    """Return one stable dispatch status from a dispatcher result."""
+
+    if isinstance(result, Mapping):
+        status = result.get("dispatch_status")
+        if isinstance(status, str) and status.strip():
+            cleaned = status.strip()
+            if cleaned in {"generated", "suppressed", "sent", "failed", "skipped", "dry_run", "duplicate"}:
+                return cleaned
+    if result is True:
+        return "sent"
+    if result is False:
+        return "failed"
+    return "sent"
+
+
+def _utc_timestamp() -> str:
+    """Return a stable UTC timestamp for response artifacts."""
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _existing_response_artifact(
+    payload: Mapping[str, Any],
+    *,
+    output_root: Path,
+) -> dict[str, Any] | None:
+    """Return one existing response artifact for the same deterministic response id."""
+
+    response_id = _response_id(payload)
+    return load_response_artifact(response_id, output_root=output_root)
+
+
+def _response_id(payload: Mapping[str, Any]) -> str:
+    """Return the deterministic response identity used by the response store."""
+
+    stable_fields = {
+        "source_message_id": _string_or_none(payload.get("source_message_id")),
+        "sender_phone": _string_or_none(payload.get("sender_phone")),
+        "response_type": _string_or_none(payload.get("response_type")),
+        "governance_status": _string_or_none(payload.get("governance_status")),
+        "report_type": _string_or_none(payload.get("report_type")),
+        "branch": _string_or_none(payload.get("branch")),
+        "reason": _string_or_none(payload.get("reason")),
+    }
+    digest = hashlib.sha256(
+        json.dumps(stable_fields, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+    return digest[:24]
+
+
+def _string_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _artifact_dispatch_status(artifact: Mapping[str, Any]) -> str | None:
+    payload = artifact.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    return _string_or_none(payload.get("dispatch_status"))
+
+
+def _dispatch_result_fields(result: Any) -> tuple[str | None, str | None, int | None]:
+    if not isinstance(result, Mapping):
+        return None, None, None
+    return (
+        _string_or_none(result.get("provider_message_id")),
+        _string_or_none(result.get("dispatch_error") or result.get("error")),
+        _int_or_none(result.get("http_status")),
+    )
+
+
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            return int(cleaned)
+        except ValueError:
+            return None
+    return None

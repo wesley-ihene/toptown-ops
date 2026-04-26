@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -9,12 +10,19 @@ import packages.record_store.paths as record_paths
 from packages.observability import (
     load_daily_artifact,
     record_action_event,
+    record_conversation_reply_event,
     record_export_event,
     record_learning_event,
     record_pre_ingestion_validation_event,
     refresh_feedback_summary,
 )
+from packages.record_store.automation import generate_whatsapp_conversation_reply
 from packages.provenance_store import write_provenance_record
+from packages.signal_contracts.agent_result import AgentResult
+
+
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def test_summary_artifact_is_generated_and_core_metrics_update(
@@ -463,6 +471,185 @@ def test_feedback_summary_tracks_lifecycle_counters_and_stale_pending(
     assert artifact["summary"]["feedback_records"] == 2
 
 
+def test_conversation_reply_observability_records_counters_and_events(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    record_conversation_reply_event(
+        report_date="2026-04-07",
+        branch="waigani",
+        response_type="accepted_ack",
+        dispatch_status="written_only",
+        source_message_id="wamid.accepted-1",
+        governance_status="accepted",
+        report_type="sales_income",
+        output_root=tmp_path,
+    )
+    record_conversation_reply_event(
+        report_date="2026-04-07",
+        branch="waigani",
+        response_type="review_ack",
+        dispatch_status="sent",
+        source_message_id="wamid.review-1",
+        governance_status="needs_review",
+        report_type="sales_income",
+        output_root=tmp_path,
+    )
+    record_conversation_reply_event(
+        report_date="2026-04-07",
+        branch="waigani",
+        response_type="duplicate_notice",
+        dispatch_status="suppressed_replay",
+        source_message_id="wamid.duplicate-1",
+        governance_status="duplicate",
+        report_type="sales_income",
+        output_root=tmp_path,
+    )
+    record_conversation_reply_event(
+        report_date="2026-04-07",
+        branch="waigani",
+        response_type="unknown_message_guidance",
+        dispatch_status="failed",
+        source_message_id="wamid.unknown-1",
+        governance_status="rejected",
+        report_type="unknown",
+        output_root=tmp_path,
+    )
+
+    payload = load_daily_artifact("conversation_replies", "2026-04-07", output_root=tmp_path)
+
+    assert payload is not None
+    assert payload["summary"] == {
+        "conversation_replies_generated": 4,
+        "conversation_replies_sent": 1,
+        "conversation_replies_failed": 1,
+        "conversation_replies_suppressed": 1,
+    }
+    assert [event["dispatch_status"] for event in payload["events"]] == [
+        "written_only",
+        "sent",
+        "suppressed_replay",
+        "failed",
+    ]
+    assert payload["events"][0]["channel"] == "whatsapp"
+    assert payload["events"][0]["governance_status"] == "accepted"
+    assert payload["events"][0]["report_type"] == "sales_income"
+    assert payload["events"][2]["replay_suppressed"] is True
+
+    summary = _read_json(tmp_path / "records" / "observability" / "daily" / "2026_04_07" / "summary.json")
+    assert summary["conversation_replies"] == payload["summary"]
+
+
+def test_conversation_reply_generated_metric_is_recorded_for_successful_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = generate_whatsapp_conversation_reply(
+        outcome=_accepted_outcome(),
+        source_message_id="wamid.generated-1",
+        sender_phone="67570000000",
+        replay=False,
+        source_root=tmp_path,
+    )
+
+    payload = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
+
+    assert result is not None
+    assert result["dispatch_status"] == "generated"
+    assert payload is not None
+    assert payload["summary"] == {
+        "conversation_replies_generated": 1,
+        "conversation_replies_sent": 0,
+        "conversation_replies_failed": 0,
+        "conversation_replies_suppressed": 0,
+    }
+    assert payload["events"][0]["response_type"] == "accepted_ack"
+    assert payload["events"][0]["replay_suppressed"] is False
+
+
+def test_conversation_reply_sent_metric_is_recorded_for_live_dispatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("TOPTOWN_WHATSAPP_RESPONSE_MODE", "live")
+
+    result = generate_whatsapp_conversation_reply(
+        outcome=_accepted_outcome(),
+        source_message_id="wamid.sent-1",
+        sender_phone="67570000000",
+        replay=False,
+        source_root=tmp_path,
+        dispatcher=lambda payload: {"dispatch_status": "sent"},
+    )
+
+    payload = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
+
+    assert result is not None
+    assert result["dispatch_status"] == "sent"
+    assert payload is not None
+    assert payload["summary"]["conversation_replies_generated"] == 1
+    assert payload["summary"]["conversation_replies_sent"] == 1
+    assert payload["events"][0]["dispatch_status"] == "sent"
+
+
+def test_conversation_reply_failed_metric_is_recorded_for_dispatch_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("TOPTOWN_WHATSAPP_RESPONSE_MODE", "live")
+
+    def explode(payload):
+        raise RuntimeError("dispatch failed")
+
+    result = generate_whatsapp_conversation_reply(
+        outcome=_accepted_outcome(),
+        source_message_id="wamid.failed-1",
+        sender_phone="67570000000",
+        replay=False,
+        source_root=tmp_path,
+        dispatcher=explode,
+    )
+
+    payload = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
+
+    assert result is not None
+    assert result["dispatch_status"] == "failed"
+    assert payload is not None
+    assert payload["summary"]["conversation_replies_generated"] == 1
+    assert payload["summary"]["conversation_replies_failed"] == 1
+    assert payload["events"][0]["dispatch_status"] == "failed"
+
+
+def test_conversation_reply_suppressed_metric_is_recorded_for_replay_suppression(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = generate_whatsapp_conversation_reply(
+        outcome=_accepted_outcome(),
+        source_message_id="wamid.replay-1",
+        sender_phone="67570000000",
+        replay=True,
+        source_root=tmp_path,
+    )
+
+    payload = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
+
+    assert result is not None
+    assert result["dispatch_status"] == "suppressed"
+    assert payload is not None
+    assert payload["summary"]["conversation_replies_generated"] == 1
+    assert payload["summary"]["conversation_replies_suppressed"] == 1
+    assert payload["events"][0]["replay_suppressed"] is True
+
+
 def _patch_record_paths(monkeypatch, tmp_path: Path) -> None:
     records_dir = tmp_path / "records"
     monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
@@ -475,6 +662,8 @@ def _patch_record_paths(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(record_paths, "PROVENANCE_DIR", records_dir / "provenance")
     monkeypatch.setattr(record_paths, "PROPOSALS_DIR", records_dir / "proposals")
     monkeypatch.setattr(record_paths, "OBSERVABILITY_DIR", records_dir / "observability")
+    monkeypatch.delenv("TOPTOWN_WHATSAPP_RESPONSE_MODE", raising=False)
+    monkeypatch.delenv("TOPTOWN_ENABLE_REPLAY_RESPONSES", raising=False)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -484,3 +673,17 @@ def _write_json(path: Path, payload: dict) -> None:
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _accepted_outcome() -> AgentResult:
+    return AgentResult(
+        agent_name="sales_income_agent",
+        payload={
+            "status": "accepted",
+            "governance": {"status": "accepted", "reasons": []},
+            "signal_type": "sales_income",
+            "branch": "waigani",
+            "report_date": "2026-04-07",
+            "outputs": ["records/structured/sales_income/waigani/2026-04-07.json"],
+        },
+    )

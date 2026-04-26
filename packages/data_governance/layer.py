@@ -112,11 +112,13 @@ def build_governance_context(work_item_payload: Mapping[str, Any]) -> dict[str, 
     raw_record = work_item_payload.get("raw_record")
     raw_message = work_item_payload.get("raw_message")
     classification = work_item_payload.get("classification")
+    human_tolerance = work_item_payload.get("human_tolerance")
 
     ingress_payload = ingress.get("payload") if isinstance(ingress, Mapping) else {}
     raw_record_payload = raw_record if isinstance(raw_record, Mapping) else {}
     raw_message_payload = raw_message if isinstance(raw_message, Mapping) else {}
     classification_payload = classification if isinstance(classification, Mapping) else {}
+    human_tolerance_payload = human_tolerance if isinstance(human_tolerance, Mapping) else {}
 
     return {
         "message_id": _string_or_none(ingress_payload.get("message_id")),
@@ -125,6 +127,7 @@ def build_governance_context(work_item_payload: Mapping[str, Any]) -> dict[str, 
         "raw_meta_path": _string_or_none(raw_record_payload.get("raw_meta_path")),
         "raw_text": _string_or_none(raw_message_payload.get("text")),
         "classified_report_type": _string_or_none(classification_payload.get("report_type")),
+        "human_tolerance": dict(human_tolerance_payload) if human_tolerance_payload else None,
     }
 
 

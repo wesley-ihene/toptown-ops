@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
@@ -55,12 +56,15 @@ def test_live_webhook_writes_raw_then_invokes_orchestrator(
     assert body["agent"] == "sales_income_agent"
     assert body["route"] == "sales"
     assert body["outputs"] == [
-        str(tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json")
+        str(tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"),
+        body["conversation_response"]["json_path"],
     ]
 
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["message_id"] == "wamid.live-1"
     assert raw_meta["processing_status"] == "received"
+    assert raw_meta["human_tolerance"]["original_text_hash"]
+    assert raw_meta["human_tolerance"]["normalized_text_hash"]
 
     work_item = captured_work_items[0]
     assert work_item.kind == "raw_message"
@@ -68,6 +72,8 @@ def test_live_webhook_writes_raw_then_invokes_orchestrator(
     assert work_item.payload["ingress_policy"] == {"reject_mixed_reports": False}
     assert work_item.payload["replay"] == {"is_replay": False}
     assert work_item.payload["raw_record"]["raw_written"] is True
+    assert work_item.payload["raw_message"]["normalized_text"] == "DAY-END SALES REPORT\nBranch: Waigani"
+    assert work_item.payload["human_tolerance"]["original_text_hash"]
     assert work_item.payload["ingress_envelope"]["payload"]["text"] == "DAY-END SALES REPORT\nBranch: Waigani"
 
 
@@ -182,11 +188,12 @@ def test_cleaned_text_is_forwarded_when_validator_cleans_input(
     _patch_environment(monkeypatch, tmp_path)
     captured_work_items = []
     original_text = "  DAY-END SALES REPORT\r\n\r\nBranch: Waigani  "
+    normalized_input = "DAY-END SALES REPORT\n\nBranch: Waigani"
     cleaned_text = "DAY-END SALES REPORT\n\nBranch: Waigani"
 
     def fake_validate_inbound_text(text, *, payload_kind="text", metadata=None):
         del payload_kind, metadata
-        assert text == original_text
+        assert text == normalized_input
         return {
             "status": "cleaned",
             "cleaned_text": cleaned_text,
@@ -378,6 +385,50 @@ def test_same_raw_sha256_with_different_message_ids_is_rejected_within_24_hours(
     assert "__" in Path(second_body["raw_txt_path"]).stem
 
 
+def test_operational_query_returns_attendance_status_without_validator_or_orchestrator(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    _write_structured_record(tmp_path, "hr_attendance", "waigani", "2026-04-25")
+    _write_structured_record(tmp_path, "hr_attendance", "lae_5th_street", "2026-04-25")
+    _write_structured_record(tmp_path, "hr_attendance", "lae_malaita", "2026-04-25")
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("report pipeline should not run for operational query")
+
+    monkeypatch.setattr(bridge, "validate_inbound_text", should_not_run)
+    monkeypatch.setattr(bridge.orchestrator_worker, "process_work_item", should_not_run)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(
+            _meta_payload(
+                message_id="wamid.query.attendance-1",
+                text="confirm you receive all four STAFFS ATTENDANCE report for the date 25/04/26?",
+            )
+        ).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    observability = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["query"] is True
+    assert body["orchestrator_status"] == "skipped"
+    assert body["conversation_response"]["response_type"] == "operational_query_status"
+    artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
+    assert "STATUS: ⚠️ PARTIAL / NEEDS CHECK" in artifact_payload["response_text"]
+    assert "❌ Bena Road" in artifact_payload["response_text"]
+    assert observability is not None
+    assert observability["events"][0]["response_type"] == "operational_query_status"
+    assert observability["events"][0]["report_type"] == "attendance_status"
+    assert observability["events"][0]["date"] == "2026-04-25"
+    assert observability["events"][0]["outcome"] == "success"
+
+
 def test_webhooks_whatsapp_alias_matches_webhook_post_behavior(
     tmp_path: Path,
     monkeypatch,
@@ -490,7 +541,8 @@ def test_live_webhook_fans_out_mixed_report_when_split_is_safe(
     assert body["agent"] == "orchestrator_agent"
     assert body["orchestrator_status"] in {"accepted_split", "accepted_with_warning"}
     assert body["route"] == "mixed"
-    assert len(body["outputs"]) == 2
+    assert len(body["outputs"]) == 3
+    assert body["conversation_response"]["json_path"] in body["outputs"]
     assert len(raw_meta_paths) == 1
     assert len(rejected_text_paths) == 0
     assert len(rejected_meta_paths) == 0
@@ -584,6 +636,10 @@ def _meta_payload(*, message_id: str = "wamid.live-1", text: str = "DAY-END SALE
     }
 
 
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def _status_payload() -> dict[str, object]:
     return {
         "object": "whatsapp_business_account",
@@ -629,3 +685,9 @@ def _paths(directory: Path, pattern: str) -> list[Path]:
 
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_structured_record(root: Path, signal_type: str, branch: str, report_date: str) -> None:
+    path = root / "records" / "structured" / signal_type / branch / f"{report_date}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"branch": branch, "report_date": report_date}, indent=2) + "\n", encoding="utf-8")

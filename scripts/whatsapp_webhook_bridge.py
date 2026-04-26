@@ -25,16 +25,27 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from apps.command_handler.worker import handle_whatsapp_command
+from apps.conversation_context import store_sender_interaction
+from apps.command_router.worker import route_whatsapp_command
+from apps.ceo_router.worker import handle_ceo_query
+from apps.cross_branch_router.worker import handle_cross_branch_query
+from apps.nl_intent_router.worker import route_natural_language_command
 from apps.pre_ingestion_validator import validate_inbound_text
+from apps.supervisor_commands.worker import handle_supervisor_command
 import apps.orchestrator_agent.worker as orchestrator_worker
 from dotenv import load_dotenv
 from packages.common.paths import REPO_ROOT
+from packages.human_tolerance import analyze_human_whatsapp_text
 from packages.observability import record_pre_ingestion_validation_event
+from packages.record_store.automation import dispatch_whatsapp_response, generate_whatsapp_conversation_reply
 from packages.record_store.naming import safe_segment
 from packages.record_store.paths import get_raw_path, get_structured_path
 from packages.record_store.writer import write_json_file, write_text_file
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
+from packages.taop_feedback import build_operational_query_response, detect_message_intent
+from packages.whatsapp_outbound import send_whatsapp_text
 
 load_dotenv(REPO_ROOT / ".env.whatsapp_bridge")
 
@@ -395,14 +406,17 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
     """Run raw-first ingest and orchestration for one envelope."""
 
     replay = envelope.replay
+    human_tolerance = analyze_human_whatsapp_text(envelope.text)
+    normalized_text = human_tolerance.normalized_text or envelope.text
     raw_sha256 = hashlib.sha256(envelope.text.encode("utf-8")).hexdigest()
     message_sha256 = _message_sha256(envelope)
     LOGGER.info(
-        "processing inbound envelope: message_id=%s replay=%s received_at=%s raw_sha256=%s",
+        "processing inbound envelope: message_id=%s replay=%s received_at=%s raw_sha256=%s human_tolerance=%s",
         envelope.message_id,
         replay.get("is_replay") is True,
         envelope.received_at,
         raw_sha256,
+        human_tolerance.applied,
     )
 
     try:
@@ -413,6 +427,7 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
                 envelope=envelope,
                 raw_sha256=raw_sha256,
                 message_sha256=message_sha256,
+                human_tolerance=human_tolerance.to_payload(),
             )
         )
     except DuplicateLiveMessage as exc:
@@ -423,7 +438,7 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             exc.reason,
             exc.raw_txt_path,
         )
-        return {
+        response = {
             "ok": True,
             "ingress": INGRESS_NAME,
             "workspace_root": str(REPO_ROOT),
@@ -441,6 +456,21 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             "raw_meta_path": exc.raw_meta_path,
             "outputs": [],
         }
+        response["conversation_response"] = _generate_conversation_response(
+            envelope=envelope,
+            outcome={
+                "status": "duplicate",
+                "governance": {"status": "duplicate", "reasons": [exc.reason]},
+                "policy_guard": {"duplicate": True, "reason": exc.reason},
+                "branch_hint": envelope.group_name,
+                "raw_message": {"text": envelope.text},
+                "raw_record": {
+                    "raw_txt_path": exc.raw_txt_path,
+                    "raw_meta_path": exc.raw_meta_path,
+                },
+            },
+        )
+        return _with_conversation_response_output(response)
     except Exception as exc:
         LOGGER.exception(
             "whatsapp raw write failed: message_id=%s raw_sha256=%s",
@@ -461,14 +491,59 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             "outputs": [],
         }
 
+    command = route_whatsapp_command(
+        envelope.text,
+        source_message_id=envelope.message_id,
+        sender_phone=envelope.sender_phone,
+        channel=envelope.channel,
+        is_replay=envelope.replay.get("is_replay") is True,
+    )
+    if command.get("is_command") is True:
+        return _command_response(
+            envelope=envelope,
+            raw_record=raw_record,
+            raw_sha256=raw_sha256,
+            message_sha256=message_sha256,
+            command=command,
+        )
+
+    nl_command = route_natural_language_command(
+        envelope.text,
+        source_message_id=envelope.message_id,
+        sender_phone=envelope.sender_phone,
+        channel=envelope.channel,
+        is_replay=envelope.replay.get("is_replay") is True,
+        received_at=envelope.received_at,
+        output_root=str(REPO_ROOT),
+    )
+    if isinstance(nl_command, Mapping) and nl_command.get("is_command") is True:
+        return _command_response(
+            envelope=envelope,
+            raw_record=raw_record,
+            raw_sha256=raw_sha256,
+            message_sha256=message_sha256,
+            command=nl_command,
+        )
+
+    intent = detect_message_intent(envelope.text)
+    if intent.get("message_intent") == "operational_query":
+        return _operational_query_response(
+            envelope=envelope,
+            raw_record=raw_record,
+            raw_sha256=raw_sha256,
+            message_sha256=message_sha256,
+            intent=intent,
+        )
+
     validation_result: dict[str, Any] | None = None
     if replay.get("is_replay") is not True:
         validation_result = validate_inbound_text(
-            envelope.text,
+            normalized_text,
             payload_kind=envelope.payload_kind,
             metadata={
                 "message_id": envelope.message_id,
                 "received_at": envelope.received_at,
+                "human_tolerance_applied": human_tolerance.applied,
             },
         )
         _record_pre_ingestion_validation(
@@ -501,6 +576,8 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             raw_sha256=raw_sha256,
             message_sha256=message_sha256,
             validation_result=validation_result,
+            normalized_text=normalized_text,
+            human_tolerance=human_tolerance.to_payload(),
         )
     except Exception as exc:
         LOGGER.exception("whatsapp work item construction failed")
@@ -547,23 +624,22 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             "outputs": [],
         }
 
-    payload = result.payload if isinstance(result.payload, dict) else {}
-    LOGGER.info(
-        "whatsapp orchestrator dispatch completed: message_id=%s agent=%s status=%s route=%s outputs=%s",
-        envelope.message_id,
-        result.agent_name,
-        payload.get("status"),
-        _route_from_result(result),
-        len(_outputs_from_result(result)),
-    )
-
-    return _success_response(
+    response = _success_response(
         envelope=envelope,
         raw_record=raw_record,
         raw_sha256=raw_sha256,
         message_sha256=message_sha256,
         result=result,
     )
+    LOGGER.info(
+        "whatsapp orchestrator dispatch completed: message_id=%s agent=%s status=%s route=%s outputs=%s",
+        envelope.message_id,
+        response.get("agent"),
+        response.get("orchestrator_status"),
+        response.get("route"),
+        len(response.get("outputs", [])) if isinstance(response.get("outputs"), list) else 0,
+    )
+    return response
 
 
 def build_work_item(
@@ -573,6 +649,8 @@ def build_work_item(
     raw_sha256: str,
     message_sha256: str,
     validation_result: dict[str, Any] | None = None,
+    normalized_text: str | None = None,
+    human_tolerance: Mapping[str, Any] | None = None,
 ) -> WorkItem:
     """Build the existing raw-message work item with a stable ingress envelope."""
 
@@ -588,7 +666,7 @@ def build_work_item(
     cleaned_text = (
         validation_result.get("cleaned_text")
         if has_validation and validation_result.get("status") in {"accepted", "cleaned"}
-        else envelope.text
+        else normalized_text or envelope.text
     )
     ingress_envelope = {
         "signal_type": "whatsapp_ingress",
@@ -620,7 +698,10 @@ def build_work_item(
 
     work_payload: dict[str, Any] = {
         "source": envelope.source,
-        "raw_message": {"text": envelope.text},
+        "raw_message": {
+            "text": envelope.text,
+            "normalized_text": normalized_text or envelope.text,
+        },
         "metadata": metadata,
         "replay": dict(envelope.replay),
         "raw_record": dict(raw_record),
@@ -629,6 +710,8 @@ def build_work_item(
             "reject_mixed_reports": False,
         },
     }
+    if isinstance(human_tolerance, Mapping) and human_tolerance:
+        work_payload["human_tolerance"] = dict(human_tolerance)
     if has_validation:
         work_payload["cleaned_text"] = cleaned_text
         work_payload["pre_ingestion_validation"] = dict(validation_result)
@@ -641,6 +724,7 @@ def _write_live_raw_record(
     envelope: InboundMessageEnvelope,
     raw_sha256: str,
     message_sha256: str,
+    human_tolerance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write the immutable raw text and companion metadata before orchestration."""
 
@@ -687,6 +771,7 @@ def _write_live_raw_record(
             raw_txt_path=raw_txt_path,
             raw_meta_path=raw_meta_path,
             processing_status="received",
+            human_tolerance=human_tolerance,
         ),
     )
     LOGGER.info(
@@ -733,11 +818,12 @@ def _raw_metadata_payload(
     raw_txt_path: Path,
     raw_meta_path: Path,
     processing_status: str,
+    human_tolerance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the bridge audit metadata persisted before orchestration."""
 
     sender = envelope.sender_name or envelope.sender_phone
-    return {
+    payload = {
         "source": envelope.source,
         "channel": envelope.channel,
         "payload_kind": envelope.payload_kind,
@@ -761,6 +847,9 @@ def _raw_metadata_payload(
         "processing_status": processing_status,
         "ingress_agent": SERVICE_NAME,
     }
+    if isinstance(human_tolerance, Mapping) and human_tolerance:
+        payload["human_tolerance"] = dict(human_tolerance)
+    return payload
 
 
 def _detect_duplicate(
@@ -821,7 +910,7 @@ def _success_response(
     duplicate = policy_guard.get("duplicate") is True
     duplicate_reason = _clean_text(policy_guard.get("reason")) if duplicate else None
 
-    return {
+    response = {
         "ok": True,
         "ingress": INGRESS_NAME,
         "workspace_root": str(REPO_ROOT),
@@ -839,6 +928,34 @@ def _success_response(
         "raw_meta_path": raw_record.get("raw_meta_path"),
         "outputs": outputs,
     }
+    response["conversation_response"] = _generate_conversation_response(
+        envelope=envelope,
+        outcome=_result_with_outputs(
+            result,
+            raw_record=raw_record,
+            raw_text=envelope.text,
+            branch_hint=envelope.group_name,
+        ),
+    )
+    return _with_conversation_response_output(response)
+
+
+def _with_conversation_response_output(response: dict[str, Any]) -> dict[str, Any]:
+    """Attach the persisted response artifact to the outward `outputs` list."""
+
+    outputs = response.get("outputs")
+    merged_outputs = list(outputs) if isinstance(outputs, list) else []
+
+    conversation_response = response.get("conversation_response")
+    if isinstance(conversation_response, Mapping):
+        response_output_path = _clean_text(conversation_response.get("json_path")) or _clean_text(
+            conversation_response.get("text_path")
+        )
+        if response_output_path is not None and response_output_path not in merged_outputs:
+            merged_outputs.append(response_output_path)
+
+    response["outputs"] = merged_outputs
+    return response
 
 
 def _outputs_from_result(result: AgentResult) -> list[str]:
@@ -1087,7 +1204,7 @@ def _validation_rejection_response(
 ) -> dict[str, Any]:
     """Return the bridge response for early validator rejection."""
 
-    return {
+    response = {
         "ok": True,
         "ingress": INGRESS_NAME,
         "workspace_root": str(REPO_ROOT),
@@ -1106,6 +1223,228 @@ def _validation_rejection_response(
         "raw_meta_path": raw_record.get("raw_meta_path"),
         "outputs": [],
     }
+    response["conversation_response"] = _generate_conversation_response(
+        envelope=envelope,
+        outcome={
+            "status": validation_result.get("status"),
+            "pre_ingestion_validation": dict(validation_result),
+            "classification": {"report_type": "unknown"},
+            "routing": {"classification": "unknown"},
+        },
+    )
+    return _with_conversation_response_output(response)
+
+
+def _command_response(
+    *,
+    envelope: InboundMessageEnvelope,
+    raw_record: dict[str, Any],
+    raw_sha256: str,
+    message_sha256: str,
+    command: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the bridge response for one recognized command message."""
+
+    response = {
+        "ok": True,
+        "ingress": INGRESS_NAME,
+        "workspace_root": str(REPO_ROOT),
+        "raw_written": raw_record["raw_written"],
+        "duplicate": False,
+        "replay": envelope.replay.get("is_replay") is True,
+        "command": True,
+        "command_name": command.get("command_name"),
+        "orchestrator_status": "skipped",
+        "route": None,
+        "agent": "command_handler",
+        "message_id": envelope.message_id,
+        "message_sha256": message_sha256,
+        "raw_sha256": raw_sha256,
+        "raw_txt_path": raw_record.get("raw_txt_path"),
+        "raw_meta_path": raw_record.get("raw_meta_path"),
+        "outputs": [],
+    }
+    response["conversation_response"] = _generate_command_response(command=command)
+    return _with_conversation_response_output(response)
+
+
+def _operational_query_response(
+    *,
+    envelope: InboundMessageEnvelope,
+    raw_record: dict[str, Any],
+    raw_sha256: str,
+    message_sha256: str,
+    intent: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the bridge response for one deterministic operational query."""
+
+    response = {
+        "ok": True,
+        "ingress": INGRESS_NAME,
+        "workspace_root": str(REPO_ROOT),
+        "raw_written": raw_record["raw_written"],
+        "duplicate": False,
+        "replay": envelope.replay.get("is_replay") is True,
+        "query": True,
+        "query_type": intent.get("query_type"),
+        "orchestrator_status": "skipped",
+        "route": "operational_query",
+        "agent": "taop_feedback",
+        "message_id": envelope.message_id,
+        "message_sha256": message_sha256,
+        "raw_sha256": raw_sha256,
+        "raw_txt_path": raw_record.get("raw_txt_path"),
+        "raw_meta_path": raw_record.get("raw_meta_path"),
+        "outputs": [],
+    }
+    response_context = build_operational_query_response(intent, Path(REPO_ROOT))
+    response_context.update(
+        {
+            "channel": envelope.channel,
+            "source_message_id": envelope.message_id,
+            "sender_phone": envelope.sender_phone,
+            "is_replay": envelope.replay.get("is_replay") is True,
+        }
+    )
+    response["conversation_response"] = _generate_direct_response_context(response_context)
+    return _with_conversation_response_output(response)
+
+
+def _generate_conversation_response(
+    *,
+    envelope: InboundMessageEnvelope,
+    outcome: AgentResult | Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Generate one auditable conversation reply without blocking the main flow."""
+
+    try:
+        return generate_whatsapp_conversation_reply(
+            outcome=outcome,
+            source_message_id=envelope.message_id,
+            sender_phone=envelope.sender_phone,
+            replay=envelope.replay.get("is_replay") is True,
+            source_root=REPO_ROOT,
+            dispatcher=_dispatch_outbound_response,
+        )
+    except Exception as exc:
+        LOGGER.exception(
+            "conversation response generation failed: message_id=%s sender_phone=%s error=%s",
+            envelope.message_id,
+            envelope.sender_phone,
+            exc,
+        )
+        return None
+
+
+def _generate_command_response(
+    *,
+    command: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Generate one auditable command reply without touching the report pipeline."""
+
+    try:
+        if _clean_text(command.get("command_name")) in {
+            "approve",
+            "reject",
+            "replay",
+            "list_proposals",
+            "show_proposal",
+            "approve_proposal",
+            "reject_proposal",
+            "simulate_proposal",
+            "apply_proposal",
+        }:
+            response_context = handle_supervisor_command(command, output_root=REPO_ROOT)
+        elif _clean_text(command.get("command_name")) == "ceo_query":
+            response_context = handle_ceo_query(command, output_root=REPO_ROOT)
+        elif _clean_text(command.get("command_name")) == "cross_branch_query":
+            response_context = handle_cross_branch_query(command, output_root=REPO_ROOT)
+        else:
+            response_context = handle_whatsapp_command(command, output_root=REPO_ROOT)
+        return dispatch_whatsapp_response(
+            response_context=response_context,
+            source_root=REPO_ROOT,
+            dispatcher=_dispatch_outbound_response,
+        )
+    except Exception as exc:
+        LOGGER.exception(
+            "command response generation failed: message_id=%s sender_phone=%s error=%s",
+            command.get("source_message_id"),
+            command.get("sender_phone"),
+            exc,
+        )
+        return None
+
+
+def _generate_direct_response_context(
+    response_context: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Persist and dispatch one deterministic response that bypasses report routing."""
+
+    try:
+        if response_context.get("is_replay") is not True:
+            store_sender_interaction(
+                sender_phone=_clean_text(response_context.get("sender_phone")),
+                response_context=response_context,
+                output_root=REPO_ROOT,
+            )
+        return dispatch_whatsapp_response(
+            response_context=response_context,
+            source_root=REPO_ROOT,
+            dispatcher=_dispatch_outbound_response,
+        )
+    except Exception as exc:
+        LOGGER.exception(
+            "direct response generation failed: message_id=%s sender_phone=%s error=%s",
+            response_context.get("source_message_id"),
+            response_context.get("sender_phone"),
+            exc,
+        )
+        return None
+
+
+def _dispatch_outbound_response(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Send one persisted response artifact through the guarded outbound sender."""
+
+    return send_whatsapp_text(
+        to=str(payload.get("sender_phone") or ""),
+        body=str(payload.get("response_text") or ""),
+        source_message_id=str(payload.get("source_message_id") or ""),
+        response_id=str(payload.get("response_id") or ""),
+        response_type=str(payload.get("response_type") or ""),
+        is_replay=payload.get("is_replay") is True,
+    )
+
+
+def _result_with_outputs(
+    result: AgentResult,
+    *,
+    raw_record: Mapping[str, Any] | None = None,
+    raw_text: str | None = None,
+    branch_hint: str | None = None,
+) -> AgentResult:
+    """Return one result copy augmented with inferred output paths for routing."""
+
+    payload = dict(result.payload) if isinstance(result.payload, dict) else {}
+    payload["outputs"] = _outputs_from_result(result)
+    if isinstance(raw_record, Mapping) and "raw_record" not in payload:
+        payload["raw_record"] = dict(raw_record)
+    raw_message = payload.get("raw_message")
+    if isinstance(raw_message, Mapping):
+        normalized_raw_message = dict(raw_message)
+    else:
+        normalized_raw_message = {}
+    if raw_text is not None and "text" not in normalized_raw_message:
+        normalized_raw_message["text"] = raw_text
+    if normalized_raw_message:
+        payload["raw_message"] = normalized_raw_message
+    if branch_hint is not None and "branch" not in payload and "branch_hint" not in payload:
+        payload["branch_hint"] = branch_hint
+    return AgentResult(
+        agent_name=result.agent_name,
+        payload=payload,
+        metadata=dict(result.metadata) if isinstance(result.metadata, dict) else {},
+    )
 
 
 def _validation_reason_codes(validation_result: Mapping[str, Any]) -> list[str]:

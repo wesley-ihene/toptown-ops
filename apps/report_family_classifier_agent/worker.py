@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import re
 from typing import Final
+import unicodedata
 
 from apps.header_normalizer_agent.worker import HeaderNormalizationResult
 
@@ -14,6 +15,14 @@ _NUMBERED_ENTRY_PATTERN = re.compile(r"^\s*(?:#\s*)?\d+\s*(?:[.)-]|\.\.)")
 _TILL_PATTERN = re.compile(r"\btill\s*#?\d+", flags=re.IGNORECASE)
 _ATTENDANCE_STATUS_LINE_PATTERN = re.compile(
     r"^\s*\d+\s*[.)-]?\s*.+?(?:=|[-:])\s*(?:pres(?:ent)?|off|on leave|leave|awn|absent|sick|suspend(?:ed)?|late)\b",
+    flags=re.IGNORECASE,
+)
+_ATTENDANCE_SHORT_STATUS_LINE_PATTERN = re.compile(
+    r"^\s*\d+\s*[.)-]?\s*.+?(?:=|[-:|/])\s*(?:p|a|o|l|off|leave|pres(?:ent)?|abs(?:ent)?|sick|suspend(?:ed)?|late)\b",
+    flags=re.IGNORECASE,
+)
+_ATTENDANCE_TITLE_PATTERN = re.compile(
+    r"^\s*(?:staffs?\s+)?attendance(?:\s+report)?\.?\s*$",
     flags=re.IGNORECASE,
 )
 _PERFORMANCE_STATUS_LINE_PATTERN = re.compile(
@@ -53,6 +62,7 @@ FAMILY_PATTERNS: Final[dict[str, tuple[str, ...]]] = {
     ),
     "attendance": (
         "staff attendance report",
+        "staffs attendance report",
         "staff attendance",
         "staffs attendance",
         "attendance report",
@@ -210,7 +220,7 @@ def classify_report_family(text: str, header_result: HeaderNormalizationResult) 
 def _normalize_text(value: str) -> str:
     """Normalize free-form text for conservative family marker matching."""
 
-    normalized = _NON_ALPHANUMERIC_PATTERN.sub(" ", value.casefold())
+    normalized = _NON_ALPHANUMERIC_PATTERN.sub(" ", _compatibility_fold(value).casefold())
     return " ".join(normalized.split())
 
 
@@ -238,15 +248,28 @@ def _family_heuristic_score(*, family: str, text: str, normalized_body: str) -> 
             evidence.append("body_marker:sales_customer_structure")
 
     elif family == "attendance":
+        if any(_ATTENDANCE_TITLE_PATTERN.match(line) for line in lines):
+            score += 0.2
+            evidence.append("body_marker:attendance_title_variant")
+        short_status_line_count = sum(1 for line in lines if _ATTENDANCE_SHORT_STATUS_LINE_PATTERN.search(line))
         attendance_line_count = sum(
-            1 for line in lines if _ATTENDANCE_STATUS_LINE_PATTERN.search(line) or (_CHECKMARK_PATTERN.search(line) and _NUMBERED_ENTRY_PATTERN.match(line))
+            1
+            for line in lines
+            if (
+                _ATTENDANCE_STATUS_LINE_PATTERN.search(line)
+                or _ATTENDANCE_SHORT_STATUS_LINE_PATTERN.search(line)
+                or (_CHECKMARK_PATTERN.search(line) and _NUMBERED_ENTRY_PATTERN.match(line))
+            )
         )
         if attendance_line_count >= 5:
             score += 0.3
             evidence.append(f"body_marker:attendance_entries:{attendance_line_count}")
         elif attendance_line_count >= 3:
-            score += 0.2
+            score += 0.25
             evidence.append(f"body_marker:attendance_entries:{attendance_line_count}")
+        if short_status_line_count >= 3:
+            score += 0.2
+            evidence.append(f"body_marker:attendance_short_status_entries:{short_status_line_count}")
         summary_hits = _matched_tokens(normalized_body, _ATTENDANCE_SUMMARY_MARKERS)
         if len(summary_hits) >= 3:
             score += 0.2
@@ -320,6 +343,13 @@ def _matched_tokens(normalized_body: str, markers: tuple[str, ...]) -> list[str]
         if marker in normalized_body and marker not in hits:
             hits.append(marker)
     return hits
+
+
+def _compatibility_fold(value: str) -> str:
+    """Return one ASCII-friendly representation for noisy Unicode report bodies."""
+
+    normalized = unicodedata.normalize("NFKD", value)
+    return "".join(character for character in normalized if not unicodedata.combining(character))
 
 
 def _detect_invalid_pricing_card_format(*, text: str, normalized_body: str) -> FamilyClassification | None:

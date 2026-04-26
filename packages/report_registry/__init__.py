@@ -72,6 +72,7 @@ FAMILY_BOUNDARY_HEADERS: Final[dict[str, tuple[str, ...]]] = {
         "supervisor control report",
         "supervisor control",
         "supervisor control summary",
+        "supervisor summary",
         "supervisor report",
         "supervisor checklist",
         "control report",

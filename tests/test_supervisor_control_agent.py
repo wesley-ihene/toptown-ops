@@ -175,6 +175,50 @@ def test_checklist_style_supervisor_report_uses_canonical_semantic_exception_typ
     assert result.payload["signal_weight"] == 0.4
 
 
+def test_checklist_style_supervisor_report_normalizes_fields_before_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        _supervisor_control_work_item(
+            lines=[
+                "Supervisor Control Report",
+                "Branch: Waigani Branch",
+                "Date: 07/04/2026",
+                "Cash variance: No",
+                "Staffing issues: Yes",
+                "Stock issues affecting sales: No",
+                "Pricing or system issues: Yes",
+                "Exceptions escalated to Ops Manager: no",
+            ]
+        )
+    )
+
+    assert [item["details"] for item in result.payload["items"]] == [
+        "Cash_Variance: NO",
+        "Staffing_Issues: YES",
+        "Stock_Issues: NO",
+        "Pricing_System_Issues: YES",
+        "Exceptions: NO",
+    ]
+    assert [item["action_taken"] for item in result.payload["items"]] == [
+        "Cash_Variance",
+        "Staffing_Issues",
+        "Stock_Issues",
+        "Pricing_System_Issues",
+        "Exceptions",
+    ]
+    assert [item["supervisor_confirmed"] for item in result.payload["items"]] == [
+        "NO",
+        "YES",
+        "NO",
+        "YES",
+        "NO",
+    ]
+
+
 def test_replay_marked_work_item_sets_source_to_replay(tmp_path: Path, monkeypatch) -> None:
     _patch_output_paths(tmp_path, monkeypatch)
 

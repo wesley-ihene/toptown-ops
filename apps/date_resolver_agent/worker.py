@@ -8,16 +8,13 @@ import re
 from apps.header_normalizer_agent.worker import HeaderNormalizationResult
 from packages.normalization.dates import normalize_report_date as normalize_strict_report_date
 
+_WEEKDAY_PATTERN = r"(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
 _DATE_PATTERN = re.compile(
-    r"\b(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+)?"
+    rf"\b(?:(?:{_WEEKDAY_PATTERN})[:\s,]*)?"
     r"(\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4})\b",
     flags=re.IGNORECASE,
 )
 _ISO_DATE_PATTERN = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
-_WEEKDAY_PREFIX_PATTERN = re.compile(
-    r"^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+",
-    flags=re.IGNORECASE,
-)
 
 
 @dataclass(slots=True)

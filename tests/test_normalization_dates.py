@@ -24,6 +24,20 @@ def test_normalize_report_date_is_idempotent_for_iso_values() -> None:
     assert result.succeeded is True
 
 
+def test_normalize_report_date_recovers_weekday_colon_date() -> None:
+    result = normalize_report_date("SUNDAY:26/04/26")
+
+    assert result.normalized_value == "2026-04-26"
+    assert result.succeeded is True
+
+
+def test_normalize_report_date_recovers_weekday_comma_date() -> None:
+    result = normalize_report_date("SATURDAY , 25/04/2026")
+
+    assert result.normalized_value == "2026-04-25"
+    assert result.succeeded is True
+
+
 def test_normalize_report_date_rejects_unrecoverable_input() -> None:
     result = normalize_report_date("Friday / / 26")
 

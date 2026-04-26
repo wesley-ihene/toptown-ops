@@ -128,6 +128,43 @@ def test_hr_agent_normalizes_branch_alias_date_and_short_statuses(tmp_path: Path
     assert not (signals_root / "lae_5th_street" / "2026-04-10" / "staff_attendance_report__lae_5th_street__2026-04-10.json").exists()
 
 
+def test_hr_agent_accepts_real_world_attendance_statuses_without_unknown_warning(tmp_path: Path, monkeypatch) -> None:
+    signals_root, outbox_path = _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        _attendance_work_item(
+            lines=[
+                "Branch: Waigani Branch",
+                "Date: 07/04/2026",
+                "John Doe - OFF",
+                "Mary Kila - LEAVE BREAK",
+                "Peter Ake - ABSENT WITH NOTICE",
+                "Lena Bina - TRANSFER",
+                "Total Staff: 4",
+            ]
+        )
+    )
+
+    warning_codes = {warning["code"] for warning in result.payload["warnings"]}
+    item_statuses = {item["staff_name"]: item["status"] for item in result.payload["items"]}
+
+    assert result.payload["status"] == "needs_review"
+    assert "unknown_attendance_status" not in warning_codes
+    assert item_statuses == {
+        "John Doe": "off",
+        "Mary Kila": "leave",
+        "Peter Ake": "awn",
+        "Lena Bina": "transfer",
+    }
+    assert result.payload["metrics"]["present_count"] == 0
+    assert result.payload["metrics"]["absent_count"] == 1
+    assert result.payload["metrics"]["off_count"] == 2
+    assert result.payload["metrics"]["leave_count"] == 1
+    assert len(sorted(outbox_path.glob("*.json"))) == 1
+    assert (tmp_path / "records" / "structured" / "hr_attendance" / "waigani" / "2026-04-07.json").exists()
+    assert not (signals_root / "waigani" / "2026-04-07" / "staff_attendance_report__waigani__2026-04-07.json").exists()
+
+
 def test_hr_parser_ignores_headers_and_summary_lines_in_numbered_attendance_format() -> None:
     parsed = parse_hr_work_item(
         WorkItem(

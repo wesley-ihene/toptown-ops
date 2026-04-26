@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from apps.hr_agent.normalizer import STATUS_BUCKETS
 from apps.hr_agent.parser import ParsedHrReport
 
 
@@ -28,19 +29,36 @@ def derive_attendance(parsed: ParsedHrReport) -> AttendanceSummary:
         "absent": 0,
         "off": 0,
         "leave": 0,
+        "sick": 0,
+        "suspend": 0,
+        "awn": 0,
+        "awon": 0,
+        "lay_off": 0,
+        "transfer": 0,
+        "late": 0,
+        "nil": 0,
+        "unknown": 0,
+    }
+    grouped_totals = {
+        "present": 0,
+        "absent": 0,
+        "off": 0,
+        "leave": 0,
         "unknown": 0,
     }
 
     for record in parsed.records:
         status_totals[record.status] = status_totals.get(record.status, 0) + 1
+        bucket = STATUS_BUCKETS.get(record.status, "unknown")
+        grouped_totals[bucket] = grouped_totals.get(bucket, 0) + 1
 
     total_staff_records = sum(status_totals.values())
     return AttendanceSummary(
         status_totals=status_totals,
-        present_count=status_totals["present"],
-        absent_count=status_totals["absent"],
-        off_count=status_totals["off"],
-        leave_count=status_totals["leave"],
+        present_count=grouped_totals["present"],
+        absent_count=grouped_totals["absent"],
+        off_count=grouped_totals["off"],
+        leave_count=grouped_totals["leave"],
         total_staff_records=total_staff_records,
-        active_count=status_totals["present"],
+        active_count=grouped_totals["present"],
     )

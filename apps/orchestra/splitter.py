@@ -22,11 +22,39 @@ ConcreteReportType = Literal[
 ]
 
 SECTION_MARKERS: Final[dict[ConcreteReportType, tuple[str, ...]]] = {
-    "sales": ("sales", "sales report"),
+    "sales": ("sales", "sales report", "day end sales report"),
     "staff_attendance": ("staff attendance", "attendance"),
     "bale_summary": ("bale summary", "bales"),
-    "supervisor_control": ("supervisor control", "supervisor"),
+    "supervisor_control": (
+        "supervisor control report",
+        "supervisor control summary",
+        "supervisor control",
+        "supervisor summary",
+        "supervisor report",
+    ),
 }
+
+_NON_ALPHANUMERIC_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
+_SECTION_SEPARATOR_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\s*[-=_*]{3,}\s*$")
+_SUPERVISOR_CONTROL_HEADER_ALIASES: Final[tuple[str, ...]] = (
+    "supervisor control report",
+    "supervisor control summary",
+    "supervisor control",
+    "supervisor summary",
+)
+_SUPERVISOR_SECTION_KEYWORDS: Final[tuple[str, ...]] = (
+    "floor check",
+    "cashier reconciled",
+    "store locked",
+    "checklist signed",
+    "cash variance",
+    "staffing issues",
+    "stock issues",
+    "pricing or system issues",
+    "supervisor confirmation",
+    "exception type",
+    "action taken",
+)
 
 
 @dataclass(slots=True)
@@ -107,24 +135,35 @@ def _expected_child_types(classification: Mapping[str, Any]) -> list[ConcreteRep
 def _extract_sections(raw_text: str) -> dict[ConcreteReportType, str]:
     """Extract explicit section blocks from raw text."""
 
+    raw_lines = raw_text.splitlines()
     collected_sections: dict[ConcreteReportType, list[str]] = {}
     current_type: ConcreteReportType | None = None
+    previous_nonempty_line = ""
 
-    for line in raw_text.splitlines():
-        header_match = _match_section_header(line)
+    for line_index, line in enumerate(raw_lines):
+        header_match = _match_section_header(
+            line,
+            previous_nonempty_line=previous_nonempty_line,
+            following_lines=raw_lines[line_index + 1 :],
+        )
         if header_match is not None:
             current_type, inline_text = header_match
             collected_sections.setdefault(current_type, [])
             if inline_text:
                 collected_sections[current_type].append(inline_text)
+            previous_nonempty_line = line.strip()
             continue
 
         if current_type is None:
+            if line.strip():
+                previous_nonempty_line = line.strip()
             continue
 
         stripped_line = line.strip()
-        if stripped_line:
+        if stripped_line and not _is_separator_line(stripped_line):
             collected_sections[current_type].append(stripped_line)
+        if stripped_line:
+            previous_nonempty_line = stripped_line
 
     return {
         report_type: "\n".join(lines).strip()
@@ -133,23 +172,118 @@ def _extract_sections(raw_text: str) -> dict[ConcreteReportType, str]:
     }
 
 
-def _match_section_header(line: str) -> tuple[ConcreteReportType, str] | None:
+def _match_section_header(
+    line: str,
+    *,
+    previous_nonempty_line: str = "",
+    following_lines: list[str] | None = None,
+) -> tuple[ConcreteReportType, str] | None:
     """Return a report type when a line starts with an explicit section marker."""
 
     stripped_line = line.strip()
-    if not stripped_line:
+    if not stripped_line or _is_separator_line(stripped_line):
         return None
 
+    normalized_line = _normalize_line(stripped_line)
     for report_type, markers in SECTION_MARKERS.items():
         for marker in markers:
             match = re.match(
-                rf"^{re.escape(marker)}(?:\s*[:\-]\s*(.*))?$",
+                rf"^{_marker_pattern(marker)}(?:\s*[:\-]\s*(.*))?$",
                 stripped_line,
                 flags=re.IGNORECASE,
             )
             if match:
                 return report_type, (match.group(1) or "").strip()
+            if report_type == "supervisor_control" and (
+                _looks_like_supervisor_control_title(normalized_line)
+                or _is_supervisor_control_separator_boundary(
+                    normalized_line=normalized_line,
+                    previous_nonempty_line=previous_nonempty_line,
+                    following_lines=following_lines or [],
+                )
+            ):
+                return report_type, ""
     return None
+
+
+def _marker_pattern(marker: str) -> str:
+    """Return a flexible regex for one section marker."""
+
+    return r"[\s\-]+".join(re.escape(part) for part in marker.split())
+
+
+def _looks_like_supervisor_control_title(normalized_line: str) -> bool:
+    """Return whether a line looks like a supervisor-control section title."""
+
+    if normalized_line in {*_SUPERVISOR_CONTROL_HEADER_ALIASES, "supervisor report"}:
+        return True
+    tokens = normalized_line.split()
+    if len(tokens) < 3 or tokens[:2] != ["supervisor", "control"]:
+        return False
+    return tokens[2] in {"report", "summary", "checklist"} and len(tokens) <= 4
+
+
+def _is_supervisor_control_separator_boundary(
+    *,
+    normalized_line: str,
+    previous_nonempty_line: str,
+    following_lines: list[str],
+) -> bool:
+    """Return whether a separator-bounded title begins a supervisor section."""
+
+    if not _is_separator_line(previous_nonempty_line):
+        return False
+    if not _looks_like_supervisor_control_alias(normalized_line):
+        return False
+    return _has_supervisor_section_keywords(following_lines)
+
+
+def _looks_like_supervisor_control_alias(normalized_line: str) -> bool:
+    """Return whether a normalized line starts with a known supervisor alias."""
+
+    if normalized_line in _SUPERVISOR_CONTROL_HEADER_ALIASES:
+        return True
+    return any(normalized_line.startswith(f"{alias} ") for alias in _SUPERVISOR_CONTROL_HEADER_ALIASES)
+
+
+def _has_supervisor_section_keywords(lines: list[str]) -> bool:
+    """Return whether the next section contains enough supervisor evidence."""
+
+    normalized_candidates: list[str] = []
+    for line in lines:
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        if _is_separator_line(stripped_line):
+            break
+        normalized_candidates.append(_normalize_line(stripped_line))
+        if len(normalized_candidates) >= 6:
+            break
+
+    if not normalized_candidates:
+        return False
+
+    normalized_text = " ".join(normalized_candidates)
+    matches = 0
+    for keyword in _SUPERVISOR_SECTION_KEYWORDS:
+        if keyword in normalized_text:
+            matches += 1
+        if matches >= 2:
+            return True
+    return False
+
+
+def _normalize_line(value: str) -> str:
+    """Return a stable comparison key for one candidate section line."""
+
+    normalized = _NON_ALPHANUMERIC_PATTERN.sub(" ", value.casefold())
+    return " ".join(normalized.split())
+
+
+def _is_separator_line(value: str) -> bool:
+    """Return whether a line is an explicit section separator."""
+
+    return bool(_SECTION_SEPARATOR_PATTERN.match(value.strip()))
 
 
 def _create_split_parent(work_item: WorkItem, *, child_count: int) -> WorkItem:

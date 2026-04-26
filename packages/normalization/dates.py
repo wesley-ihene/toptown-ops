@@ -7,23 +7,15 @@ import re
 
 from .types import AppliedRule, NormalizedValue
 
-_WEEKDAY_NAMES = (
-    "monday",
-    "tuesday",
-    "wednesday",
-    "thursday",
-    "friday",
-    "saturday",
-    "sunday",
-)
+_WEEKDAY_PATTERN = r"(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
 _EMBEDDED_DATE_PATTERN = re.compile(
     rf"(?P<full>(?:(?:date)\s*[:=-]\s*)?"
-    rf"(?:(?:{'|'.join(_WEEKDAY_NAMES)})\s*,?\s*)?"
+    rf"(?:(?:\b{_WEEKDAY_PATTERN}\b)[:\s,]*)?"
     r"(?P<date>\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}|\d{4}-\d{2}-\d{2}))",
     flags=re.IGNORECASE,
 )
 _LEADING_WEEKDAY_PATTERN = re.compile(
-    rf"^(?:{'|'.join(_WEEKDAY_NAMES)})\s*,?\s*",
+    rf"^(?:{_WEEKDAY_PATTERN})[:\s,]*",
     flags=re.IGNORECASE,
 )
 _DATE_LABEL_PREFIX_PATTERN = re.compile(r"^date\s*[:=-]\s*", flags=re.IGNORECASE)

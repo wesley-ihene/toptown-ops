@@ -50,6 +50,7 @@ import apps.supervisor_control_agent.record_store as supervisor_record_store
 from packages.record_store.naming import build_rejected_filename, safe_segment
 from packages.record_store.paths import get_raw_path, get_rejected_path, get_structured_path
 from packages.record_store.writer import write_json_file, write_text_file
+from packages.human_tolerance import analyze_human_whatsapp_text
 from packages.normalization.dates import normalize_report_date
 from packages.normalization.engine import normalize_report
 from packages.report_acceptance import decide_acceptance
@@ -112,6 +113,8 @@ class RawAuditRecord:
     replay_source: str | None = None
     replay_original_path: str | None = None
     raw_written_by_ingress: bool = False
+    normalized_text_hash: str | None = None
+    human_tolerance: dict[str, Any] = field(default_factory=dict)
     existing_metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -130,6 +133,7 @@ class OrchestratorAgentWorker:
 def process_work_item(work_item: WorkItem) -> AgentResult:
     """Return a routed downstream result or a safe structured failure."""
 
+    work_item = _with_human_tolerance(work_item)
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     raw_audit = _prepare_raw_audit_record(work_item)
     processing_text = _extract_processing_text(payload)
@@ -663,6 +667,10 @@ def _should_attempt_specialist_fallback(
         return False
     if specialist_report_type is None or not policy_decision.fallback_eligible:
         return False
+    if specialist_status == "needs_review" and specialist_report_type == "staff_attendance":
+        candidate_payload = result.payload if isinstance(result.payload, dict) else {}
+        if validate_report(specialist_report_type, candidate_payload).accepted:
+            return False
     classification_confidence = _classification_confidence(routed_work_item)
     if classification_confidence is None:
         return False
@@ -1267,6 +1275,7 @@ def _prepare_raw_audit_record(work_item: WorkItem) -> RawAuditRecord:
     metadata = _sanitize_metadata(payload.get("metadata"))
     replay = _sanitize_replay(payload.get("replay"))
     raw_record = _sanitize_raw_record(payload.get("raw_record"))
+    human_tolerance = _sanitize_human_tolerance(payload.get("human_tolerance"))
     raw_text = _extract_raw_text(payload)
     received_at = metadata.get("received_at") or _utc_timestamp()
     branch_hint = metadata.get("branch_hint")
@@ -1290,9 +1299,12 @@ def _prepare_raw_audit_record(work_item: WorkItem) -> RawAuditRecord:
         replay_source=replay.get("source"),
         replay_original_path=replay.get("original_path"),
         raw_written_by_ingress=raw_record.get("raw_written") is True,
+        normalized_text_hash=_sanitize_optional_text(human_tolerance.get("normalized_text_hash")),
+        human_tolerance=human_tolerance,
         existing_metadata=_load_existing_metadata_for_dedup(
             meta_path=meta_path,
             raw_sha256=raw_sha256,
+            normalized_text_hash=_sanitize_optional_text(human_tolerance.get("normalized_text_hash")),
             received_at=received_at,
             replay=replay.get("is_replay") is True,
         ),
@@ -1412,6 +1424,7 @@ def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
     """Create the minimal safe routed work item for exactly one specialist agent."""
 
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    human_tolerance = _sanitize_human_tolerance(payload.get("human_tolerance"))
     raw_message = payload.get("raw_message")
     text = _extract_processing_text(payload)
     metadata = _sanitize_metadata(payload.get("metadata"))
@@ -1451,6 +1464,9 @@ def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
             else None
         )
     )
+    human_tolerance_raw_date = _human_tolerance_raw_value(human_tolerance, field_name="date")
+    if human_tolerance_raw_date is not None:
+        normalized_raw_report_date = human_tolerance_raw_date
     review_reason = routing_decision.review_reason
     processing_status = routing_decision.processing_status
     if (
@@ -1511,6 +1527,9 @@ def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
     if raw_record:
         routed_payload["raw_record"] = raw_record
 
+    if human_tolerance:
+        routed_payload["human_tolerance"] = human_tolerance
+
     cleaned_text = payload.get("cleaned_text")
     if isinstance(cleaned_text, str):
         routed_payload["cleaned_text"] = cleaned_text
@@ -1562,6 +1581,8 @@ def _raw_metadata_payload(
         reasons = governance_outcome.get("reasons")
         payload["governance_reasons"] = list(reasons) if isinstance(reasons, list) else []
         payload["export_allowed"] = governance_outcome.get("export_allowed") is True
+    if audit.human_tolerance:
+        payload["human_tolerance"] = dict(audit.human_tolerance)
     if extra_metadata:
         payload.update(extra_metadata)
     return payload
@@ -1651,6 +1672,57 @@ def _sanitize_pre_ingestion_validation(validation: object) -> dict[str, Any]:
     return dict(validation)
 
 
+def _sanitize_human_tolerance(value: object) -> dict[str, Any]:
+    """Keep one human-tolerance payload only when it follows the expected shape."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(value)
+
+
+def _human_tolerance_raw_value(human_tolerance: Mapping[str, Any], *, field_name: str) -> str | None:
+    """Return one original raw correction value from human-tolerance metadata."""
+
+    corrections = human_tolerance.get("corrections")
+    if not isinstance(corrections, list):
+        return None
+    for correction in corrections:
+        if not isinstance(correction, Mapping):
+            continue
+        field = correction.get("field")
+        raw_value = correction.get("raw_value")
+        if field == field_name and isinstance(raw_value, str) and raw_value.strip():
+            return raw_value.strip()
+    return None
+
+
+def _with_human_tolerance(work_item: WorkItem) -> WorkItem:
+    """Attach normalized human-intake metadata before duplicate checks or routing."""
+
+    payload = work_item.payload if isinstance(work_item.payload, dict) else {}
+    raw_message = payload.get("raw_message")
+    if not isinstance(raw_message, Mapping):
+        return work_item
+
+    raw_text = raw_message.get("text")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return work_item
+
+    normalized_text = raw_message.get("normalized_text")
+    human_tolerance = _sanitize_human_tolerance(payload.get("human_tolerance"))
+    if not isinstance(normalized_text, str) or not normalized_text.strip() or not human_tolerance:
+        analyzed = analyze_human_whatsapp_text(raw_text)
+        normalized_text = analyzed.normalized_text or raw_text
+        human_tolerance = analyzed.to_payload()
+
+    safe_raw_message = dict(raw_message)
+    safe_raw_message["normalized_text"] = normalized_text
+    safe_payload = dict(payload)
+    safe_payload["raw_message"] = safe_raw_message
+    safe_payload["human_tolerance"] = human_tolerance
+    return WorkItem(kind=work_item.kind, payload=safe_payload)
+
+
 def _reject_mixed_reports(payload: dict[str, Any]) -> bool:
     """Return whether ingress policy requires mixed reports to be rejected."""
 
@@ -1694,6 +1766,7 @@ def _load_existing_metadata_for_dedup(
     *,
     meta_path: Path,
     raw_sha256: str,
+    normalized_text_hash: str | None,
     received_at: str,
     replay: bool,
 ) -> dict[str, Any]:
@@ -1711,6 +1784,7 @@ def _load_existing_metadata_for_dedup(
         _candidate_duplicate_metadata(
             payload=exact_metadata,
             raw_sha256=raw_sha256,
+            normalized_text_hash=normalized_text_hash,
             current_received_at=current_received_at,
         )
         if _is_reusable_exact_metadata(exact_metadata)
@@ -1724,6 +1798,7 @@ def _load_existing_metadata_for_dedup(
         candidate_match = _candidate_duplicate_metadata(
             payload=candidate_payload,
             raw_sha256=raw_sha256,
+            normalized_text_hash=normalized_text_hash,
             current_received_at=current_received_at,
         )
         if candidate_match is None:
@@ -1738,11 +1813,17 @@ def _candidate_duplicate_metadata(
     *,
     payload: dict[str, Any],
     raw_sha256: str,
+    normalized_text_hash: str | None,
     current_received_at: datetime,
 ) -> tuple[datetime, dict[str, Any]] | None:
     """Return duplicate-candidate metadata when the hash matches inside the dedup window."""
 
-    if _sanitize_optional_text(payload.get("raw_sha256")) != raw_sha256:
+    existing_raw_sha256 = _sanitize_optional_text(payload.get("raw_sha256"))
+    existing_human_tolerance = _mapping(payload.get("human_tolerance"))
+    existing_normalized_hash = _sanitize_optional_text(existing_human_tolerance.get("normalized_text_hash"))
+    raw_match = existing_raw_sha256 == raw_sha256
+    normalized_match = normalized_text_hash is not None and existing_normalized_hash == normalized_text_hash
+    if not raw_match and not normalized_match:
         return None
 
     existing_received_at = _parse_iso8601_timestamp(payload.get("received_at"))
@@ -1802,6 +1883,11 @@ def _extract_processing_text(payload: dict[str, object]) -> str:
     cleaned_text = payload.get("cleaned_text")
     if isinstance(cleaned_text, str):
         return cleaned_text
+    raw_message = payload.get("raw_message")
+    if isinstance(raw_message, Mapping):
+        normalized_text = raw_message.get("normalized_text")
+        if isinstance(normalized_text, str):
+            return normalized_text
     return _extract_raw_text(payload)
 
 

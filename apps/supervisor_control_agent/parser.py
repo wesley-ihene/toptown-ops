@@ -22,6 +22,13 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "supervisor_confirmed": ("supervisor confirmed", "confirmed"),
     "notes": ("notes", "note", "remarks", "remark"),
 }
+_CHECKLIST_FIELD_NORMALIZATIONS: dict[str, str] = {
+    "cash variance": "Cash_Variance",
+    "staffing issues": "Staffing_Issues",
+    "stock issues affecting sales": "Stock_Issues",
+    "pricing or system issues": "Pricing_System_Issues",
+    "exceptions escalated to ops manager": "Exceptions",
+}
 
 
 @dataclass(slots=True)
@@ -53,7 +60,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
     """Parse one routed supervisor-control work item into a structured view."""
 
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
-    raw_text = _raw_text(payload)
+    raw_text = _normalize_input_text(_raw_text(payload))
     parsed = ParsedSupervisorControlReport()
     current_entry: ParsedExceptionEntry | None = None
 
@@ -151,6 +158,25 @@ def _raw_text(payload: dict[str, Any]) -> str:
     return text.strip()
 
 
+def _normalize_input_text(text: str) -> str:
+    """Return raw supervisor-control input with canonical checklist labels."""
+
+    return "\n".join(_normalize_input_line(line) for line in text.splitlines())
+
+
+def _normalize_input_line(line: str) -> str:
+    """Return one raw input line with canonical field labels and YES/NO values."""
+
+    stripped_line = line.strip()
+    if ":" not in stripped_line:
+        return stripped_line
+
+    key, value = stripped_line.split(":", 1)
+    normalized_key = _normalize_checklist_field_name(key.strip())
+    normalized_value = _normalize_yes_no_value(value.strip())
+    return f"{normalized_key}: {normalized_value}" if normalized_value else f"{normalized_key}:"
+
+
 def _is_title_line(line: str) -> bool:
     lowered = _normalize_key(line)
     return "supervisor control report" in lowered or lowered == "supervisor control report"
@@ -169,6 +195,23 @@ def _parse_key_value(line: str) -> tuple[str, str] | None:
         if raw_key in {_normalize_key(alias) for alias in aliases}:
             return canonical_name, raw_value
     return None
+
+
+def _normalize_checklist_field_name(value: str) -> str:
+    """Return the canonical checklist field name when one is configured."""
+
+    return _CHECKLIST_FIELD_NORMALIZATIONS.get(_normalize_key(value), value.strip())
+
+
+def _normalize_yes_no_value(value: str) -> str:
+    """Return canonical YES/NO tokens for exact yes-or-no values."""
+
+    normalized = _normalize_key(value)
+    if normalized == "yes":
+        return "YES"
+    if normalized == "no":
+        return "NO"
+    return value.strip()
 
 
 def _synthesize_exception_entry(line: str) -> ParsedExceptionEntry | None:

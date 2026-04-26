@@ -20,6 +20,13 @@ def test_normalize_branch_passes_through_canonical_slug() -> None:
     assert result.succeeded is True
 
 
+def test_normalize_branch_resolves_plain_lae_5th_street_name() -> None:
+    result = normalize_branch("LAE 5th Street")
+
+    assert result.normalized_value == "lae_5th_street"
+    assert result.metadata["matched_alias"] == "lae 5th street"
+
+
 def test_normalize_branch_resolves_stylized_unicode_header() -> None:
     result = normalize_branch("𝕎𝔸𝕀𝔾𝔸ℕ𝕀 𝔹ℝ𝔸ℕℂℍ")
 

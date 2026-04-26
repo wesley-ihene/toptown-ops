@@ -29,6 +29,7 @@ _SUMMARY_METRIC_ALIASES = {
     "staff present": "staff_present",
     "staffs present": "staff_present",
     "total staffs present": "staff_present",
+    "total staffs press": "staff_present",
     "present": "staff_present",
     "p": "staff_present",
     "not at work": "not_at_work",
@@ -37,29 +38,45 @@ _SUMMARY_METRIC_ALIASES = {
     "day off": "staff_off",
     "off": "staff_off",
     "off duty": "staff_off",
-    "staffs lay off": "staff_off",
+    "staffs lay off": "lay_off",
+    "lay off": "lay_off",
+    "staffs late": "late",
+    "late": "late",
     "suspend": "suspend",
     "suspended": "suspend",
     "staffs suspend": "suspend",
     "absent": "absent",
-    "staffs absent with notice": "absent",
-    "staffs absent without": "absent",
+    "staffs absent with notice": "absent_with_notice",
+    "absent with notice": "absent_with_notice",
+    "staffs absent without": "absent_without_notice",
+    "staffs absent without notice": "absent_without_notice",
+    "absent without": "absent_without_notice",
+    "absent without notice": "absent_without_notice",
     "leave": "leave",
+    "staffs on leave": "leave",
     "staffs on leavebreak": "leave",
     "on leave": "leave",
     "on leavebreak": "leave",
     "sick": "sick",
     "staffs sick": "sick",
+    "staffs transfer": "transfer",
+    "transfer": "transfer",
 }
 _DECLARED_STATUS_KEYS = {
     "staff_present": "present",
     "not_at_work": "not_at_work",
     "staff_off": "off",
+    "lay_off": "lay_off",
+    "late": "late",
     "suspend": "suspend",
     "absent": "absent",
+    "absent_with_notice": "awn",
+    "absent_without_notice": "awon",
     "leave": "leave",
     "sick": "sick",
+    "transfer": "transfer",
 }
+_NIL_COUNT_VALUES = {"nil", "nill"}
 _NON_RECORD_PREFIXES = (
     "top town",
     "branch",
@@ -262,7 +279,7 @@ def _parse_summary_count_line(line: str) -> tuple[str, int] | None:
 
     raw_key = match.group(1).strip()
     raw_value = match.group(2).strip()
-    count = parse_count(raw_value)
+    count = _parse_summary_count(raw_value)
     if count is None:
         return None
 
@@ -369,4 +386,11 @@ def _clean_text(value: str) -> str | None:
 
 
 def _normalize_key(value: str) -> str:
-    return " ".join(value.casefold().replace("_", " ").split())
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold().replace("_", " ")).split())
+
+
+def _parse_summary_count(raw_value: str) -> int | None:
+    normalized = _normalize_key(raw_value)
+    if normalized in _NIL_COUNT_VALUES:
+        return 0
+    return parse_count(raw_value)

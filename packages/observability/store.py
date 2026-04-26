@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping as MappingABC
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -433,6 +434,249 @@ def record_learning_event(
     return str(_daily_artifact_path("learning", report_date, output_root=output_root))
 
 
+def record_conversation_reply_event(
+    *,
+    report_date: str,
+    branch: str | None,
+    response_type: str,
+    dispatch_status: str,
+    source_message_id: str | None = None,
+    channel: str = "whatsapp",
+    governance_status: str | None = None,
+    report_type: str | None = None,
+    replay_suppressed: bool | None = None,
+    reason: str | None = None,
+    conversation_date: str | None = None,
+    outcome: str | None = None,
+    output_root: str | Path | None = None,
+) -> str:
+    """Append one conversation-reply observability event into the daily artifact."""
+
+    payload = load_daily_artifact("conversation_replies", report_date, output_root=output_root) or {
+        "report_date": report_date,
+        "summary": {
+            "conversation_replies_generated": 0,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 0,
+        },
+        "events": [],
+    }
+    summary = payload.setdefault("summary", {})
+    for field_name in (
+        "conversation_replies_generated",
+        "conversation_replies_sent",
+        "conversation_replies_failed",
+        "conversation_replies_suppressed",
+    ):
+        summary[field_name] = int(summary.get(field_name, 0))
+
+    summary["conversation_replies_generated"] += 1
+    normalized_dispatch_status = dispatch_status.strip() if isinstance(dispatch_status, str) else ""
+    suppressed = (
+        bool(replay_suppressed)
+        if replay_suppressed is not None
+        else normalized_dispatch_status.startswith("suppressed")
+    )
+
+    if normalized_dispatch_status == "sent":
+        summary["conversation_replies_sent"] += 1
+    elif normalized_dispatch_status == "failed":
+        summary["conversation_replies_failed"] += 1
+    elif suppressed:
+        summary["conversation_replies_suppressed"] += 1
+
+    events = payload.setdefault("events", [])
+    if isinstance(events, list):
+        events.append(
+            {
+                "branch": branch or "unknown",
+                "response_type": response_type,
+                "dispatch_status": normalized_dispatch_status,
+                "outcome": outcome.strip() if isinstance(outcome, str) and outcome.strip() else _reply_outcome(normalized_dispatch_status),
+                "source_message_id": source_message_id,
+                "channel": channel.strip() if isinstance(channel, str) and channel.strip() else "whatsapp",
+                "governance_status": governance_status.strip() if isinstance(governance_status, str) and governance_status.strip() else None,
+                "report_type": report_type.strip() if isinstance(report_type, str) and report_type.strip() else None,
+                "reason": reason.strip() if isinstance(reason, str) and reason.strip() else None,
+                "date": conversation_date.strip() if isinstance(conversation_date, str) and conversation_date.strip() else None,
+                "replay_suppressed": suppressed,
+            }
+        )
+
+    _write_daily_artifact("conversation_replies", report_date, payload, output_root=output_root)
+
+    summary_payload = _load_summary(report_date, output_root=output_root)
+    summary_payload["conversation_replies"] = {
+        "conversation_replies_generated": int(summary["conversation_replies_generated"]),
+        "conversation_replies_sent": int(summary["conversation_replies_sent"]),
+        "conversation_replies_failed": int(summary["conversation_replies_failed"]),
+        "conversation_replies_suppressed": int(summary["conversation_replies_suppressed"]),
+    }
+    _write_summary(report_date, summary_payload, output_root=output_root)
+    return str(_daily_artifact_path("conversation_replies", report_date, output_root=output_root))
+
+
+def _reply_outcome(dispatch_status: str) -> str:
+    if dispatch_status == "failed":
+        return "failed"
+    if dispatch_status.startswith("suppressed"):
+        return "fallback"
+    return "success"
+
+
+def record_conversation_llm_event(
+    *,
+    report_date: str,
+    outcome: str,
+    response_type: str | None = None,
+    channel: str = "whatsapp",
+    branch: str | None = None,
+    report_type: str | None = None,
+    replay_suppressed: bool = False,
+    reason: str | None = None,
+    output_root: str | Path | None = None,
+) -> str:
+    """Append one conversation-LLM observability event into the daily artifact."""
+
+    payload = load_daily_artifact("conversation_llm", report_date, output_root=output_root) or {
+        "report_date": report_date,
+        "summary": {
+            "conversation_llm_calls": 0,
+            "conversation_llm_failures": 0,
+            "conversation_llm_fallbacks": 0,
+            "conversation_llm_skipped": 0,
+        },
+        "events": [],
+    }
+    summary = payload.setdefault("summary", {})
+    for field_name in (
+        "conversation_llm_calls",
+        "conversation_llm_failures",
+        "conversation_llm_fallbacks",
+        "conversation_llm_skipped",
+    ):
+        summary[field_name] = int(summary.get(field_name, 0))
+
+    normalized_outcome = outcome.strip() if isinstance(outcome, str) else ""
+    if normalized_outcome == "called":
+        summary["conversation_llm_calls"] += 1
+    elif normalized_outcome == "failed":
+        summary["conversation_llm_failures"] += 1
+    elif normalized_outcome == "fallback":
+        summary["conversation_llm_fallbacks"] += 1
+    elif normalized_outcome == "skipped":
+        summary["conversation_llm_skipped"] += 1
+
+    events = payload.setdefault("events", [])
+    if isinstance(events, list):
+        events.append(
+            {
+                "outcome": normalized_outcome,
+                "response_type": response_type.strip() if isinstance(response_type, str) and response_type.strip() else None,
+                "channel": channel.strip() if isinstance(channel, str) and channel.strip() else "whatsapp",
+                "branch": branch.strip() if isinstance(branch, str) and branch.strip() else None,
+                "report_type": report_type.strip() if isinstance(report_type, str) and report_type.strip() else None,
+                "replay_suppressed": bool(replay_suppressed),
+                "reason": reason.strip() if isinstance(reason, str) and reason.strip() else None,
+            }
+        )
+
+    _write_daily_artifact("conversation_llm", report_date, payload, output_root=output_root)
+
+    summary_payload = _load_summary(report_date, output_root=output_root)
+    summary_payload["conversation_llm"] = {
+        "conversation_llm_calls": int(summary["conversation_llm_calls"]),
+        "conversation_llm_failures": int(summary["conversation_llm_failures"]),
+        "conversation_llm_fallbacks": int(summary["conversation_llm_fallbacks"]),
+        "conversation_llm_skipped": int(summary["conversation_llm_skipped"]),
+    }
+    _write_summary(report_date, summary_payload, output_root=output_root)
+    return str(_daily_artifact_path("conversation_llm", report_date, output_root=output_root))
+
+
+def record_nl_intent_event(
+    *,
+    report_date: str,
+    outcome: str,
+    message_id: str | None = None,
+    sender_phone: str | None = None,
+    normalized_message: str | None = None,
+    intent: str | None = None,
+    confidence: float | None = None,
+    reason: str | None = None,
+    output_root: str | Path | None = None,
+) -> str:
+    """Append one NL-intent observability event into the daily artifact."""
+
+    payload = load_daily_artifact("nl_intent", report_date, output_root=output_root) or {
+        "report_date": report_date,
+        "summary": {
+            "nl_intent_calls": 0,
+            "nl_intent_success": 0,
+            "nl_intent_rejected": 0,
+            "nl_intent_low_confidence": 0,
+            "nl_intent_skipped": 0,
+            "nl_intent_mismatch": 0,
+        },
+        "events": [],
+    }
+    summary = payload.setdefault("summary", {})
+    for field_name in (
+        "nl_intent_calls",
+        "nl_intent_success",
+        "nl_intent_rejected",
+        "nl_intent_low_confidence",
+        "nl_intent_skipped",
+        "nl_intent_mismatch",
+    ):
+        summary[field_name] = int(summary.get(field_name, 0))
+
+    normalized_outcome = outcome.strip() if isinstance(outcome, str) else ""
+    if normalized_outcome != "skipped":
+        summary["nl_intent_calls"] += 1
+    if normalized_outcome == "success":
+        summary["nl_intent_success"] += 1
+    elif normalized_outcome == "rejected":
+        summary["nl_intent_rejected"] += 1
+    elif normalized_outcome == "low_confidence":
+        summary["nl_intent_low_confidence"] += 1
+    elif normalized_outcome == "skipped":
+        summary["nl_intent_skipped"] += 1
+    elif normalized_outcome == "mismatch":
+        summary["nl_intent_mismatch"] += 1
+
+    events = payload.setdefault("events", [])
+    if isinstance(events, list):
+        events.append(
+            {
+                "outcome": normalized_outcome,
+                "message_id": message_id.strip() if isinstance(message_id, str) and message_id.strip() else None,
+                "sender_phone": sender_phone.strip() if isinstance(sender_phone, str) and sender_phone.strip() else None,
+                "normalized_message": normalized_message.strip()
+                if isinstance(normalized_message, str) and normalized_message.strip()
+                else None,
+                "intent": intent.strip() if isinstance(intent, str) and intent.strip() else None,
+                "confidence": _bounded_confidence(confidence),
+                "reason": reason.strip() if isinstance(reason, str) and reason.strip() else None,
+            }
+        )
+
+    _write_daily_artifact("nl_intent", report_date, payload, output_root=output_root)
+
+    summary_payload = _load_summary(report_date, output_root=output_root)
+    summary_payload["nl_intent"] = {
+        "nl_intent_calls": int(summary["nl_intent_calls"]),
+        "nl_intent_success": int(summary["nl_intent_success"]),
+        "nl_intent_rejected": int(summary["nl_intent_rejected"]),
+        "nl_intent_low_confidence": int(summary["nl_intent_low_confidence"]),
+        "nl_intent_skipped": int(summary["nl_intent_skipped"]),
+        "nl_intent_mismatch": int(summary["nl_intent_mismatch"]),
+    }
+    _write_summary(report_date, summary_payload, output_root=output_root)
+    return str(_daily_artifact_path("nl_intent", report_date, output_root=output_root))
+
+
 def refresh_feedback_summary(
     *,
     report_date: str,
@@ -528,6 +772,26 @@ def _load_summary(report_date: str, *, output_root: str | Path | None = None) ->
             "threshold_recommendations_generated": 0,
             "format_drift_patterns_detected": 0,
         },
+        "conversation_replies": {
+            "conversation_replies_generated": 0,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 0,
+        },
+        "conversation_llm": {
+            "conversation_llm_calls": 0,
+            "conversation_llm_failures": 0,
+            "conversation_llm_fallbacks": 0,
+            "conversation_llm_skipped": 0,
+        },
+        "nl_intent": {
+            "nl_intent_calls": 0,
+            "nl_intent_success": 0,
+            "nl_intent_rejected": 0,
+            "nl_intent_low_confidence": 0,
+            "nl_intent_skipped": 0,
+            "nl_intent_mismatch": 0,
+        },
     }
 
 
@@ -611,6 +875,20 @@ def _normalized_processing_outcome(outcome: str) -> str:
     if outcome in {"rejected", "invalid_input", "duplicate", "conflict_blocked"}:
         return "rejected"
     return outcome
+
+
+def _bounded_confidence(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    if confidence < 0.0:
+        return 0.0
+    if confidence > 1.0:
+        return 1.0
+    return round(confidence, 4)
 
 
 def _record_latency_artifact(

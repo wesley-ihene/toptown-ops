@@ -18,7 +18,34 @@ from .common import (
 from .contracts import ValidationResult
 from .rejection_codes import INVALID_COUNT_MISMATCH, INVALID_STATUS
 
-_ALLOWED_STATUSES = {"present", "absent", "off", "leave"}
+_ALLOWED_STATUSES = {
+    "present",
+    "absent",
+    "off",
+    "leave",
+    "sick",
+    "suspend",
+    "awn",
+    "awon",
+    "lay_off",
+    "transfer",
+    "late",
+    "nil",
+}
+_STATUS_BUCKETS = {
+    "present": "present",
+    "absent": "absent",
+    "off": "off",
+    "leave": "leave",
+    "sick": "absent",
+    "suspend": "absent",
+    "awn": "absent",
+    "awon": "absent",
+    "late": "absent",
+    "lay_off": "off",
+    "transfer": "off",
+    "nil": "off",
+}
 
 
 def validate_attendance(payload: Mapping[str, Any]) -> ValidationResult:
@@ -38,7 +65,7 @@ def validate_attendance(payload: Mapping[str, Any]) -> ValidationResult:
     off_count = add_non_negative_number(rejections, value=metrics.get("off_count"), field="metrics.off_count")
     leave_count = add_non_negative_number(rejections, value=metrics.get("leave_count"), field="metrics.leave_count")
 
-    counted_statuses = {status: 0 for status in _ALLOWED_STATUSES}
+    counted_statuses = {"present": 0, "absent": 0, "off": 0, "leave": 0}
     for index, item in enumerate(items):
         rejections.extend(require_fields(item, ("staff_name", "status"), item_prefix=f"items[{index}]"))
         status_value = item.get("status")
@@ -47,12 +74,12 @@ def validate_attendance(payload: Mapping[str, Any]) -> ValidationResult:
             rejections.append(
                 make_rejection(
                     code=INVALID_STATUS,
-                    message="Attendance status must be present, absent, off, or leave.",
+                    message="Attendance status must use one supported attendance value.",
                     field=f"items[{index}].status",
                 )
             )
         elif normalized_status:
-            counted_statuses[normalized_status] += 1
+            counted_statuses[_STATUS_BUCKETS[normalized_status]] += 1
 
     if items and not counts_match(total_staff_listed, len(items)):
         rejections.append(
