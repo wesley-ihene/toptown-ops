@@ -9,6 +9,8 @@ from typing import Any
 
 from packages.record_store.writer import ensure_directory, write_json_file, write_text_file
 
+_UNSET = object()
+
 
 def write_response_artifacts(
     payload: dict[str, Any],
@@ -87,6 +89,7 @@ def update_response_artifact_dispatch(
     provider_message_id: str | None = None,
     dispatch_error: str | None = None,
     http_status: int | str | None = None,
+    dispatched_at: str | None | object = _UNSET,
     output_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Update dispatch metadata for one persisted response artifact."""
@@ -104,6 +107,10 @@ def update_response_artifact_dispatch(
     updated_payload["provider_message_id"] = _string_or_none(provider_message_id)
     updated_payload["dispatch_error"] = _string_or_none(dispatch_error)
     updated_payload["http_status"] = _int_or_none(http_status)
+    if dispatched_at is _UNSET:
+        updated_payload["dispatched_at"] = _string_or_none(updated_payload.get("dispatched_at"))
+    else:
+        updated_payload["dispatched_at"] = _string_or_none(dispatched_at)
     return write_response_artifacts(updated_payload, output_root=output_root, overwrite=True)
 
 
@@ -128,6 +135,7 @@ def _normalized_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "provider_message_id": _string_or_none(payload.get("provider_message_id")),
         "dispatch_error": _string_or_none(payload.get("dispatch_error") or payload.get("error")),
         "http_status": _int_or_none(payload.get("http_status")),
+        "dispatched_at": _string_or_none(payload.get("dispatched_at")),
         "feedback": _feedback_or_none(payload.get("feedback")),
     }
 

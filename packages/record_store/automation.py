@@ -453,6 +453,7 @@ def dispatch_whatsapp_response(
     dispatch_error = None
     provider_message_id = None
     http_status = None
+    artifact_updated = False
 
     if is_replay and not _replay_responses_enabled():
         dispatch_status = "suppressed"
@@ -480,6 +481,7 @@ def dispatch_whatsapp_response(
             else:
                 dispatch_status = _normalized_dispatch_status(dispatch_result)
                 provider_message_id, dispatch_error, http_status = _dispatch_result_fields(dispatch_result)
+                artifact_updated = _dispatch_result_artifact_updated(dispatch_result)
     elif resolved_mode == "live" and dispatcher is not None:
         try:
             dispatch_result = dispatcher(dispatch_payload)
@@ -497,10 +499,15 @@ def dispatch_whatsapp_response(
         else:
             dispatch_status = _normalized_dispatch_status(dispatch_result)
             provider_message_id, dispatch_error, http_status = _dispatch_result_fields(dispatch_result)
+            artifact_updated = _dispatch_result_artifact_updated(dispatch_result)
     elif resolved_mode == "live":
         dispatch_status = "generated"
 
-    if dispatch_status != "generated" or provider_message_id is not None or dispatch_error is not None or http_status is not None:
+    if artifact_updated:
+        refreshed_artifact = load_response_artifact(artifact["response_id"], output_root=source_repo_root)
+        if refreshed_artifact is not None:
+            artifact = refreshed_artifact
+    elif dispatch_status != "generated" or provider_message_id is not None or dispatch_error is not None or http_status is not None:
         artifact = update_response_artifact_dispatch(
             artifact["response_id"],
             dispatch_status=dispatch_status,
@@ -874,6 +881,12 @@ def _dispatch_result_fields(result: Any) -> tuple[str | None, str | None, int | 
         _string_or_none(result.get("dispatch_error") or result.get("error")),
         _int_or_none(result.get("http_status")),
     )
+
+
+def _dispatch_result_artifact_updated(result: Any) -> bool:
+    if not isinstance(result, Mapping):
+        return False
+    return result.get("artifact_updated") is True
 
 
 def _int_or_none(value: object) -> int | None:

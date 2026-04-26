@@ -31,6 +31,7 @@ from apps.command_router.worker import route_whatsapp_command
 from apps.ceo_router.worker import handle_ceo_query
 from apps.cross_branch_router.worker import handle_cross_branch_query
 from apps.nl_intent_router.worker import route_natural_language_command
+from apps.outbound_reply_agent import dispatch_outbound_reply
 from apps.pre_ingestion_validator import validate_inbound_text
 from apps.supervisor_commands.worker import handle_supervisor_command
 import apps.orchestrator_agent.worker as orchestrator_worker
@@ -45,7 +46,6 @@ from packages.record_store.writer import write_json_file, write_text_file
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
 from packages.taop_feedback import build_operational_query_response, detect_message_intent
-from packages.whatsapp_outbound import send_whatsapp_text
 
 load_dotenv(REPO_ROOT / ".env.whatsapp_bridge")
 
@@ -1404,15 +1404,11 @@ def _generate_direct_response_context(
 
 
 def _dispatch_outbound_response(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Send one persisted response artifact through the guarded outbound sender."""
+    """Send one persisted response artifact through the outbound reply agent."""
 
-    return send_whatsapp_text(
-        to=str(payload.get("sender_phone") or ""),
-        body=str(payload.get("response_text") or ""),
-        source_message_id=str(payload.get("source_message_id") or ""),
-        response_id=str(payload.get("response_id") or ""),
-        response_type=str(payload.get("response_type") or ""),
-        is_replay=payload.get("is_replay") is True,
+    return dispatch_outbound_reply(
+        dict(payload),
+        output_root=REPO_ROOT,
     )
 
 
