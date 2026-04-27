@@ -547,7 +547,7 @@ def test_live_webhook_fans_out_mixed_report_when_split_is_safe(
     assert len(rejected_text_paths) == 0
     assert len(rejected_meta_paths) == 0
     assert (tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json").exists()
-    assert (tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-07.json").exists()
+    assert (tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json").exists()
 
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["detected_report_type"] == "mixed"
@@ -670,7 +670,9 @@ def _patch_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "INTELLIGENCE_DIR", records_dir / "intelligence")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
+    monkeypatch.setattr(record_paths, "DUPLICATES_DIR", records_dir / "duplicates" / "whatsapp")
     monkeypatch.setattr(record_paths, "REVIEW_DIR", records_dir / "review")
     monkeypatch.setattr(record_paths, "PROVENANCE_DIR", records_dir / "provenance")
     monkeypatch.setattr(record_paths, "OBSERVABILITY_DIR", records_dir / "observability")
@@ -688,6 +690,9 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _write_structured_record(root: Path, signal_type: str, branch: str, report_date: str) -> None:
-    path = root / "records" / "structured" / signal_type / branch / f"{report_date}.json"
+    if signal_type == "supervisor_control":
+        path = root / "records" / "intelligence" / signal_type / report_date / f"{branch}.json"
+    else:
+        path = root / "records" / "structured" / signal_type / branch / f"{report_date}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"branch": branch, "report_date": report_date}, indent=2) + "\n", encoding="utf-8")

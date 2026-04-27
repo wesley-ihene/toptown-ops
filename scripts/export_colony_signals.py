@@ -15,7 +15,9 @@ from apps.hr_agent.staff_identity import normalize_staff_name
 from packages.common.paths import REPO_ROOT
 from packages.record_store.paths import (
     RECORDS_DIR,
+    get_legacy_structured_path_for_root,
     get_structured_path_for_root,
+    is_intelligence_signal_type,
 )
 from packages.record_store.reader import read_structured, read_structured_governance
 from packages.record_store.writer import ensure_directory, write_json_file
@@ -521,9 +523,9 @@ def map_supervisor_control_record(record: Mapping[str, Any], *, source_path: Pat
 
     metrics = _mapping(record.get("metrics"))
     provenance = _mapping(record.get("provenance"))
-    key_values = _mapping(record.get("key_values"))
+    key_values = _supervisor_key_values(record, provenance=provenance)
     checklist = _string_list(record.get("checklist"))
-    notes = _string_list(record.get("notes"))
+    notes = _supervisor_notes(record, provenance=provenance)
 
     payload = _filtered_dict(
         {
@@ -540,10 +542,13 @@ def map_supervisor_control_record(record: Mapping[str, Any], *, source_path: Pat
             or None,
             "provenance": _filtered_dict(
                 {
-                    "raw_branch": provenance.get("raw_branch"),
+                    "raw_branch": provenance.get("raw_branch") or provenance.get("branch_text"),
                     "raw_date": provenance.get("raw_date"),
-                    "detected_subtype": provenance.get("detected_subtype"),
-                    "notes": _string_list(provenance.get("notes")) or None,
+                    "detected_subtype": provenance.get("detected_subtype") or _string_or_none(record.get("report_type")),
+                    "supervisor": provenance.get("supervisor") or _string_or_none(record.get("supervisor")),
+                    "supervisor_confirmation": provenance.get("supervisor_confirmation")
+                    or _string_or_none(record.get("supervisor_confirmation")),
+                    "notes": notes or None,
                 }
             )
             or None,
@@ -563,8 +568,80 @@ def map_supervisor_control_record(record: Mapping[str, Any], *, source_path: Pat
                 "checklist": checklist or None,
                 "key_values": dict(key_values) if key_values else None,
                 "notes": notes or None,
+                "ceo_advisory": _supervisor_ceo_advisory(record),
             }
         ),
+    )
+
+
+def _supervisor_ceo_advisory(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return an explicit advisory block for downstream CEO intelligence use."""
+
+    metrics = _mapping(record.get("metrics"))
+    provenance = _mapping(record.get("provenance"))
+    notes = _supervisor_notes(record, provenance=provenance)
+    items = _items_list(record.get("items"))
+    priority_items: list[dict[str, Any]] = []
+
+    for item in items:
+        normalized_item = _filtered_dict(
+            {
+                "exception_type": _string_or_none(item.get("exception_type")),
+                "details": _string_or_none(item.get("details")),
+                "action_taken": _string_or_none(item.get("action_taken")),
+                "supervisor_confirmed": _string_or_none(item.get("supervisor_confirmed")),
+            }
+        )
+        if normalized_item:
+            priority_items.append(normalized_item)
+        if len(priority_items) >= 3:
+            break
+
+    advisory = _filtered_dict(
+        {
+            "signal_class": "intelligence",
+            "intelligence_report_type": "supervisor_control",
+            "supervisor": provenance.get("supervisor") or _string_or_none(record.get("supervisor")),
+            "supervisor_confirmation": provenance.get("supervisor_confirmation")
+            or _string_or_none(record.get("supervisor_confirmation")),
+            "cash_variance": _string_or_none(record.get("cash_variance")),
+            "staffing_issues": _string_or_none(record.get("staffing_issues")),
+            "stock_issues": _string_or_none(record.get("stock_issues")),
+            "pricing_or_system_issues": _string_or_none(record.get("pricing_or_system_issues")),
+            "exceptions_escalated": _string_or_none(record.get("exceptions_escalated")),
+            "exception_count": _number_or_value(metrics.get("exception_count")),
+            "open_exception_count": _number_or_value(metrics.get("open_exception_count")),
+            "escalated_count": _number_or_value(metrics.get("escalated_count")),
+            "control_gap_count": _number_or_value(metrics.get("control_gap_count")),
+            "priority_items": priority_items or None,
+            "notes": notes or None,
+        }
+    )
+    return advisory or None
+
+
+def _supervisor_notes(record: Mapping[str, Any], *, provenance: Mapping[str, Any]) -> list[str]:
+    notes = _string_list(record.get("notes"))
+    if notes:
+        return notes
+    return _string_list(provenance.get("notes"))
+
+
+def _supervisor_key_values(record: Mapping[str, Any], *, provenance: Mapping[str, Any]) -> dict[str, Any]:
+    key_values = _mapping(record.get("key_values"))
+    if key_values:
+        return dict(key_values)
+    return _filtered_dict(
+        {
+            "Supervisor": provenance.get("supervisor") or _string_or_none(record.get("supervisor")),
+            "Supervisor confirmation": provenance.get("supervisor_confirmation")
+            or _string_or_none(record.get("supervisor_confirmation")),
+            "Cash variance": _string_or_none(record.get("cash_variance")),
+            "Staffing issues": _string_or_none(record.get("staffing_issues")),
+            "Stock issues": _string_or_none(record.get("stock_issues")),
+            "Pricing or system issues": _string_or_none(record.get("pricing_or_system_issues")),
+            "Exceptions escalated": _string_or_none(record.get("exceptions_escalated")),
+        }
     )
 
 
@@ -726,6 +803,15 @@ def load_structured_input(
         branch=canonical_branch,
         date=iso_date,
     )
+    if not source_path.exists() and is_intelligence_signal_type(record_type):
+        legacy_path = get_legacy_structured_path_for_root(
+            source_root / RECORDS_DIR.name / "structured",
+            signal_type=record_type,
+            branch=canonical_branch,
+            date=iso_date,
+        )
+        if legacy_path.exists():
+            source_path = legacy_path
     record = read_structured(record_type, canonical_branch, iso_date, root=source_root)
     return record, source_path
 
@@ -799,6 +885,12 @@ def _number_or_value(value: Any) -> int | float | str | bool | None:
         return value
     if isinstance(value, str):
         return value if value.strip() else None
+    return None
+
+
+def _string_or_none(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
 
 

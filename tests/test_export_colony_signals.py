@@ -211,6 +211,15 @@ def test_supervisor_control_record_exports_canonical_downstream_json_event(tmp_p
             "branch": "waigani",
             "report_date": "2026-04-06",
             "signal_type": "supervisor_control",
+            "report_family": "intelligence",
+            "report_type": "supervisor_control",
+            "supervisor": "Francis Ano",
+            "cash_variance": "NO",
+            "staffing_issues": "YES",
+            "stock_issues": "NO",
+            "pricing_or_system_issues": "NO",
+            "exceptions_escalated": "NO",
+            "supervisor_confirmation": "YES",
             "checklist": ["Escalated float issue"],
             "key_values": {
                 "Supervisor": "Francis Ano",
@@ -218,6 +227,10 @@ def test_supervisor_control_record_exports_canonical_downstream_json_event(tmp_p
             },
             "notes": ["Two tills requested for faster service."],
             "metrics": {
+                "exception_count": 1,
+                "open_exception_count": 0,
+                "escalated_count": 0,
+                "control_gap_count": 0,
                 "checklist_count": 1,
                 "key_value_count": 2,
                 "note_count": 1,
@@ -242,6 +255,7 @@ def test_supervisor_control_record_exports_canonical_downstream_json_event(tmp_p
 
     output_path = Path(tmp_path / "ioi-colony" / manifest["results"][0]["output_path"])
     event = _read_json(output_path)
+    assert manifest["results"][0]["source_path"] == "records/intelligence/supervisor_control/2026-04-06/waigani.json"
     assert event["signal_type"] == "supervisor_control_report"
     assert event["event_kind"] == "supervisor_control_report"
     assert event["report_type"] == "supervisor_control_report"
@@ -250,6 +264,12 @@ def test_supervisor_control_record_exports_canonical_downstream_json_event(tmp_p
     assert event["payload"]["key_values"]["Supervisor"] == "Francis Ano"
     assert event["payload"]["metrics"]["note_count"] == 1
     assert event["payload"]["provenance"]["raw_branch"] == "TTC Waigani Branch"
+    assert event["ceo_advisory"]["signal_class"] == "intelligence"
+    assert event["ceo_advisory"]["supervisor"] == "Francis Ano"
+    assert event["ceo_advisory"]["cash_variance"] == "NO"
+    assert event["ceo_advisory"]["staffing_issues"] == "YES"
+    assert event["ceo_advisory"]["exception_count"] == 1
+    assert event["ceo_advisory"]["notes"] == ["Two tills requested for faster service."]
     assert manifest["results"][0]["status"] == "written"
 
 
@@ -432,14 +452,10 @@ def _write_structured_record(
     governance: dict[str, object] | None = None,
     write_governance: bool = True,
 ) -> Path:
-    path = (
-        root
-        / "records"
-        / "structured"
-        / record_type
-        / branch
-        / f"{report_date}.json"
-    )
+    if record_type == "supervisor_control":
+        path = root / "records" / "intelligence" / record_type / report_date / f"{branch}.json"
+    else:
+        path = root / "records" / "structured" / record_type / branch / f"{report_date}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if write_governance:
@@ -447,7 +463,7 @@ def _write_structured_record(
         governance_payload = {
             "status": "accepted",
             "export_allowed": True,
-            "report_family": record_type,
+            "report_family": "intelligence" if record_type == "supervisor_control" else record_type,
             "signal_type": str(payload.get("signal_type") or record_type),
             "branch": branch,
             "report_date": report_date,

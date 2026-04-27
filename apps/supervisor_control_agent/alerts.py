@@ -24,7 +24,7 @@ def generate_alerts(
         warnings.append(
             make_warning(
                 code="missing_fields",
-                severity="error",
+                severity="warning",
                 message="Branch, report date, and at least one exception entry are required for supervisor control signaling.",
             )
         )

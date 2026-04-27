@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
+from .duplicate_archive import archive_duplicate_record
 from .paths import (
     get_raw_path,
     get_rejected_path,
     get_structured_path,
     get_structured_path_for_root,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 def ensure_directory(path: Path) -> Path:
@@ -76,6 +81,8 @@ def write_structured(
     source_root = explicit_root if explicit_root is not None else structured_path.parents[4]
     persisted_payload = dict(payload)
     persisted_payload["status"] = _normalized_direct_write_status(persisted_payload)
+    if signal_type == "supervisor_control":
+        persisted_payload["status"] = "accepted"
     persisted_payload["export_allowed"] = persisted_payload["status"] in {"accepted", "accepted_with_warning"}
     written_path = write_json_file(structured_path, persisted_payload)
     if isinstance(metadata, dict) and metadata:
@@ -86,7 +93,7 @@ def write_structured(
     governance = GovernanceDecision(
         status=persisted_payload["status"],
         export_allowed=persisted_payload["export_allowed"],
-        report_family=signal_type,
+        report_family="intelligence" if signal_type == "supervisor_control" else signal_type,
         signal_type=signal_type,
         branch=branch,
         report_date=date,
@@ -105,6 +112,14 @@ def write_structured(
     persisted_payload["governance"] = governance.to_payload()
     written_path = write_json_file(written_path, persisted_payload)
     write_governance_sidecar(written_path, governance)
+    if signal_type == "supervisor_control" and governance.status == "accepted":
+        _log_intelligence_event(
+            "intelligence_report_accepted",
+            branch=branch,
+            report_date=date,
+            path=str(written_path),
+            report_family=governance.report_family,
+        )
 
     from .automation import log_post_write_failure, run_post_write_automation
 
@@ -168,6 +183,7 @@ def write_governed_structured(
 
     persisted = decision.status not in {"rejected", "duplicate", "conflict_blocked"}
     written_path = structured_path
+    governance_context = governance_metadata.get("governance_context") if isinstance(governance_metadata.get("governance_context"), Mapping) else {}
     if persisted:
         persisted_payload = dict(payload)
         persisted_payload["status"] = decision.status
@@ -177,6 +193,28 @@ def write_governed_structured(
         if governance_metadata:
             write_json_sidecar(written_path, ".validation.json", governance_metadata)
         write_governance_sidecar(written_path, decision)
+        if signal_type == "supervisor_control" and decision.status == "accepted":
+            _log_intelligence_event(
+                "intelligence_report_accepted",
+                branch=branch,
+                report_date=date,
+                path=str(written_path),
+                report_family=decision.report_family,
+            )
+    elif decision.status == "duplicate":
+        archive_duplicate_record(
+            source_message_id=_string_or_none(governance_context.get("message_id")),
+            sender_phone=_string_or_none(governance_context.get("sender_phone")),
+            branch=branch,
+            report_type=_string_or_none(governance_context.get("classified_report_type")) or decision.report_family,
+            report_date=date,
+            raw_txt_path=_string_or_none(governance_context.get("raw_txt_path")),
+            raw_meta_path=_string_or_none(governance_context.get("raw_meta_path")),
+            duplicate_reason=decision.reasons[0] if decision.reasons else "duplicate",
+            duplicate_basis=_duplicate_archive_basis(decision=decision, governance_context=governance_context),
+            original_or_duplicate_of=decision.duplicate_of,
+            output_root=source_root,
+        )
 
     from .automation import log_post_write_failure, run_post_write_automation
 
@@ -243,3 +281,36 @@ def _direct_write_semantic_sha(*, signal_type: str, branch: str, date: str, payl
     import hashlib
 
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _duplicate_archive_basis(*, decision, governance_context: Mapping[str, Any]) -> str:
+    """Return one stable duplicate basis for disposal archive records."""
+
+    reason = decision.reasons[0] if decision.reasons else "duplicate"
+    if reason == "duplicate_message_id" and decision.message_id:
+        return f"message_id:{decision.message_id}"
+    if reason == "duplicate_raw_sha256" and decision.raw_sha256:
+        return f"raw_sha256:{decision.raw_sha256}"
+    if reason == "duplicate_semantic" and decision.semantic_sha256:
+        return f"semantic_sha256:{decision.semantic_sha256}"
+    candidate = _string_or_none(governance_context.get("duplicate_basis"))
+    if candidate is not None:
+        return candidate
+    if decision.duplicate_of:
+        return f"reference:{decision.duplicate_of}"
+    return reason
+
+
+def _string_or_none(value: object) -> str | None:
+    """Return one stripped string or ``None``."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _log_intelligence_event(event: str, **fields: Any) -> None:
+    """Emit one compact intelligence write log event."""
+
+    LOGGER.info(json.dumps({"event": event, **fields}, sort_keys=True, ensure_ascii=True))

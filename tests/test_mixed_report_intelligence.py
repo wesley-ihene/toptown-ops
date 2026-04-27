@@ -174,7 +174,7 @@ def test_orchestrator_mixed_sales_and_supervisor_control_writes_two_structured_r
     )
 
     sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"
-    supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-07.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json"
     assert sales_path.exists()
     assert supervisor_path.exists()
 
@@ -219,7 +219,7 @@ def test_orchestrator_accepts_split_for_sales_and_supervisor_control_summary(
     )
 
     sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"
-    supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-07.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json"
 
     assert sales_path.exists()
     assert supervisor_path.exists()
@@ -236,11 +236,48 @@ def test_orchestrator_accepts_split_for_sales_and_supervisor_control_summary(
     assert child_two["status"] == "accepted"
 
 
+def test_orchestrator_keeps_intelligence_child_when_transactional_child_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _invalid_sales_and_supervisor_control_text()},
+                "metadata": {
+                    "received_at": "2026-04-07T13:30:00Z",
+                    "sender": "mixed-intelligence-transactional-failure",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json"
+
+    assert not sales_path.exists()
+    assert supervisor_path.exists()
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["status"] == "needs_review"
+
+    child_one, child_two = result.payload["fanout"]["children"]
+    assert child_one["report_family"] == "sales_income"
+    assert child_one["status"] == "rejected"
+    assert child_two["report_family"] == "supervisor_control"
+    assert child_two["status"] == "accepted"
+
+
 def _patch_record_paths(monkeypatch, tmp_path: Path) -> None:
     records_dir = tmp_path / "records"
     monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "INTELLIGENCE_DIR", records_dir / "intelligence")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
 
 
@@ -280,6 +317,29 @@ def _sales_and_supervisor_control_text() -> str:
             "Floor Check: Passed",
             "Cashier Reconciled: Yes",
             "- Front door display checked",
+        ]
+    )
+
+
+def _invalid_sales_and_supervisor_control_text() -> str:
+    return "\n".join(
+        [
+            "Branch: Waigani Branch",
+            "Date: 07/04/2026",
+            "",
+            "DAY-END SALES REPORT",
+            "Gross Sales: 1200",
+            "Cash Sales: 600",
+            "Eftpos Sales: 600",
+            "Traffic: 10",
+            "Served: 12",
+            "",
+            "SUPERVISOR CONTROL REPORT",
+            "Exception Type: STAFF_ISSUE",
+            "Details: Late opening",
+            "Action Taken: Escalated",
+            "Escalated By: Francis",
+            "Time: 08:30",
         ]
     )
 

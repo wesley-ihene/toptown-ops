@@ -43,3 +43,23 @@ def test_classifier_detects_attendance_from_staff_rows_without_exact_title() -> 
 
     assert classification.report_family == "attendance"
     assert classification.confidence >= 0.45
+
+
+def test_classifier_labels_supervisor_control_as_intelligence() -> None:
+    text = "\n".join(
+        [
+            "Supervisor Control Report",
+            "Branch: Waigani Branch",
+            "Date: 07/04/2026",
+            "Cash variance: No",
+            "Staffing issues: Yes",
+        ]
+    )
+
+    classification = classify_report_family(text, normalize_headers(text))
+    route = route_for_family(classification.report_family)
+
+    assert classification.report_family == "intelligence"
+    assert classification.report_type == "supervisor_control"
+    assert route.target_agent == "supervisor_control_agent"
+    assert route.specialist_type == "supervisor_control"

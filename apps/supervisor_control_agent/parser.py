@@ -71,6 +71,8 @@ class ParsedSupervisorControlReport:
     branch: str | None = None
     branch_slug: str | None = None
     report_date: str | None = None
+    supervisor: str | None = None
+    supervisor_confirmation: str | None = None
     sop_compliance: str = "strict"
     exception_entries: list[ParsedExceptionEntry] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -114,9 +116,11 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
             parsed.report_date = normalize_report_date(value)
             continue
         if field_name == "supervisor":
+            parsed.supervisor = value
             parsed.notes.append(f"Supervisor: {value}")
             continue
         if field_name == "supervisor_confirmation":
+            parsed.supervisor_confirmation = value
             parsed.notes.append(f"Supervisor confirmation: {value}")
             continue
         if field_name == "notes":
@@ -152,7 +156,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
         parsed.warnings.append(
             make_warning(
                 code="missing_fields",
-                severity="error",
+                severity="warning",
                 message="Branch could not be resolved from the supervisor control report.",
             )
         )
@@ -160,7 +164,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
         parsed.warnings.append(
             make_warning(
                 code="missing_fields",
-                severity="error",
+                severity="warning",
                 message="Report date could not be resolved from the supervisor control report.",
             )
         )
@@ -168,7 +172,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedSupervisorControlReport:
         parsed.warnings.append(
             make_warning(
                 code="missing_fields",
-                severity="error",
+                severity="warning",
                 message="No supervisor control exception entries were extracted from the report.",
             )
         )

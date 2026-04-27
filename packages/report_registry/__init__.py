@@ -10,6 +10,7 @@ ReportFamily = str
 UNKNOWN_REPORT_FAMILY: Final[str] = "unknown"
 
 FAMILY_TO_TARGET_AGENT: Final[dict[str, str]] = {
+    "intelligence": "supervisor_control_agent",
     "sales_income": "sales_income_agent",
     "pricing_stock_release": "pricing_stock_release_agent",
     "attendance": "hr_agent",
@@ -18,6 +19,7 @@ FAMILY_TO_TARGET_AGENT: Final[dict[str, str]] = {
 }
 
 FAMILY_TO_SPECIALIST_TYPE: Final[dict[str, str]] = {
+    "intelligence": "supervisor_control",
     "sales_income": "sales",
     "pricing_stock_release": "bale_summary",
     "attendance": "staff_attendance",
@@ -26,6 +28,7 @@ FAMILY_TO_SPECIALIST_TYPE: Final[dict[str, str]] = {
 }
 
 FAMILY_TO_STORAGE_BUCKET: Final[dict[str, str]] = {
+    "intelligence": "supervisor_control",
     "sales_income": "sales",
     "pricing_stock_release": "bale_release",
     "attendance": "hr_attendance",

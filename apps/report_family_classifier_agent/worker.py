@@ -139,6 +139,7 @@ _PRICING_CARD_RELEASE_INDICATORS: Final[tuple[str, ...]] = (
     "sent to floor",
 )
 INVALID_PRICING_CARD_REJECTION_CODE: Final[str] = "invalid_pricing_card_format"
+INTELLIGENCE_REPORT_FAMILY: Final[str] = "intelligence"
 _SUPERVISOR_MARKERS: Final[tuple[str, ...]] = (
     "cash variance",
     "staffing issues",
@@ -157,6 +158,7 @@ class FamilyClassification:
 
     report_family: str
     confidence: float
+    report_type: str | None = None
     evidence: list[str] = field(default_factory=list)
 
 
@@ -204,17 +206,37 @@ def classify_report_family(text: str, header_result: HeaderNormalizationResult) 
             evidence_by_family[family] = evidence
 
     if not score_by_family:
-        return FamilyClassification(report_family="unknown", confidence=0.0, evidence=[])
+        return FamilyClassification(report_family="unknown", report_type=None, confidence=0.0, evidence=[])
 
-    report_family = max(score_by_family, key=lambda family: (score_by_family[family], family))
-    confidence = score_by_family[report_family]
+    detected_family = max(score_by_family, key=lambda family: (score_by_family[family], family))
+    confidence = score_by_family[detected_family]
     if confidence < 0.45:
-        return FamilyClassification(report_family="unknown", confidence=confidence, evidence=evidence_by_family[report_family])
+        return FamilyClassification(
+            report_family="unknown",
+            report_type=None,
+            confidence=confidence,
+            evidence=evidence_by_family[detected_family],
+        )
     return FamilyClassification(
-        report_family=report_family,
+        report_family=_report_family_label(detected_family),
+        report_type=_report_type_label(detected_family),
         confidence=confidence,
-        evidence=evidence_by_family[report_family],
+        evidence=evidence_by_family[detected_family],
     )
+
+
+def _report_family_label(detected_family: str) -> str:
+    """Return the public report family label for one detected subtype."""
+
+    if detected_family == "supervisor_control":
+        return INTELLIGENCE_REPORT_FAMILY
+    return detected_family
+
+
+def _report_type_label(detected_family: str) -> str:
+    """Return the stable report subtype label for one detected family."""
+
+    return detected_family
 
 
 def _normalize_text(value: str) -> str:
@@ -375,6 +397,7 @@ def _detect_invalid_pricing_card_format(*, text: str, normalized_body: str) -> F
 
     return FamilyClassification(
         report_family=INVALID_PRICING_CARD_REJECTION_CODE,
+        report_type=None,
         confidence=1.0,
         evidence=[
             "body_marker:pricing_card_bale_header",

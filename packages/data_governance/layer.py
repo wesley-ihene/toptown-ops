@@ -36,6 +36,7 @@ GovernanceReason = Literal[
 
 GOVERNANCE_SIDECAR_SUFFIX = ".governance.json"
 EXPORTABLE_FINAL_STATUSES: frozenset[str] = frozenset({"accepted", "accepted_with_warning"})
+INTELLIGENCE_REPORT_FAMILY = "intelligence"
 
 _SIGNAL_TYPE_TO_REPORT_FAMILY = {
     "sales_income": "sales",
@@ -122,8 +123,11 @@ def build_governance_context(work_item_payload: Mapping[str, Any]) -> dict[str, 
 
     return {
         "message_id": _string_or_none(ingress_payload.get("message_id")),
+        "sender_phone": _string_or_none(ingress_payload.get("sender_phone")),
         "raw_sha256": _string_or_none(raw_record_payload.get("raw_sha256"))
         or _string_or_none(ingress_payload.get("raw_sha256")),
+        "raw_txt_path": _string_or_none(raw_record_payload.get("raw_txt_path"))
+        or _string_or_none(ingress_payload.get("raw_txt_path")),
         "raw_meta_path": _string_or_none(raw_record_payload.get("raw_meta_path")),
         "raw_text": _string_or_none(raw_message_payload.get("text")),
         "classified_report_type": _string_or_none(classification_payload.get("report_type")),
@@ -150,6 +154,11 @@ def govern_record(
     message_id = _string_or_none(governance_context.get("message_id"))
     raw_sha256 = _string_or_none(governance_context.get("raw_sha256"))
     raw_meta_path = _string_or_none(governance_context.get("raw_meta_path"))
+    classified_report_type = _string_or_none(governance_context.get("classified_report_type"))
+    intelligence_signal = _is_intelligence_signal(
+        signal_type=signal_type,
+        classified_report_type=classified_report_type,
+    )
 
     report_family = _report_family_for_signal_type(signal_type, governance_context)
     normalized_scope = _scope(report_family=report_family, branch=branch, report_date=report_date)
@@ -162,6 +171,7 @@ def govern_record(
 
     duplicate_reason, duplicate_of = _find_exact_duplicate(
         records_root=source_root / "records",
+        signal_type=signal_type,
         report_family=report_family,
         message_id=message_id,
         raw_sha256=raw_sha256,
@@ -186,17 +196,19 @@ def govern_record(
             duplicate_of=duplicate_of,
         )
 
-    rejection_reasons = _taxonomy_reasons(
-        signal_type=signal_type,
-        report_family=report_family,
-        branch=branch,
-        report_date=report_date,
-        source_status=source_status,
-        payload=payload,
-        validation=validation,
-        acceptance=acceptance,
-        governance_context=governance_context,
-    )
+    rejection_reasons: list[GovernanceReason] = []
+    if not intelligence_signal:
+        rejection_reasons = _taxonomy_reasons(
+            signal_type=signal_type,
+            report_family=report_family,
+            branch=branch,
+            report_date=report_date,
+            source_status=source_status,
+            payload=payload,
+            validation=validation,
+            acceptance=acceptance,
+            governance_context=governance_context,
+        )
     if rejection_reasons:
         return GovernanceDecision(
             status="rejected",
@@ -214,13 +226,25 @@ def govern_record(
             source_status=source_status,
         )
 
-    if structured_path.exists():
-        existing_governance = read_governance_sidecar(structured_path)
-        existing_semantic_sha = _string_or_none(existing_governance.get("semantic_sha256")) or _semantic_sha256(
+    existing_record_path = structured_path
+    legacy_record_path = _legacy_record_path_if_present(
+        signal_type=signal_type,
+        branch=branch,
+        report_date=report_date,
+        structured_path=structured_path,
+        source_root=source_root,
+    )
+    if not existing_record_path.exists() and legacy_record_path is not None:
+        existing_record_path = legacy_record_path
+
+    if existing_record_path.exists():
+        existing_governance = read_governance_sidecar(existing_record_path)
+        existing_semantic_sha = None if intelligence_signal else _string_or_none(existing_governance.get("semantic_sha256"))
+        existing_semantic_sha = existing_semantic_sha or _semantic_sha256(
             report_family=report_family,
             branch=branch,
             report_date=report_date,
-            payload=_read_json_file(structured_path),
+            payload=_read_json_file(existing_record_path),
         )
         if existing_semantic_sha == semantic_sha256:
             return GovernanceDecision(
@@ -237,7 +261,7 @@ def govern_record(
                 reasons=["duplicate_semantic"],
                 warnings=_warning_codes(payload),
                 source_status=source_status,
-                duplicate_of=str(structured_path),
+                duplicate_of=str(existing_record_path),
             )
         return GovernanceDecision(
             status="conflict_blocked",
@@ -253,17 +277,21 @@ def govern_record(
             reasons=["conflicting_record_same_scope"],
             warnings=_warning_codes(payload),
             source_status=source_status,
-            duplicate_of=str(structured_path),
+            duplicate_of=str(existing_record_path),
         )
 
-    status = _governed_status(
-        source_status=source_status,
-        warnings=_warning_codes(payload),
-        acceptance=acceptance,
+    status = (
+        _intelligence_governed_status()
+        if intelligence_signal
+        else _governed_status(
+            source_status=source_status,
+            warnings=_warning_codes(payload),
+            acceptance=acceptance,
+        )
     )
     return GovernanceDecision(
         status=status,
-        export_allowed=status in EXPORTABLE_FINAL_STATUSES,
+        export_allowed=True if intelligence_signal else status in EXPORTABLE_FINAL_STATUSES,
         report_family=report_family,
         signal_type=signal_type,
         branch=branch,
@@ -358,9 +386,16 @@ def _governed_status(
     return "needs_review"
 
 
+def _intelligence_governed_status() -> GovernedStatus:
+    """Return the stable final status for accepted intelligence reports."""
+
+    return "accepted"
+
+
 def _find_exact_duplicate(
     *,
     records_root: Path,
+    signal_type: str,
     report_family: str,
     message_id: str | None,
     raw_sha256: str | None,
@@ -383,19 +418,21 @@ def _find_exact_duplicate(
         if raw_sha256 and _string_or_none(payload.get("raw_sha256")) == raw_sha256:
             return "duplicate_raw_sha256", str(meta_path)
 
-    for governance_path in (records_root / "structured").glob("**/*" + GOVERNANCE_SIDECAR_SUFFIX):
-        if governance_path == exclude_structured_path.with_suffix(GOVERNANCE_SIDECAR_SUFFIX):
-            continue
-        payload = _read_json_file(governance_path)
-        if not payload:
-            continue
-        existing_report_family = _string_or_none(payload.get("report_family"))
-        if existing_report_family is not None and existing_report_family != report_family:
-            continue
-        if message_id and _string_or_none(payload.get("message_id")) == message_id:
-            return "duplicate_message_id", str(governance_path)
-        if raw_sha256 and _string_or_none(payload.get("raw_sha256")) == raw_sha256:
-            return "duplicate_raw_sha256", str(governance_path)
+    allowed_families = _matching_report_families(report_family=report_family, signal_type=signal_type)
+    for storage_root in _governance_storage_roots(records_root):
+        for governance_path in storage_root.glob("**/*" + GOVERNANCE_SIDECAR_SUFFIX):
+            if governance_path == exclude_structured_path.with_suffix(GOVERNANCE_SIDECAR_SUFFIX):
+                continue
+            payload = _read_json_file(governance_path)
+            if not payload:
+                continue
+            existing_report_family = _string_or_none(payload.get("report_family"))
+            if existing_report_family is not None and existing_report_family not in allowed_families:
+                continue
+            if message_id and _string_or_none(payload.get("message_id")) == message_id:
+                return "duplicate_message_id", str(governance_path)
+            if raw_sha256 and _string_or_none(payload.get("raw_sha256")) == raw_sha256:
+                return "duplicate_raw_sha256", str(governance_path)
     return None, None
 
 
@@ -453,9 +490,61 @@ def _scope(*, report_family: str, branch: str | None, report_date: str | None) -
 
 def _report_family_for_signal_type(signal_type: str, governance_context: Mapping[str, Any]) -> str:
     classified_report_type = _string_or_none(governance_context.get("classified_report_type"))
+    if _is_intelligence_signal(signal_type=signal_type, classified_report_type=classified_report_type):
+        return INTELLIGENCE_REPORT_FAMILY
     if classified_report_type is not None:
         return classified_report_type
     return _SIGNAL_TYPE_TO_REPORT_FAMILY.get(signal_type, "unknown")
+
+
+def _is_intelligence_signal(*, signal_type: str, classified_report_type: str | None) -> bool:
+    """Return whether one governed record is intelligence-only."""
+
+    return signal_type == "supervisor_control" or classified_report_type == "supervisor_control"
+
+
+def _matching_report_families(*, report_family: str, signal_type: str) -> set[str]:
+    """Return the report-family labels that should be treated as equivalent."""
+
+    families = {report_family}
+    if signal_type == "supervisor_control" or report_family == INTELLIGENCE_REPORT_FAMILY:
+        families.update({INTELLIGENCE_REPORT_FAMILY, "supervisor_control"})
+    return families
+
+
+def _governance_storage_roots(records_root: Path) -> list[Path]:
+    """Return the record roots that may contain governance sidecars."""
+
+    roots = [records_root / "structured"]
+    intelligence_root = records_root / "intelligence"
+    if intelligence_root not in roots:
+        roots.append(intelligence_root)
+    return roots
+
+
+def _legacy_record_path_if_present(
+    *,
+    signal_type: str,
+    branch: str | None,
+    report_date: str | None,
+    structured_path: Path,
+    source_root: Path,
+) -> Path | None:
+    """Return the legacy structured path for migrated intelligence records when present."""
+
+    if not record_paths.is_intelligence_signal_type(signal_type):
+        return None
+    if _is_missing_scope_value(branch) or _is_missing_scope_value(report_date):
+        return None
+    legacy_path = record_paths.get_legacy_structured_path_for_root(
+        source_root / "records" / "structured",
+        signal_type=signal_type,
+        branch=branch,
+        date=report_date,
+    )
+    if legacy_path == structured_path or not legacy_path.exists():
+        return None
+    return legacy_path
 
 
 def _warning_codes(payload: Mapping[str, Any]) -> list[str]:

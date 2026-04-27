@@ -816,11 +816,12 @@ def _handle_single_structured_artifact(
     if target_path.exists():
         reason = f"overwritten previous_sha256={existing_hash} new_sha256={new_hash}"
     if output_root is None:
+        signal_type, branch, report_date = _structured_identity(structured.path)
         with _replay_automation_context():
             write_structured(
-                structured.path.parent.parent.name,
-                structured.path.parent.name,
-                structured.path.stem,
+                signal_type,
+                branch,
+                report_date,
                 structured.payload,
                 root=structured.path.parents[4],
             )
@@ -1400,13 +1401,32 @@ def _resolve_structured_output_path(path: Path, *, output_root: Path | None) -> 
 
     if output_root is None:
         return path
-    structured_root = REPO_ROOT / "records" / "structured"
-    relative_path = path.relative_to(structured_root)
+    signal_type, branch, report_date = _structured_identity(path)
     return get_structured_path_for_root(
         output_root / "records" / "structured",
-        signal_type=relative_path.parts[0],
-        branch=relative_path.parts[1],
-        date=path.stem,
+        signal_type=signal_type,
+        branch=branch,
+        date=report_date,
+    )
+
+
+def _structured_identity(path: Path) -> tuple[str, str, str]:
+    """Return signal_type, branch, and report_date for one structured path."""
+
+    signal_type = path.parent.parent.name
+    if _looks_like_iso_date(path.parent.name):
+        return signal_type, path.stem, path.parent.name
+    return signal_type, path.parent.name, path.stem
+
+
+def _looks_like_iso_date(value: str) -> bool:
+    return (
+        len(value) == 10
+        and value[4] == "-"
+        and value[7] == "-"
+        and value[:4].isdigit()
+        and value[5:7].isdigit()
+        and value[8:10].isdigit()
     )
 
 
@@ -1540,24 +1560,29 @@ def _capture_validation_actual_outcome(
 def _capture_sandbox_structured_outputs(sandbox_root: Path) -> list[dict[str, Any]]:
     """Return structured outputs written during one validation replay."""
 
-    structured_root = sandbox_root / "records" / "structured"
-    if not structured_root.exists():
-        return []
-
     outputs: list[dict[str, Any]] = []
-    for path in sorted(structured_root.rglob("*.json")):
-        relative_path = path.relative_to(structured_root)
-        if len(relative_path.parts) < 3:
+    storage_roots = [
+        ("structured", sandbox_root / "records" / "structured"),
+        ("intelligence", sandbox_root / "records" / "intelligence"),
+    ]
+    for storage_root_name, storage_root in storage_roots:
+        if not storage_root.exists():
             continue
-        outputs.append(
-            {
-                "signal_type": relative_path.parts[0],
-                "branch": relative_path.parts[1],
-                "report_date": path.stem,
-                "path": str(relative_path),
-                "payload": _load_json(path),
-            }
-        )
+        for path in sorted(storage_root.rglob("*.json")):
+            relative_path = path.relative_to(storage_root)
+            if len(relative_path.parts) < 3:
+                continue
+            signal_type, branch, report_date = _structured_identity(path)
+            outputs.append(
+                {
+                    "signal_type": signal_type,
+                    "branch": branch,
+                    "report_date": report_date,
+                    "path": str(relative_path),
+                    "storage_root": storage_root_name,
+                    "payload": _load_json(path),
+                }
+            )
     return outputs
 
 

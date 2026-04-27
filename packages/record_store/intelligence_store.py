@@ -1,0 +1,156 @@
+"""Helpers for intelligence-only record payloads."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from typing import Any
+
+INTELLIGENCE_REPORT_FAMILY = "intelligence"
+SUPERVISOR_CONTROL_REPORT_TYPE = "supervisor_control"
+_CHECKLIST_SIGNAL_KEYS = {
+    "cash_variance": "Cash_Variance",
+    "staffing_issues": "Staffing_Issues",
+    "stock_issues": "Stock_Issues",
+    "pricing_or_system_issues": "Pricing_System_Issues",
+    "exceptions_escalated": "Exceptions",
+}
+
+
+def build_supervisor_control_intelligence_record(
+    *,
+    branch: str | None,
+    report_date: str | None,
+    supervisor: str | None,
+    supervisor_confirmation: str | None,
+    raw_text: str | None,
+    confidence: float,
+    source_message_id: str | None,
+    sender_phone: str | None,
+    created_at: str | None,
+    source_agent: str,
+    source: str,
+    signal_weight: float,
+    sop_compliance: str,
+    status: str,
+    metrics: Mapping[str, Any],
+    items: Sequence[Mapping[str, Any]],
+    notes: Sequence[str],
+    warnings: Sequence[Mapping[str, Any]],
+    branch_text: str | None,
+) -> dict[str, Any]:
+    """Build the canonical supervisor-control intelligence payload."""
+
+    item_payloads = [dict(item) for item in items if isinstance(item, Mapping)]
+    warning_payloads = [dict(warning) for warning in warnings if isinstance(warning, Mapping)]
+    note_list = [note for note in notes if isinstance(note, str)]
+
+    cash_variance = _checklist_signal_value(item_payloads, "cash_variance")
+    staffing_issues = _checklist_signal_value(item_payloads, "staffing_issues")
+    stock_issues = _checklist_signal_value(item_payloads, "stock_issues")
+    pricing_or_system_issues = _checklist_signal_value(item_payloads, "pricing_or_system_issues")
+    exceptions_escalated = _checklist_signal_value(item_payloads, "exceptions_escalated")
+    if exceptions_escalated is None:
+        exceptions_escalated = _escalation_flag(metrics)
+
+    key_values = {
+        "Supervisor": supervisor,
+        "Supervisor confirmation": supervisor_confirmation,
+        "Cash variance": cash_variance,
+        "Staffing issues": staffing_issues,
+        "Stock issues": stock_issues,
+        "Pricing or system issues": pricing_or_system_issues,
+        "Exceptions escalated": exceptions_escalated,
+    }
+    checklist = [
+        f"{label}: {value}"
+        for label, value in (
+            ("Cash variance", cash_variance),
+            ("Staffing issues", staffing_issues),
+            ("Stock issues", stock_issues),
+            ("Pricing or system issues", pricing_or_system_issues),
+            ("Exceptions escalated", exceptions_escalated),
+        )
+        if value is not None
+    ]
+
+    return {
+        "signal_type": SUPERVISOR_CONTROL_REPORT_TYPE,
+        "report_family": INTELLIGENCE_REPORT_FAMILY,
+        "report_type": SUPERVISOR_CONTROL_REPORT_TYPE,
+        "source_agent": source_agent,
+        "source": source,
+        "branch": branch,
+        "report_date": report_date,
+        "supervisor": supervisor,
+        "cash_variance": cash_variance,
+        "staffing_issues": staffing_issues,
+        "stock_issues": stock_issues,
+        "pricing_or_system_issues": pricing_or_system_issues,
+        "exceptions_escalated": exceptions_escalated,
+        "supervisor_confirmation": supervisor_confirmation,
+        "raw_text": raw_text,
+        "confidence": confidence,
+        "source_message_id": source_message_id,
+        "sender_phone": sender_phone,
+        "created_at": created_at or _utc_timestamp(),
+        "signal_weight": signal_weight,
+        "sop_compliance": sop_compliance,
+        "status": status,
+        "metrics": dict(metrics),
+        "items": item_payloads,
+        "notes": note_list,
+        "checklist": checklist,
+        "key_values": {label: value for label, value in key_values.items() if value is not None},
+        "provenance": {
+            "branch_text": branch_text,
+            "detected_subtype": SUPERVISOR_CONTROL_REPORT_TYPE,
+            "supervisor": supervisor,
+            "supervisor_confirmation": supervisor_confirmation,
+            "notes": note_list,
+        },
+        "warnings": warning_payloads,
+    }
+
+
+def _checklist_signal_value(items: Sequence[Mapping[str, Any]], signal_name: str) -> str | None:
+    """Return the explicit checklist value for one supervisor-control signal."""
+
+    expected_key = _CHECKLIST_SIGNAL_KEYS[signal_name]
+    for item in items:
+        action_taken = _string_or_none(item.get("action_taken"))
+        details = _string_or_none(item.get("details"))
+        detail_key, detail_value = _detail_key_value(details)
+        if action_taken != expected_key and detail_key != expected_key:
+            continue
+        if detail_value is not None:
+            return detail_value
+        supervisor_confirmed = _string_or_none(item.get("supervisor_confirmed"))
+        if supervisor_confirmed in {"YES", "NO"}:
+            return supervisor_confirmed
+    return None
+
+
+def _detail_key_value(details: str | None) -> tuple[str | None, str | None]:
+    if details is None or ":" not in details:
+        return None, None
+    key, value = details.split(":", 1)
+    return _string_or_none(key), _string_or_none(value)
+
+
+def _escalation_flag(metrics: Mapping[str, Any]) -> str | None:
+    value = metrics.get("escalated_count")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return "YES" if value > 0 else "NO"
+
+
+def _string_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

@@ -182,6 +182,47 @@ def test_governance_blocks_export_for_needs_review_record(tmp_path: Path, monkey
     assert manifest["results"][0]["reason"] == "needs_review"
 
 
+def test_governance_accepts_supervisor_control_as_intelligence(tmp_path: Path, monkeypatch) -> None:
+    _patch_record_paths(tmp_path, monkeypatch)
+    colony_root = tmp_path / "ioi-colony"
+    colony_root.mkdir()
+
+    result = write_governed_structured(
+        "supervisor_control",
+        "waigani",
+        "2026-04-07",
+        _supervisor_payload(status="needs_review"),
+        metadata={
+            "validation": {"accepted": False, "status": "rejected"},
+            "acceptance": {"decision": "reject", "reason": "validation_failed"},
+            "governance_context": {
+                "message_id": "wamid.intel-1",
+                "raw_sha256": "raw-intel-1",
+                "classified_report_type": "supervisor_control",
+            },
+        },
+        root=tmp_path,
+        colony_root=colony_root,
+    )
+
+    assert result.persisted is True
+    assert result.path == tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json"
+    assert result.governance.status == "accepted"
+    assert result.governance.export_allowed is True
+    assert result.governance.report_family == "intelligence"
+
+    manifest = export_colony_signals.export_one_record_type(
+        "supervisor_control",
+        "waigani",
+        "2026-04-07",
+        source_root=tmp_path,
+        colony_root=colony_root,
+        overwrite=True,
+    )
+    assert manifest["results"][0]["status"] == "written"
+    assert manifest["results"][0]["source_path"] == "records/intelligence/supervisor_control/2026-04-07/waigani.json"
+
+
 def test_invalid_pricing_card_message_is_rejected_with_explicit_reason(tmp_path: Path, monkeypatch) -> None:
     _patch_record_paths(tmp_path, monkeypatch)
 
@@ -221,7 +262,9 @@ def _patch_record_paths(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "INTELLIGENCE_DIR", records_dir / "intelligence")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
+    monkeypatch.setattr(record_paths, "DUPLICATES_DIR", records_dir / "duplicates" / "whatsapp")
     monkeypatch.setattr(record_paths, "REVIEW_DIR", records_dir / "review")
     monkeypatch.setattr(record_paths, "PROVENANCE_DIR", records_dir / "provenance")
     monkeypatch.setattr(record_paths, "OBSERVABILITY_DIR", records_dir / "observability")
@@ -244,5 +287,34 @@ def _sales_payload(*, status: str, gross_sales: float, warnings: list[dict[str, 
         "items": [],
         "provenance": {"cashier": "Alice"},
         "warnings": warnings or [],
+        "status": status,
+    }
+
+
+def _supervisor_payload(*, status: str) -> dict[str, object]:
+    return {
+        "signal_type": "supervisor_control",
+        "source_agent": "supervisor_control_agent",
+        "branch": "waigani",
+        "report_date": "2026-04-07",
+        "metrics": {
+            "exception_count": 1,
+            "open_exception_count": 1,
+            "escalated_count": 1,
+            "confirmed_count": 0,
+            "control_gap_count": 1,
+        },
+        "items": [
+            {
+                "exception_type": "STAFF_ISSUE",
+                "details": "Late opening",
+                "action_taken": "Escalated",
+                "supervisor_confirmed": "NO",
+            }
+        ],
+        "warnings": [
+            {"code": "missing_confirmation"},
+            {"code": "escalation_required"},
+        ],
         "status": status,
     }

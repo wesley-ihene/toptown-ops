@@ -239,6 +239,64 @@ def test_orchestrator_routes_recoverable_sales_message_with_messy_money_and_alia
     assert result.payload["status"] == "accepted"
 
 
+def test_orchestrator_derives_gross_sales_from_payment_components_when_total_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {
+                    "text": "\n".join(
+                        [
+                            "DAY end sales report",
+                            "Shop: Lae 5th Street Branch",
+                            "Date: Saturday, 25/04/26",
+                            "Cash Sales: 4,047.00",
+                            "Card Sales: 1,569.00",
+                            "Main Door: 322",
+                            "Customers Served: 162",
+                            "Cashier: Cleo Wofinga",
+                            "Assistant: Joycelyn /liab",
+                            "Balanced by: liab Yawano",
+                        ]
+                    )
+                },
+                "metadata": {
+                    "received_at": "2026-04-25T09:43:59Z",
+                    "sender": "live-sales-derived-total",
+                },
+            },
+        )
+    )
+
+    structured_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-04-25.json"
+
+    assert structured_path.exists()
+    structured_payload = _read_json(structured_path)
+    warning_codes = {warning["code"] for warning in structured_payload["warnings"]}
+
+    assert structured_payload["branch"] == "lae_5th_street"
+    assert structured_payload["report_date"] == "2026-04-25"
+    assert structured_payload["metrics"]["gross_sales"] == 5616.0
+    assert structured_payload["metrics"]["cash_sales"] == 4047.0
+    assert structured_payload["metrics"]["eftpos_sales"] == 1569.0
+    assert structured_payload["metrics"]["mobile_money_sales"] is None
+    assert structured_payload["status"] == "accepted_with_warning"
+    assert structured_payload["export_allowed"] is True
+    assert "gross_sales_derived_from_payment_components" in warning_codes
+    assert "missing_fields" not in warning_codes
+
+    assert result.agent_name == "sales_income_agent"
+    assert result.payload["metrics"]["gross_sales"] == 5616.0
+    assert result.payload["status"] == "accepted_with_warning"
+    assert result.payload["export_allowed"] is True
+
+
 def test_orchestrator_unknown_message_writes_rejected_copy_but_keeps_raw_archive(
     tmp_path: Path,
     monkeypatch,
@@ -890,12 +948,14 @@ def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
     )
 
     raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    duplicate_paths = _paths(tmp_path / "records" / "duplicates" / "whatsapp", "*/*.json")
     rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "sales", "*.meta.json")
 
     assert first_result.agent_name == "sales_income_agent"
     assert specialist_calls == 1
     assert len(raw_meta_paths) == 1
-    assert len(rejected_meta_paths) == 1
+    assert len(rejected_meta_paths) == 0
+    assert len(duplicate_paths) == 1
 
     raw_meta = _read_json(raw_meta_paths[0])
     assert raw_meta["processing_status"] == "duplicate"
@@ -903,10 +963,11 @@ def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
     assert raw_meta["policy_guard"]["reason"] == "duplicate_message"
     assert raw_meta["policy_guard"]["duplicate"] is True
 
-    rejected_meta = _read_json(rejected_meta_paths[0])
-    assert rejected_meta["rejection_reason"] == "duplicate_message"
-    assert rejected_meta["policy_guard"]["duplicate"] is True
-    assert rejected_meta["policy_guard"]["duplicate_basis"] == "policy_guard:passed"
+    duplicate_record = _read_json(duplicate_paths[0])
+    assert duplicate_record["duplicate_reason"] == "duplicate_message"
+    assert duplicate_record["duplicate_basis"] == "policy_guard:passed"
+    assert duplicate_record["raw_txt_path"] == raw_meta["raw_txt_path"]
+    assert duplicate_record["raw_meta_path"] == raw_meta["raw_meta_path"]
 
     assert second_result.agent_name == "orchestrator_agent"
     assert second_result.payload["status"] == "duplicate"
@@ -961,13 +1022,15 @@ def test_orchestrator_rejects_same_raw_sha256_within_24_hours_across_raw_file_bo
     )
 
     raw_meta_paths = _paths(tmp_path / "records" / "raw" / "whatsapp" / "unknown", "*.meta.json")
+    duplicate_paths = _paths(tmp_path / "records" / "duplicates" / "whatsapp", "*/*.json")
     rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "sales", "*.meta.json")
 
     assert first_result.agent_name == "sales_income_agent"
     assert second_result.agent_name == "orchestrator_agent"
     assert specialist_calls == 1
     assert len(raw_meta_paths) == 2
-    assert len(rejected_meta_paths) == 1
+    assert len(rejected_meta_paths) == 0
+    assert len(duplicate_paths) == 1
 
     raw_metas = [_read_json(path) for path in raw_meta_paths]
     duplicate_raw_meta = next(meta for meta in raw_metas if meta.get("policy_guard", {}).get("reason") == "duplicate_message")
@@ -976,9 +1039,11 @@ def test_orchestrator_rejects_same_raw_sha256_within_24_hours_across_raw_file_bo
     assert duplicate_raw_meta["policy_guard"]["duplicate"] is True
     assert duplicate_raw_meta["policy_guard"]["duplicate_basis"] == "policy_guard:passed"
 
-    rejected_meta = _read_json(rejected_meta_paths[0])
-    assert rejected_meta["rejection_reason"] == "duplicate_message"
-    assert rejected_meta["policy_guard"]["duplicate"] is True
+    duplicate_record = _read_json(duplicate_paths[0])
+    assert duplicate_record["duplicate_reason"] == "duplicate_message"
+    assert duplicate_record["duplicate_basis"] == "policy_guard:passed"
+    assert duplicate_record["raw_txt_path"] == duplicate_raw_meta["raw_txt_path"]
+    assert duplicate_record["raw_meta_path"] == duplicate_raw_meta["raw_meta_path"]
 
     assert second_result.payload["status"] == "duplicate"
     assert second_result.payload["warnings"][0]["code"] == "duplicate_message"
@@ -1333,16 +1398,16 @@ def test_orchestrator_splits_actual_backlog_sales_and_supervisor_message(
     assert raw_meta["processing_status"] == "rejected"
 
     sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-10.json"
-    supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-10.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-10" / "waigani.json"
     assert not sales_path.exists()
-    assert not supervisor_path.exists()
+    assert supervisor_path.exists()
     assert not (tmp_path / "records" / "structured" / "sales_income" / "ttc_waigani_branch" / "2026-04-10.json").exists()
 
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["classification"]["report_type"] == "mixed"
     assert result.payload["status"] == "needs_review"
     assert len(result.payload["fanout"]["children"]) == 2
-    assert result.payload["output_paths"] == []
+    assert result.payload["output_paths"] == ["records/intelligence/supervisor_control/2026-04-10/waigani.json"]
 
 
 def test_orchestrator_persists_fallback_eligibility_by_report_type_in_raw_metadata(
@@ -1416,6 +1481,26 @@ def test_orchestrator_persists_fallback_eligibility_by_report_type_in_raw_metada
     }
     assert raw_meta_by_type["sales"]["policy_guard"]["fallback_eligible"] is True
     assert raw_meta_by_type["supervisor_control"]["policy_guard"]["fallback_eligible"] is True
+
+
+def test_orchestrator_marks_supervisor_control_as_intelligence_family() -> None:
+    routed = orchestrator_worker._build_routed_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _supervisor_control_report_text()},
+                "metadata": {
+                    "received_at": "2026-04-07T11:05:00Z",
+                    "sender": "supervisor-family-smoke",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    assert routed.payload["classification"]["report_family"] == "intelligence"
+    assert routed.payload["classification"]["report_type"] == "supervisor_control"
 
 
 def test_orchestrator_strict_parse_success_bypasses_fallback(
@@ -2215,7 +2300,9 @@ def _patch_record_paths(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "INTELLIGENCE_DIR", records_dir / "intelligence")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
+    monkeypatch.setattr(record_paths, "DUPLICATES_DIR", records_dir / "duplicates" / "whatsapp")
     monkeypatch.setattr(record_paths, "REVIEW_DIR", records_dir / "review")
     monkeypatch.setattr(record_paths, "PROVENANCE_DIR", records_dir / "provenance")
     monkeypatch.setattr(record_paths, "OBSERVABILITY_DIR", records_dir / "observability")

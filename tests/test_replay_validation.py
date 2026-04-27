@@ -247,6 +247,7 @@ def _patch_replay_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(record_paths, "ACTIONS_DIR", records_dir / "actions")
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "INTELLIGENCE_DIR", records_dir / "intelligence")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
     monkeypatch.setattr(record_paths, "OBSERVABILITY_DIR", records_dir / "observability")
     monkeypatch.setattr(replay_records, "REPO_ROOT", tmp_path)

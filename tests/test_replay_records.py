@@ -394,7 +394,7 @@ def test_orchestrator_replay_of_sales_and_supervisor_control_mixed_file_writes_t
 
     assert exit_code == 0
     sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"
-    supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-07.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json"
     assert sales_path.exists()
     assert supervisor_path.exists()
     supervisor_payload = _read_json(supervisor_path)
@@ -465,6 +465,7 @@ def _patch_replay_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(record_paths, "ACTIONS_DIR", records_dir / "actions")
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "INTELLIGENCE_DIR", records_dir / "intelligence")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
     monkeypatch.setattr(replay_records, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(replay_records, "LOGS_REPLAY_DIR", tmp_path / "logs" / "replay")

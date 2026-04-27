@@ -48,6 +48,7 @@ from apps.supervisor_control_agent.worker import (
 )
 import apps.supervisor_control_agent.record_store as supervisor_record_store
 from packages.record_store.naming import build_rejected_filename, safe_segment
+from packages.record_store.duplicate_archive import archive_duplicate_record
 from packages.record_store.paths import get_raw_path, get_rejected_path, get_structured_path
 from packages.record_store.writer import write_json_file, write_text_file
 from packages.human_tolerance import analyze_human_whatsapp_text
@@ -70,6 +71,8 @@ UNKNOWN_STORAGE_BUCKET: Final[str] = "unknown"
 CLASSIFICATION_CONFIDENCE_MIN_FOR_FALLBACK: Final[float] = 0.45
 MIXED_SPLIT_CONFIDENCE_MIN: Final[float] = 0.85
 RAW_SHA256_DEDUP_WINDOW: Final[timedelta] = timedelta(hours=24)
+INTELLIGENCE_REPORT_FAMILY: Final[str] = "intelligence"
+INTELLIGENCE_SPECIALIST_REPORT_TYPES: Final[frozenset[str]] = frozenset({"supervisor_control"})
 
 ClassificationLabel = str
 
@@ -368,15 +371,28 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 reasons=[_policy_reason_to_governance_reason(policy_decision.reason)],
             ),
         )
-        _write_rejected_record(
-            raw_audit,
-            rejection_reason=rejection_reason,
-            attempted_report_type=classification,
-            attempted_agent=None,
-            attempted_branch_hint=resolved_branch_hint,
-            exception_message=None,
-            policy_decision=policy_decision,
-        )
+        if policy_decision.reason == "duplicate_message":
+            _archive_duplicate_for_disposal(
+                raw_audit,
+                source_message_id=_ingress_field(routed_work_item.payload, "message_id"),
+                sender_phone=_ingress_field(routed_work_item.payload, "sender_phone"),
+                branch=resolved_branch_hint or raw_audit.branch_hint,
+                report_type=specialist_report_type if isinstance(specialist_report_type, str) else classification,
+                report_date=_string_or_none(routing_payload.get("report_date")),
+                duplicate_reason=rejection_reason,
+                duplicate_basis=policy_decision.duplicate_basis,
+                original_or_duplicate_of=_string_or_none(raw_audit.existing_metadata.get("raw_meta_path")),
+            )
+        else:
+            _write_rejected_record(
+                raw_audit,
+                rejection_reason=rejection_reason,
+                attempted_report_type=classification,
+                attempted_agent=None,
+                attempted_branch_hint=resolved_branch_hint,
+                exception_message=None,
+                policy_decision=policy_decision,
+            )
         return _failure_result(
             routed_work_item,
             classification=classification,
@@ -495,16 +511,29 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         downstream_references={"structured_records": _structured_output_paths_from_result(result)},
     )
     if governed_status in {"rejected", "duplicate", "conflict_blocked", "invalid_input"}:
-        _write_rejected_record(
-            raw_audit,
-            rejection_reason=_rejection_reason_from_result(result),
-            attempted_report_type=classification,
-            attempted_agent=target_agent,
-            attempted_branch_hint=resolved_branch_hint,
-            exception_message=None,
-            policy_decision=policy_decision,
-            extra_metadata=_result_metadata_extension(result),
-        )
+        if governed_status == "duplicate":
+            _archive_duplicate_for_disposal(
+                raw_audit,
+                source_message_id=_result_source_message_id(result),
+                sender_phone=_result_sender_phone(result),
+                branch=_result_branch(result) or resolved_branch_hint or raw_audit.branch_hint,
+                report_type=specialist_report_type if isinstance(specialist_report_type, str) else classification,
+                report_date=_result_report_date(result) or _string_or_none(routing_payload.get("report_date")),
+                duplicate_reason=_rejection_reason_from_result(result),
+                duplicate_basis=_duplicate_basis_from_result(result),
+                original_or_duplicate_of=_duplicate_reference_from_result(result),
+            )
+        else:
+            _write_rejected_record(
+                raw_audit,
+                rejection_reason=_rejection_reason_from_result(result),
+                attempted_report_type=classification,
+                attempted_agent=target_agent,
+                attempted_branch_hint=resolved_branch_hint,
+                exception_message=None,
+                policy_decision=policy_decision,
+                extra_metadata=_result_metadata_extension(result),
+            )
     return result
 
 
@@ -672,6 +701,8 @@ def _should_attempt_specialist_fallback(
         return False
     if specialist_report_type is None or not policy_decision.fallback_eligible:
         return False
+    if _is_intelligence_report_type(specialist_report_type):
+        return False
     if specialist_status == "needs_review" and specialist_report_type == "staff_attendance":
         candidate_payload = result.payload if isinstance(result.payload, dict) else {}
         if validate_report(specialist_report_type, candidate_payload).accepted:
@@ -805,7 +836,7 @@ def _routing_governance_context(routed_payload: Mapping[str, Any]) -> dict[str, 
     }
     raw_record = routed_payload.get("raw_record")
     if isinstance(raw_record, Mapping):
-        for field_name in ("raw_meta_path", "raw_sha256"):
+        for field_name in ("raw_txt_path", "raw_meta_path", "raw_sha256"):
             value = raw_record.get(field_name)
             if isinstance(value, str) and value.strip():
                 governance_context[field_name] = value.strip()
@@ -813,9 +844,10 @@ def _routing_governance_context(routed_payload: Mapping[str, Any]) -> dict[str, 
     if isinstance(ingress_envelope, Mapping):
         payload = ingress_envelope.get("payload")
         if isinstance(payload, Mapping):
-            message_id = payload.get("message_id")
-            if isinstance(message_id, str) and message_id.strip():
-                governance_context["message_id"] = message_id.strip()
+            for field_name in ("message_id", "sender_phone"):
+                value = payload.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    governance_context[field_name] = value.strip()
     return governance_context
 
 
@@ -1425,6 +1457,35 @@ def _write_rejected_record(
     return text_path
 
 
+def _archive_duplicate_for_disposal(
+    audit: RawAuditRecord,
+    *,
+    source_message_id: str | None,
+    sender_phone: str | None,
+    branch: str | None,
+    report_type: str | None,
+    report_date: str | None,
+    duplicate_reason: str,
+    duplicate_basis: str | None,
+    original_or_duplicate_of: str | None,
+) -> Path:
+    """Archive one duplicate event under the disposable duplicates store."""
+
+    return archive_duplicate_record(
+        source_message_id=source_message_id,
+        sender_phone=sender_phone,
+        branch=branch,
+        report_type=report_type,
+        report_date=report_date,
+        raw_txt_path=str(audit.text_path),
+        raw_meta_path=str(audit.meta_path),
+        duplicate_reason=duplicate_reason,
+        duplicate_basis=duplicate_basis,
+        original_or_duplicate_of=original_or_duplicate_of,
+        output_root=audit.text_path.parents[4],
+    )
+
+
 def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
     """Create the minimal safe routed work item for exactly one specialist agent."""
 
@@ -1493,7 +1554,10 @@ def _build_routed_work_item(work_item: WorkItem) -> WorkItem:
             "normalized_text": normalization.normalized_text or text,
         },
         "classification": {
-            "report_family": routing_decision.detected_report_type,
+            "report_family": _classification_report_family_label(
+                detected_report_type=routing_decision.detected_report_type,
+                specialist_report_type=routing_decision.specialist_report_type,
+            ),
             "report_type": routing_decision.specialist_report_type,
             "confidence": family_classification.confidence,
             "evidence": family_classification.evidence,
@@ -1569,6 +1633,8 @@ def _raw_metadata_payload(
         "source": audit.source,
         "received_at": audit.received_at,
         "sender": audit.sender,
+        "raw_txt_path": str(audit.text_path),
+        "raw_meta_path": str(audit.meta_path),
         "branch_hint": branch_hint,
         "detected_report_type": detected_report_type,
         "routing_target": routing_target,
@@ -1626,6 +1692,13 @@ def _mapping(value: object) -> Mapping[str, Any]:
     """Return one mapping-like object or an empty mapping."""
 
     return value if isinstance(value, Mapping) else {}
+
+
+def _ingress_field(payload: Mapping[str, Any], field_name: str) -> str | None:
+    """Return one field from the ingress envelope payload when present."""
+
+    ingress_payload = _mapping(_mapping(payload.get("ingress_envelope")).get("payload"))
+    return _string_or_none(ingress_payload.get(field_name))
 
 
 def _with_candidate_mode(work_item: WorkItem) -> WorkItem:
@@ -2199,20 +2272,64 @@ def _classification_confidence(work_item: WorkItem) -> float | None:
     return None
 
 
+def _classification_report_family_label(
+    *,
+    detected_report_type: str,
+    specialist_report_type: str | None,
+) -> str:
+    """Return the routed report family label exposed to downstream governance."""
+
+    if _is_intelligence_report_type(specialist_report_type):
+        return INTELLIGENCE_REPORT_FAMILY
+    return detected_report_type
+
+
+def _is_intelligence_report_type(report_type: str | None) -> bool:
+    """Return whether one specialist report type is governed as intelligence."""
+
+    return isinstance(report_type, str) and report_type in INTELLIGENCE_SPECIALIST_REPORT_TYPES
+
+
+def _is_intelligence_report_family(report_family: object) -> bool:
+    """Return whether one mixed child family is intelligence-only."""
+
+    return isinstance(report_family, str) and report_family in {"intelligence", "supervisor_control"}
+
+
+def _has_intelligence_segment(segments: list[object]) -> bool:
+    """Return whether one split result contains an intelligence child segment."""
+
+    return any(
+        _is_intelligence_report_family(getattr(segment, "detected_report_family", None))
+        for segment in segments
+    )
+
+
 def _can_safely_split_mixed_report(*, mixed_detection, split_result) -> bool:
     """Return whether mixed content can be safely fanned out into children."""
 
     detected_family_count = len(set(mixed_detection.detected_families))
     if detected_family_count < 2:
         return False
-    if split_result.split_confidence < MIXED_SPLIT_CONFIDENCE_MIN:
-        return False
     if len(split_result.segments) < detected_family_count:
         return False
-    return all(
-        bool(segment.raw_text.strip()) and segment.split_confidence >= MIXED_SPLIT_CONFIDENCE_MIN
-        for segment in split_result.segments
-    )
+    if any(not segment.raw_text.strip() for segment in split_result.segments):
+        return False
+
+    if _has_intelligence_segment(split_result.segments):
+        transactional_segments = [
+            segment
+            for segment in split_result.segments
+            if not _is_intelligence_report_family(segment.detected_report_family)
+        ]
+        return bool(transactional_segments) and all(
+            segment.split_confidence >= MIXED_SPLIT_CONFIDENCE_MIN
+            for segment in transactional_segments
+        )
+
+    if split_result.split_confidence < MIXED_SPLIT_CONFIDENCE_MIN:
+        return False
+    return all(segment.split_confidence >= MIXED_SPLIT_CONFIDENCE_MIN for segment in split_result.segments)
 
 
 def _result_warnings(result: AgentResult) -> list[dict[str, Any]]:
@@ -2510,6 +2627,20 @@ def _result_branch(result: AgentResult) -> str | None:
     return None
 
 
+def _result_source_message_id(result: AgentResult) -> str | None:
+    """Return the source WhatsApp message id for one result when present."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    return _string_or_none(_mapping(_mapping(payload.get("ingress_envelope")).get("payload")).get("message_id"))
+
+
+def _result_sender_phone(result: AgentResult) -> str | None:
+    """Return the sender phone for one result when present."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    return _string_or_none(_mapping(_mapping(payload.get("ingress_envelope")).get("payload")).get("sender_phone"))
+
+
 def _result_report_date(result: AgentResult) -> str | None:
     """Return one result report date when present."""
 
@@ -2518,6 +2649,49 @@ def _result_report_date(result: AgentResult) -> str | None:
     if isinstance(report_date, str) and report_date.strip():
         return report_date.strip()
     return None
+
+
+def _duplicate_basis_from_result(result: AgentResult) -> str:
+    """Return one stable duplicate basis from a governed duplicate result."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    policy_guard = _mapping(payload.get("policy_guard"))
+    candidate = _string_or_none(policy_guard.get("duplicate_basis"))
+    if candidate is not None:
+        return candidate
+
+    governance = _mapping(payload.get("governance"))
+    reasons = governance.get("reasons")
+    primary_reason = None
+    if isinstance(reasons, list):
+        for reason in reasons:
+            primary_reason = _string_or_none(reason)
+            if primary_reason is not None:
+                break
+    if primary_reason == "duplicate_message_id":
+        message_id = _string_or_none(governance.get("message_id")) or _result_source_message_id(result)
+        if message_id is not None:
+            return f"message_id:{message_id}"
+    if primary_reason == "duplicate_raw_sha256":
+        raw_sha256 = _string_or_none(governance.get("raw_sha256"))
+        if raw_sha256 is not None:
+            return f"raw_sha256:{raw_sha256}"
+    if primary_reason == "duplicate_semantic":
+        semantic_sha256 = _string_or_none(governance.get("semantic_sha256"))
+        if semantic_sha256 is not None:
+            return f"semantic_sha256:{semantic_sha256}"
+    reference = _string_or_none(governance.get("duplicate_of"))
+    if reference is not None:
+        return f"reference:{reference}"
+    return primary_reason or "duplicate"
+
+
+def _duplicate_reference_from_result(result: AgentResult) -> str | None:
+    """Return the original duplicate reference from one governed result when present."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    governance = _mapping(payload.get("governance"))
+    return _string_or_none(governance.get("duplicate_of"))
 
 
 def _display_structured_path(path: Path) -> str:
@@ -2557,13 +2731,35 @@ def _mixed_parent_status(
         "conflict_blocked",
     }
 
-    child_status_set = set(child_statuses)
+    transactional_summaries = [
+        summary
+        for summary in child_summaries
+        if not _is_intelligence_report_family(summary.get("report_family"))
+    ]
+    if not transactional_summaries:
+        transactional_summaries = child_summaries
 
-    if child_status_set & failed_statuses:
+    transactional_statuses = [
+        summary.get("status")
+        for summary in transactional_summaries
+        if isinstance(summary.get("status"), str)
+    ]
+    if len(transactional_statuses) != len(transactional_summaries):
         return "needs_review"
-    if not child_status_set <= success_statuses:
+    transactional_status_set = set(transactional_statuses)
+
+    if transactional_status_set & failed_statuses:
         return "needs_review"
-    if child_status_set & warning_statuses:
+    if not transactional_status_set <= success_statuses:
+        return "needs_review"
+
+    intelligence_requires_attention = any(
+        _is_intelligence_report_family(summary.get("report_family"))
+        and summary.get("status") not in success_statuses
+        for summary in child_summaries
+    )
+
+    if transactional_status_set & warning_statuses or intelligence_requires_attention:
         return "accepted_with_warning"
     if child_results:
         return "accepted_split"
@@ -2647,7 +2843,10 @@ def _build_mixed_child_work_item(
         "normalized_text": child_normalization.normalized_text or segment.raw_text,
     }
     payload["classification"] = {
-        "report_family": segment.detected_report_family,
+        "report_family": _classification_report_family_label(
+            detected_report_type=segment.detected_report_family,
+            specialist_report_type=specialist_report_type,
+        ),
         "report_type": specialist_report_type,
         "confidence": segment.split_confidence,
         "evidence": list(segment.evidence),

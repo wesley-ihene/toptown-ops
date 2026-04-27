@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from apps.supervisor_control_agent.worker import process_work_item
@@ -32,18 +33,31 @@ def test_valid_supervisor_control_sample_writes_one_signal_file(tmp_path: Path, 
     )
 
     assert result.payload["status"] == "accepted"
+    assert result.payload["governance"]["status"] == "accepted"
+    assert result.payload["governance"]["report_family"] == "intelligence"
     outbox_files = sorted(outbox_path.glob("*.json"))
     assert len(outbox_files) == 1
+    intelligence_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json"
+    structured_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-07.json"
+    assert intelligence_path.exists()
+    assert not structured_path.exists()
     event_path = signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json"
     assert event_path.exists()
 
+    stored_payload = json.loads(intelligence_path.read_text(encoding="utf-8"))
     payload = json.loads(event_path.read_text(encoding="utf-8"))
+    assert stored_payload["report_family"] == "intelligence"
+    assert stored_payload["report_type"] == "supervisor_control"
+    assert stored_payload["raw_text"] is not None
+    assert stored_payload["created_at"] is not None
     assert payload["signal_type"] == "supervisor_control_report"
     assert payload["branch"] == "waigani"
     assert payload["report_date"] == "2026-04-07"
     assert payload["source_record_type"] == "supervisor_control"
     assert payload["event_kind"] == "supervisor_control_report"
     assert payload["payload"]["provenance"]["notes"] == ["Transport delay"]
+    assert payload["ceo_advisory"]["signal_class"] == "intelligence"
+    assert payload["ceo_advisory"]["exception_count"] == 1
     assert payload["warnings"] == []
 
     assert json.loads(outbox_files[0].read_text(encoding="utf-8")) == result.payload
@@ -68,14 +82,16 @@ def test_missing_supervisor_confirmation_raises_missing_confirmation(tmp_path: P
         )
     )
 
-    assert result.payload["status"] == "needs_review"
+    assert result.payload["status"] == "accepted"
+    assert result.payload["governance"]["status"] == "accepted"
     assert result.payload["source"] == "live"
     assert result.payload["sop_compliance"] == "strict"
     assert result.payload["signal_weight"] == 0.4
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
     assert "missing_confirmation" in warning_codes
     assert len(sorted(outbox_path.glob("*.json"))) == 1
-    assert not (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
+    assert (tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json").exists()
+    assert (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
 
 
 def test_unresolved_exception_raises_escalation_required(tmp_path: Path, monkeypatch) -> None:
@@ -98,14 +114,16 @@ def test_unresolved_exception_raises_escalation_required(tmp_path: Path, monkeyp
         )
     )
 
-    assert result.payload["status"] == "needs_review"
+    assert result.payload["status"] == "accepted"
+    assert result.payload["governance"]["status"] == "accepted"
     assert result.payload["source"] == "live"
     assert result.payload["sop_compliance"] == "strict"
     assert result.payload["signal_weight"] == 0.4
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
     assert "escalation_required" in warning_codes
     assert len(sorted(outbox_path.glob("*.json"))) == 1
-    assert not (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
+    assert (tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-07" / "waigani.json").exists()
+    assert (signals_root / "waigani" / "2026-04-07" / "supervisor_control_report__waigani__2026-04-07.json").exists()
 
 
 def test_checklist_style_supervisor_report_synthesizes_contract_items(tmp_path: Path, monkeypatch) -> None:
@@ -291,6 +309,30 @@ def test_replay_marked_work_item_sets_source_to_replay(tmp_path: Path, monkeypat
     assert result.payload["signal_weight"] == 0.4
 
 
+def test_supervisor_control_logs_intelligence_events(tmp_path: Path, monkeypatch, caplog) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+    caplog.set_level(logging.INFO)
+
+    process_work_item(
+        _supervisor_control_work_item(
+            lines=[
+                "Supervisor Control Report",
+                "Branch: Waigani Branch",
+                "Date: 07/04/2026",
+                "Exception Type: STAFF_ISSUE",
+                "Details: Late opening",
+                "Action Taken: Resolved",
+                "Escalated By: Francis",
+                "Time: 08:30",
+                "Supervisor Confirmed: YES",
+            ]
+        )
+    )
+
+    assert '"event": "intelligence_signal_extracted"' in caplog.text
+    assert '"event": "intelligence_report_accepted"' in caplog.text
+
+
 def _patch_output_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     records_dir = tmp_path / "records"
     colony_root = tmp_path / "ioi-colony"
@@ -299,6 +341,7 @@ def _patch_output_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
     monkeypatch.setattr(record_paths, "RAW_WHATSAPP_DIR", records_dir / "raw" / "whatsapp")
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
+    monkeypatch.setattr(record_paths, "INTELLIGENCE_DIR", records_dir / "intelligence")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
     monkeypatch.setenv(record_automation.IOI_COLONY_ROOT_ENV_VAR, str(colony_root))
     monkeypatch.setattr("apps.supervisor_control_agent.worker.OUTBOX_PATH", outbox_path)

@@ -37,7 +37,8 @@ def build_routing_decision(
 ) -> RoutingDecision:
     """Return the explicit routing decision for one inbound message."""
 
-    family_route = route_for_family(family_classification.report_family)
+    routing_family = family_classification.report_type or family_classification.report_family
+    family_route = route_for_family(routing_family)
     review_reason = None
     processing_status = "routed"
     if family_classification.report_family == "unknown":
@@ -69,7 +70,7 @@ def build_routing_decision(
     confidence = round(sum(confidence_inputs) / len(confidence_inputs), 4)
 
     return RoutingDecision(
-        detected_report_type=family_classification.report_family,
+        detected_report_type=routing_family,
         branch_hint=branch_resolution.branch_hint,
         report_date=date_resolution.iso_date,
         raw_report_date=date_resolution.raw_date,
