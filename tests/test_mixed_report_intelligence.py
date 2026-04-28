@@ -377,6 +377,51 @@ def test_orchestrator_keeps_intelligence_child_when_transactional_child_fails(
     assert child_two["status"] == "accepted"
 
 
+def test_orchestrator_exposes_blocking_sales_child_details_for_mixed_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_totals_mismatch_and_supervisor_control_text()},
+                "metadata": {
+                    "received_at": "2026-04-28T13:45:00Z",
+                    "sender": "mixed-sales-totals-review",
+                    "branch_hint": "bena_road",
+                },
+            },
+        )
+    )
+
+    sales_path = tmp_path / "records" / "structured" / "sales_income" / "bena_road" / "2026-04-28.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-28" / "bena_road.json"
+
+    assert not sales_path.exists()
+    assert supervisor_path.exists()
+    assert result.payload["status"] == "needs_review"
+
+    sales_child, supervisor_child = result.payload["fanout"]["children"]
+    assert sales_child["report_type"] == "sales_income"
+    assert sales_child["blocks_transactional_processing"] is True
+    assert sales_child["metrics"]["cash_sales"] == 2205.0
+    assert sales_child["metrics"]["gross_sales"] == 2575.0
+    assert sales_child["metrics"]["till_total"] == 2640.0
+    assert sales_child["metrics"]["eftpos_sales"] == 805.0
+    assert "till_mismatch" in {warning["code"] for warning in sales_child["warnings"]}
+    assert "invalid_totals" in {
+        rejection.get("reason_code") or rejection.get("code")
+        for rejection in sales_child["validation"]["rejections"]
+    }
+    assert supervisor_child["report_type"] == "supervisor_control"
+    assert supervisor_child["blocks_transactional_processing"] is False
+    assert supervisor_child["status"] == "accepted"
+
+
 def _patch_record_paths(monkeypatch, tmp_path: Path) -> None:
     records_dir = tmp_path / "records"
     monkeypatch.setattr(record_paths, "RECORDS_DIR", records_dir)
@@ -508,6 +553,28 @@ def _sales_and_mismatched_supervisor_control_text() -> str:
             "Date: 22/04/2026",
             "Cashier Reconciled: Yes",
             "Floor Check: Passed",
+        ]
+    )
+
+
+def _sales_totals_mismatch_and_supervisor_control_text() -> str:
+    return "\n".join(
+        [
+            "Branch: Bena Road Branch",
+            "Date: 28/04/2026",
+            "",
+            "DAY-END SALES REPORT",
+            "Total Sales: 2575",
+            "Total Cash: 2205",
+            "Total Card: 805",
+            "Till Total: 2640",
+            "Deposit Total: 0",
+            "Traffic: 20",
+            "Served: 18",
+            "",
+            "Supervisor Control Summary",
+            "Floor Check: Passed",
+            "Cashier Reconciled: Yes",
         ]
     )
 

@@ -605,6 +605,114 @@ def test_live_webhook_mixed_sales_and_supervisor_warning_uses_success_ack(
     assert "One split report still needs review" not in artifact_payload["response_text"]
 
 
+def test_live_webhook_mixed_sales_totals_mismatch_surfaces_sales_blocker_details(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(
+            _meta_payload(
+                message_id="wamid.mixed-review-1",
+                text="\n".join(
+                    [
+                        "Branch: Bena Road Branch",
+                        "Date: 28/04/2026",
+                        "",
+                        "DAY-END SALES REPORT",
+                        "Total Sales: 2575",
+                        "Total Cash: 2205",
+                        "Total Card: 805",
+                        "Till Total: 2640",
+                        "Deposit Total: 0",
+                        "Traffic: 20",
+                        "Served: 18",
+                        "",
+                        "Supervisor Control Summary",
+                        "Floor Check: Passed",
+                        "Cashier Reconciled: Yes",
+                    ]
+                ),
+            )
+        ).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["agent"] == "orchestrator_agent"
+    assert body["orchestrator_status"] == "needs_review"
+    assert body["conversation_response"]["response_type"] == "review_ack"
+    assert not (tmp_path / "records" / "structured" / "sales_income" / "bena_road" / "2026-04-28.json").exists()
+    assert (tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-28" / "bena_road.json").exists()
+    assert "Report: Day-End Sales Report" in artifact_payload["response_text"]
+    assert "Sales totals do not match till/payment totals." in artifact_payload["response_text"]
+    assert "Declared Total Cash: K2,205.00" in artifact_payload["response_text"]
+    assert "Calculated Till Cash: K2,640.00" in artifact_payload["response_text"]
+    assert "Declared Total Sales: K2,575.00" in artifact_payload["response_text"]
+    assert "Expected Total Sales: K3,010.00" in artifact_payload["response_text"]
+    assert "Correct the TOTALS section and resend the Day-End Sales Report." in artifact_payload["response_text"]
+    assert "One split report still needs review" not in artifact_payload["response_text"]
+    assert "Supervisor Control Report format" not in artifact_payload["response_text"]
+
+
+def test_live_webhook_mixed_review_keeps_generic_fallback_when_child_detail_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+
+    def fake_process_work_item(work_item):
+        del work_item
+        return AgentResult(
+            agent_name="orchestrator_agent",
+            payload={
+                "status": "needs_review",
+                "governance": {"status": "needs_review", "reasons": ["mixed_child_requires_review"]},
+                "routing": {"review_reason": "mixed_child_requires_review"},
+                "classification": {"report_type": "mixed"},
+                "fanout": {
+                    "children": [
+                        {
+                            "report_type": "sales_income",
+                            "report_family": "sales_income",
+                            "status": "rejected",
+                            "blocks_transactional_processing": True,
+                        },
+                        {
+                            "report_type": "supervisor_control",
+                            "report_family": "supervisor_control",
+                            "report_family_label": "intelligence",
+                            "status": "accepted",
+                            "blocks_transactional_processing": False,
+                        },
+                    ]
+                },
+            },
+        )
+
+    monkeypatch.setattr(bridge.orchestrator_worker, "process_work_item", fake_process_work_item)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(_meta_payload(message_id="wamid.mixed-review-fallback-1")).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
+
+    assert response.status_code == 200
+    assert body["conversation_response"]["response_type"] == "review_ack"
+    assert "TAOP split the message into multiple reports." in artifact_payload["response_text"]
+    assert "One split report still needs review before final processing." in artifact_payload["response_text"]
+
+
 def test_health_endpoint_returns_bridge_status(
     tmp_path: Path,
     monkeypatch,

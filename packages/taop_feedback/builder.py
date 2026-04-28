@@ -119,6 +119,13 @@ def build_review_feedback(response_context: Mapping[str, Any]) -> str:
     )
     thresholds = _thresholds_for_report(report_type or "unknown", feedback_context)
     review_reason = _resolved_review_reason(response_context)
+    mixed_child_feedback = _mixed_child_review_feedback(
+        response_context=response_context,
+        feedback_context=feedback_context,
+        response_reason=review_reason,
+    )
+    if mixed_child_feedback is not None:
+        return mixed_child_feedback
     issues = _generic_review_issues(
         response_reason=review_reason,
         feedback_context=feedback_context,
@@ -165,6 +172,65 @@ def build_review_feedback(response_context: Mapping[str, Any]) -> str:
         auto_accept_min = _float_or_none(thresholds.get("auto_accept_min"))
         if auto_accept_min is not None:
             lines.append(f"Auto-accept threshold: {auto_accept_min:.2f}")
+    return "\n".join(lines)
+
+
+def _mixed_child_review_feedback(
+    *,
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+    response_reason: str | None,
+) -> str | None:
+    """Render blocking mixed-child review details when they are available."""
+
+    if response_reason != "mixed_child_requires_review":
+        return None
+
+    blocking_child = _blocking_transactional_mixed_child(feedback_context)
+    if blocking_child is None:
+        return None
+
+    child_report_type = _mixed_child_report_type(blocking_child)
+    report_label = _REPORT_LABELS.get(child_report_type or "", "Report")
+    branch = _normalized_branch_from_any(
+        blocking_child.get("branch"),
+        _mapping(blocking_child.get("payload")).get("branch"),
+        response_context.get("branch"),
+        feedback_context.get("branch"),
+        _branch_from_text(_raw_text(feedback_context)),
+    )
+    report_date = _normalized_report_date_from_any(
+        blocking_child.get("report_date"),
+        _mapping(blocking_child.get("payload")).get("report_date"),
+        response_context.get("report_date"),
+        feedback_context.get("report_date"),
+        _report_date_from_text(_raw_text(feedback_context)),
+    )
+    issue_lines = _mixed_child_issue_lines(
+        blocking_child=blocking_child,
+        report_type=child_report_type,
+    )
+    if not issue_lines:
+        return None
+
+    lines = [
+        "⚠️ TAOP REVIEW REQUIRED",
+        f"Report: {report_label}",
+    ]
+    if branch is not None:
+        lines.append(f"Branch: {_upper_branch(branch)}")
+    if report_date is not None:
+        lines.append(f"Date: {_display_report_date(report_date)}")
+    lines.extend(
+        [
+            "",
+            "ISSUE",
+            *issue_lines,
+            "",
+            "ACTION",
+            _mixed_child_action_line(report_type=child_report_type, report_label=report_label),
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -415,6 +481,159 @@ def _generic_validation_results(
     else:
         results.append("ℹ Date resolution not surfaced in reply metadata")
     return results
+
+
+def _blocking_transactional_mixed_child(feedback_context: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the first blocking mixed child that failed acceptance."""
+
+    success_statuses = {"accepted", "accepted_with_warning", "accepted_split", "ready"}
+    for child in _mapping_list(feedback_context.get("mixed_children")):
+        if not _mixed_child_blocks_transactional(child):
+            continue
+        status = _text(child.get("status"))
+        if status not in success_statuses:
+            return child
+    return None
+
+
+def _mixed_child_blocks_transactional(child: Mapping[str, Any]) -> bool:
+    """Return whether one mixed child should block parent acceptance."""
+
+    blocks = child.get("blocks_transactional_processing")
+    if isinstance(blocks, bool):
+        return blocks
+    report_family = _text(child.get("report_family_label")) or _text(child.get("report_family")) or _text(child.get("report_type"))
+    return report_family not in {"intelligence", "supervisor_control"}
+
+
+def _mixed_child_report_type(child: Mapping[str, Any]) -> str | None:
+    """Return the concrete report type carried by one mixed child summary."""
+
+    payload = _mapping(child.get("payload"))
+    return _duplicate_report_type(
+        child.get("report_type"),
+        child.get("report_family"),
+        payload.get("report_type"),
+        payload.get("signal_type"),
+    )
+
+
+def _mixed_child_issue_lines(
+    *,
+    blocking_child: Mapping[str, Any],
+    report_type: str | None,
+) -> list[str]:
+    """Return user-facing mixed child issue lines when details are available."""
+
+    normalized_report_type = _canonical_report_type(report_type) or report_type
+    if normalized_report_type == "sales_income":
+        sales_issue_lines = _mixed_sales_issue_lines(blocking_child)
+        if sales_issue_lines:
+            return sales_issue_lines
+    return _mixed_child_generic_issue_lines(blocking_child)
+
+
+def _mixed_sales_issue_lines(blocking_child: Mapping[str, Any]) -> list[str]:
+    """Return concrete totals guidance for one blocking sales child."""
+
+    warning_codes = {
+        code
+        for code in (
+            _text(warning.get("code"))
+            for warning in _mixed_child_warnings(blocking_child)
+        )
+        if code is not None
+    }
+    validation_codes = _validation_reason_codes(
+        _mixed_child_validation(blocking_child),
+        _mapping(_mapping(blocking_child.get("payload")).get("validation")),
+    )
+    if not ({"invalid_totals", "till_mismatch"} & (warning_codes | validation_codes)):
+        return []
+
+    metrics = _mixed_child_metrics(blocking_child)
+    cash_sales = _float_or_none(metrics.get("cash_sales"))
+    eftpos_sales = _float_or_none(metrics.get("eftpos_sales"))
+    mobile_money_sales = _float_or_none(metrics.get("mobile_money_sales"))
+    till_total = _float_or_none(metrics.get("till_total"))
+    deposit_total = _float_or_none(metrics.get("deposit_total"))
+    gross_sales = _float_or_none(metrics.get("gross_sales"))
+
+    lines = ["Sales totals do not match till/payment totals."]
+
+    calculated_till_cash = None
+    if till_total is not None:
+        calculated_till_cash = round(till_total + (deposit_total or 0.0), 2)
+    if cash_sales is not None and calculated_till_cash is not None:
+        lines.append(f"- Declared Total Cash: {_format_money_value(cash_sales)}")
+        lines.append(f"- Calculated Till Cash: {_format_money_value(calculated_till_cash)}")
+
+    payment_parts = [value for value in (cash_sales, eftpos_sales, mobile_money_sales) if value is not None]
+    expected_total_sales = round(sum(payment_parts), 2) if len(payment_parts) >= 2 else None
+    if gross_sales is not None and expected_total_sales is not None:
+        lines.append(f"- Declared Total Sales: {_format_money_value(gross_sales)}")
+        lines.append(f"- Expected Total Sales: {_format_money_value(expected_total_sales)}")
+
+    if len(lines) == 1:
+        generic_lines = _mixed_child_generic_issue_lines(blocking_child)
+        if generic_lines:
+            lines.extend(generic_lines)
+    return lines
+
+
+def _mixed_child_generic_issue_lines(blocking_child: Mapping[str, Any]) -> list[str]:
+    """Return generic but child-specific issue lines from warnings or validation."""
+
+    issue_lines = _generic_issue_lines(
+        feedback_context={
+            "warnings": _mixed_child_warnings(blocking_child),
+            "validation": _mixed_child_validation(blocking_child),
+        }
+    )
+    if not issue_lines:
+        return []
+    summary, *details = issue_lines
+    lines = [summary if summary.endswith(".") else f"{summary}."]
+    lines.extend(f"- {detail}" for detail in details)
+    return lines
+
+
+def _mixed_child_action_line(*, report_type: str | None, report_label: str) -> str:
+    """Return the most specific resend guidance for a blocking mixed child."""
+
+    normalized_report_type = _canonical_report_type(report_type) or report_type
+    if normalized_report_type == "sales_income":
+        return f"Correct the TOTALS section and resend the {report_label}."
+    if report_label == "Report":
+        return "Correct the blocking report and resend it as one report per message."
+    return f"Correct the issues in the {report_label} and resend it as one report per message."
+
+
+def _mixed_child_warnings(blocking_child: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return normalized warning payloads for one mixed child summary."""
+
+    explicit_warnings = blocking_child.get("warnings")
+    if isinstance(explicit_warnings, list):
+        return _mapping_list(explicit_warnings)
+    return _mapping_list(_mapping(blocking_child.get("payload")).get("warnings"))
+
+
+def _mixed_child_metrics(blocking_child: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return normalized metrics for one mixed child summary."""
+
+    metrics = blocking_child.get("metrics")
+    if isinstance(metrics, Mapping):
+        return metrics
+    return _mapping(_mapping(blocking_child.get("payload")).get("metrics"))
+
+
+def _mixed_child_validation(blocking_child: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return normalized validation details for one mixed child summary."""
+
+    validation = blocking_child.get("validation")
+    if isinstance(validation, Mapping):
+        return validation
+    return _mapping(_mapping(blocking_child.get("payload")).get("validation"))
 
 
 def _generic_review_issues(

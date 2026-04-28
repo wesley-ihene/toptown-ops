@@ -446,6 +446,7 @@ def generate_whatsapp_conversation_reply(
         sender_phone=sender_phone,
         conversation_context=stored_context,
     )
+    response_context = _with_mixed_children_feedback(response_context=response_context, outcome=outcome)
     if not replay:
         store_sender_interaction(
             sender_phone=sender_phone,
@@ -459,6 +460,37 @@ def generate_whatsapp_conversation_reply(
         mode=mode,
         dispatcher=dispatcher,
     )
+
+
+def _with_mixed_children_feedback(
+    *,
+    response_context: Mapping[str, Any],
+    outcome: Mapping[str, Any] | Any,
+) -> dict[str, Any]:
+    """Attach mixed child summaries to feedback context when the outcome carries them."""
+
+    payload = outcome.payload if hasattr(outcome, "payload") and isinstance(getattr(outcome, "payload"), Mapping) else outcome
+    if not isinstance(payload, Mapping):
+        return dict(response_context)
+
+    fanout = payload.get("fanout")
+    if not isinstance(fanout, Mapping):
+        return dict(response_context)
+
+    children = fanout.get("children")
+    if not isinstance(children, list):
+        return dict(response_context)
+
+    mixed_children = [dict(child) for child in children if isinstance(child, Mapping)]
+    if not mixed_children:
+        return dict(response_context)
+
+    updated_response_context = dict(response_context)
+    feedback_context = updated_response_context.get("feedback_context")
+    normalized_feedback_context = dict(feedback_context) if isinstance(feedback_context, Mapping) else {}
+    normalized_feedback_context["mixed_children"] = mixed_children
+    updated_response_context["feedback_context"] = normalized_feedback_context
+    return updated_response_context
 
 
 def dispatch_whatsapp_response(

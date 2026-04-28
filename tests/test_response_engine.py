@@ -177,6 +177,113 @@ def test_review_ack_supervisor_control_invalid_format_uses_deterministic_guidanc
     assert "Resend using the exact Supervisor Control Report format." in rendered["response_text"]
 
 
+def test_review_ack_mixed_child_requires_review_surfaces_blocking_sales_totals() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "mixed",
+            "reason": "mixed_child_requires_review",
+            "feedback_context": {
+                "mixed_children": [
+                    {
+                        "report_type": "sales_income",
+                        "report_family": "sales_income",
+                        "branch": "bena_road",
+                        "report_date": "2026-04-28",
+                        "status": "needs_review",
+                        "blocks_transactional_processing": True,
+                        "warnings": [
+                            {
+                                "code": "till_mismatch",
+                                "severity": "warning",
+                                "message": "Till total does not reconcile with cash sales.",
+                            }
+                        ],
+                        "validation": {
+                            "rejections": [
+                                {
+                                    "reason_code": "invalid_totals",
+                                    "reason_detail": "Total sales does not match payment totals.",
+                                }
+                            ]
+                        },
+                        "metrics": {
+                            "cash_sales": 2205.0,
+                            "eftpos_sales": 805.0,
+                            "gross_sales": 2575.0,
+                            "till_total": 2640.0,
+                            "deposit_total": 0.0,
+                        },
+                    },
+                    {
+                        "report_type": "supervisor_control",
+                        "report_family": "supervisor_control",
+                        "report_family_label": "intelligence",
+                        "status": "accepted",
+                        "blocks_transactional_processing": False,
+                        "warnings": [
+                            {
+                                "code": "missing_fields",
+                                "severity": "warning",
+                                "message": "Supervisor control fields were incomplete.",
+                            }
+                        ],
+                    },
+                ]
+            },
+        }
+    )
+
+    assert "⚠️ TAOP REVIEW REQUIRED" in rendered["response_text"]
+    assert "Report: Day-End Sales Report" in rendered["response_text"]
+    assert "Branch: BENA ROAD" in rendered["response_text"]
+    assert "Date: 28/04/26" in rendered["response_text"]
+    assert "Sales totals do not match till/payment totals." in rendered["response_text"]
+    assert "Declared Total Cash: K2,205.00" in rendered["response_text"]
+    assert "Calculated Till Cash: K2,640.00" in rendered["response_text"]
+    assert "Declared Total Sales: K2,575.00" in rendered["response_text"]
+    assert "Expected Total Sales: K3,010.00" in rendered["response_text"]
+    assert "Correct the TOTALS section and resend the Day-End Sales Report." in rendered["response_text"]
+    assert "One split report still needs review" not in rendered["response_text"]
+    assert "Supervisor Control Report format" not in rendered["response_text"]
+
+
+def test_review_ack_mixed_child_requires_review_falls_back_when_child_detail_missing() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "mixed",
+            "reason": "mixed_child_requires_review",
+            "feedback_context": {
+                "mixed_children": [
+                    {
+                        "report_type": "sales_income",
+                        "report_family": "sales_income",
+                        "status": "rejected",
+                        "blocks_transactional_processing": True,
+                    },
+                    {
+                        "report_type": "supervisor_control",
+                        "report_family": "supervisor_control",
+                        "report_family_label": "intelligence",
+                        "status": "accepted",
+                        "blocks_transactional_processing": False,
+                    },
+                ]
+            },
+        }
+    )
+
+    assert "TAOP split the message into multiple reports." in rendered["response_text"]
+    assert "One split report still needs review before final processing." in rendered["response_text"]
+
+
 def test_rejected_fix_request_renders_correctly() -> None:
     rendered = render_whatsapp_response(
         {
@@ -215,7 +322,7 @@ def test_duplicate_notice_renders_correctly() -> None:
     )
 
     assert rendered["response_text"] == (
-        "ℹ️ This report was already received earlier.\n"
+        "ℹ️ This report was already received and processed earlier.\n"
         "No new processing was applied."
     )
 

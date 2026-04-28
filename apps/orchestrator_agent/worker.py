@@ -1215,10 +1215,21 @@ def _process_mixed_work_item(
             child_summaries.append(
                 {
                     "agent_name": None,
+                    "report_type": segment.detected_report_family,
                     "report_family": segment.detected_report_family,
                     "report_family_label": getattr(segment, "report_family_label", segment.detected_report_family),
                     "status": "needs_review",
                     "blocks_transactional_processing": getattr(segment, "blocks_transactional_processing", True),
+                    "warnings": [
+                        _make_warning(
+                            code="unsupported_segment",
+                            severity="warning",
+                            message=f"Mixed child family `{segment.detected_report_family}` has no configured specialist route.",
+                        )
+                    ],
+                    "errors": [],
+                    "metrics": {},
+                    "validation": {},
                     "output_paths": [],
                     "lineage": _build_mixed_child_lineage(
                         raw_audit=raw_audit,
@@ -1254,10 +1265,21 @@ def _process_mixed_work_item(
             child_summaries.append(
                 {
                     "agent_name": None,
+                    "report_type": segment.detected_report_family,
                     "report_family": segment.detected_report_family,
                     "report_family_label": getattr(segment, "report_family_label", segment.detected_report_family),
                     "status": "invalid_input",
                     "blocks_transactional_processing": getattr(segment, "blocks_transactional_processing", True),
+                    "warnings": [],
+                    "errors": [
+                        _make_warning(
+                            code="routing_failure",
+                            severity="error",
+                            message=f"Mixed child routing failed for {segment.detected_report_family}: {exc}",
+                        )
+                    ],
+                    "metrics": {},
+                    "validation": {},
                     "output_paths": [],
                     "lineage": dict(child_work_item.payload.get("lineage", {})),
                     "segment_id": segment.segment_id,
@@ -1277,21 +1299,33 @@ def _process_mixed_work_item(
         child_results.append(child_result)
         child_output_paths = _structured_output_paths_from_result(child_result)
         output_paths.extend(child_output_paths)
+        child_payload = dict(child_result.payload) if isinstance(child_result.payload, dict) else {}
+        child_warnings = _result_warnings(child_result)
+        child_errors = [
+            warning
+            for warning in child_warnings
+            if _string_or_none(warning.get("severity")) == "error"
+        ]
         child_summaries.append(
             {
                 "agent_name": child_result.agent_name,
+                "report_type": segment.detected_report_family,
                 "report_family": segment.detected_report_family,
                 "report_family_label": getattr(segment, "report_family_label", segment.detected_report_family),
                 "branch": _result_branch(child_result),
                 "report_date": _result_report_date(child_result),
                 "status": _result_status(child_result),
                 "blocks_transactional_processing": getattr(segment, "blocks_transactional_processing", True),
+                "warnings": child_warnings,
+                "errors": child_errors,
+                "metrics": dict(_mapping(child_payload.get("metrics"))),
+                "validation": _result_validation_outcome(child_result),
                 "output_paths": child_output_paths,
                 "lineage": dict(child_work_item.payload.get("lineage", {})),
                 "segment_id": segment.segment_id,
                 "segment_range": {"start_line": segment.start_line, "end_line": segment.end_line},
                 "split_confidence": segment.split_confidence,
-                "payload": dict(child_result.payload) if isinstance(child_result.payload, dict) else {},
+                "payload": child_payload,
             }
         )
 
