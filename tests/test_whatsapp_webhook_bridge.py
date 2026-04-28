@@ -539,8 +539,9 @@ def test_live_webhook_fans_out_mixed_report_when_split_is_safe(
     assert response.status_code == 200
     assert body["ok"] is True
     assert body["agent"] == "orchestrator_agent"
-    assert body["orchestrator_status"] in {"accepted_split", "accepted_with_warning"}
+    assert body["orchestrator_status"] in {"accepted", "accepted_with_warning"}
     assert body["route"] == "mixed"
+    assert body["conversation_response"]["response_type"] == "accepted_ack"
     assert len(body["outputs"]) == 3
     assert body["conversation_response"]["json_path"] in body["outputs"]
     assert len(raw_meta_paths) == 1
@@ -553,6 +554,55 @@ def test_live_webhook_fans_out_mixed_report_when_split_is_safe(
     assert raw_meta["detected_report_type"] == "mixed"
     assert raw_meta["routing_target"] == "fan_out"
     assert raw_meta["processing_status"] == "processed"
+
+
+def test_live_webhook_mixed_sales_and_supervisor_warning_uses_success_ack(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(
+            _meta_payload(
+                message_id="wamid.mixed-warning-1",
+                text="\n".join(
+                    [
+                        "Branch: Bena Road Branch",
+                        "Date: 28/04/2026",
+                        "",
+                        "DAY-END SALES REPORT",
+                        "Gross Sales: 1200",
+                        "Cash Sales: 600",
+                        "Eftpos Sales: 600",
+                        "Traffic: 12",
+                        "Served: 9",
+                        "",
+                        "Supervisor Control Summary",
+                        "Notes: Skeleton team only",
+                    ]
+                ),
+            )
+        ).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["agent"] == "orchestrator_agent"
+    assert body["orchestrator_status"] == "accepted_with_warning"
+    assert body["route"] == "mixed"
+    assert body["conversation_response"]["response_type"] == "accepted_ack"
+    assert (tmp_path / "records" / "structured" / "sales_income" / "bena_road" / "2026-04-28.json").exists()
+    assert (tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-28" / "bena_road.json").exists()
+    assert not (tmp_path / "records" / "structured" / "supervisor_control" / "bena_road" / "2026-04-28.json").exists()
+    assert "TAOP REVIEW REQUIRED" not in artifact_payload["response_text"]
+    assert "Please resend" not in artifact_payload["response_text"]
+    assert "One split report still needs review" not in artifact_payload["response_text"]
 
 
 def test_health_endpoint_returns_bridge_status(

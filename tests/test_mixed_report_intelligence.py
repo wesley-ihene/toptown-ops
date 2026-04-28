@@ -186,7 +186,9 @@ def test_orchestrator_mixed_sales_and_supervisor_control_writes_two_structured_r
 
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["classification"]["report_type"] == "mixed"
-    assert result.payload["status"] in {"accepted_split", "accepted_with_warning"}
+    assert result.payload["status"] in {"accepted", "accepted_with_warning"}
+    assert result.payload["routing"]["review_reason"] is None
+    assert "mixed_child_requires_review" not in result.payload["governance"]["reasons"]
     assert len(result.payload["fanout"]["children"]) == 2
 
     child_one, child_two = result.payload["fanout"]["children"]
@@ -230,7 +232,8 @@ def test_orchestrator_accepts_split_for_sales_and_supervisor_control_summary(
     assert sales_path.exists()
     assert supervisor_path.exists()
     assert result.agent_name == "orchestrator_agent"
-    assert result.payload["status"] == "accepted_split"
+    assert result.payload["status"] in {"accepted", "accepted_with_warning"}
+    assert result.payload["routing"]["review_reason"] is None
     assert len(result.payload["fanout"]["children"]) == 2
 
     child_one, child_two = result.payload["fanout"]["children"]
@@ -273,6 +276,8 @@ def test_orchestrator_accepts_incomplete_supervisor_control_as_intelligence_warn
     assert not legacy_structured_supervisor_path.exists()
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["status"] == "accepted_with_warning"
+    assert result.payload["routing"]["review_reason"] is None
+    assert result.payload["governance"]["reasons"] == ["mixed_intelligence_warning"]
 
     sales_child, supervisor_child = result.payload["fanout"]["children"]
     assert sales_child["report_family"] == "sales_income"
@@ -320,6 +325,8 @@ def test_orchestrator_records_supervisor_control_date_mismatch_without_blocking_
     assert not legacy_structured_supervisor_path.exists()
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["status"] == "accepted_with_warning"
+    assert result.payload["routing"]["review_reason"] is None
+    assert result.payload["governance"]["reasons"] == ["mixed_intelligence_warning"]
 
     sales_child, supervisor_child = result.payload["fanout"]["children"]
     assert sales_child["status"] == "accepted"
@@ -360,6 +367,8 @@ def test_orchestrator_keeps_intelligence_child_when_transactional_child_fails(
     assert supervisor_path.exists()
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["status"] == "needs_review"
+    assert result.payload["routing"]["review_reason"] == "mixed_child_requires_review"
+    assert result.payload["governance"]["reasons"] == ["mixed_child_requires_review"]
 
     child_one, child_two = result.payload["fanout"]["children"]
     assert child_one["report_family"] == "sales_income"

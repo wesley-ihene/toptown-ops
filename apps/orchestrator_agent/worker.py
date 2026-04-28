@@ -1295,7 +1295,10 @@ def _process_mixed_work_item(
             }
         )
 
-    parent_status = _mixed_parent_status(child_results=child_results, child_summaries=child_summaries)
+    parent_status, parent_reason = _mixed_parent_decision(
+        child_results=child_results,
+        child_summaries=child_summaries,
+    )
     branch_hint = _mixed_branch_hint(child_results)
     routing_payload = _build_routing_payload(
         classification="mixed",
@@ -1308,24 +1311,27 @@ def _process_mixed_work_item(
         confidence=_mixed_confidence(child_results),
         evidence=list(mixed_detection.evidence),
         normalized_header_candidates=[],
-        review_reason=None if parent_status != "needs_review" else "mixed_child_requires_review",
+        review_reason=parent_reason if parent_status == "needs_review" else None,
         specialist_report_type=None,
         split_strategy="explicit_report_headers",
         child_report_types=[child["report_family"] for child in child_summaries],
         child_count=len(child_summaries),
     )
 
+    accepted_parent_statuses = {"accepted", "accepted_with_warning"}
+    governance_reasons = [parent_reason] if parent_reason is not None else []
+
     _update_raw_metadata(
         raw_audit,
         detected_report_type="mixed",
         routing_target="fan_out",
-        processing_status="processed" if parent_status in {"accepted_split", "accepted_with_warning"} else "rejected",
+        processing_status="processed" if parent_status in accepted_parent_statuses else "rejected",
         branch_hint=branch_hint,
         routing_metadata=_routing_metadata_from_payload(routing_payload),
         policy_decision=policy_decision,
         governance_outcome=_governance_outcome_payload(
-            status="accepted_with_warning" if parent_status in {"accepted_split", "accepted_with_warning"} else "needs_review",
-            reasons=[],
+            status=parent_status if parent_status in accepted_parent_statuses else "needs_review",
+            reasons=governance_reasons,
             export_allowed=False,
         ),
     )
@@ -1376,6 +1382,11 @@ def _process_mixed_work_item(
             "output_count": len(output_paths),
         },
         "items": [],
+        "governance": _governance_outcome_payload(
+            status=parent_status if parent_status in accepted_parent_statuses else "needs_review",
+            reasons=governance_reasons,
+            export_allowed=False,
+        ),
         "lineage": {
             "message_role": "split_parent",
             "split_strategy": "explicit_report_headers",
@@ -2848,7 +2859,10 @@ def _summary_blocks_transactional_processing(summary: Mapping[str, Any]) -> bool
     blocks = summary.get("blocks_transactional_processing")
     if isinstance(blocks, bool):
         return blocks
-    return not _is_intelligence_report_family(summary.get("report_family"))
+    report_family = summary.get("report_family")
+    if _is_intelligence_report_family(report_family):
+        return False
+    return not _is_intelligence_report_family(summary.get("report_family_label"))
 
 
 def _child_summary_has_warnings(summary: Mapping[str, Any]) -> bool:
@@ -2859,15 +2873,17 @@ def _child_summary_has_warnings(summary: Mapping[str, Any]) -> bool:
     return isinstance(warnings, list) and any(isinstance(warning, Mapping) for warning in warnings)
 
 
-def _mixed_parent_status(
+def _mixed_parent_decision(
     *,
     child_results: list[AgentResult],
     child_summaries: list[dict[str, Any]],
-) -> str:
-    """Return aggregate status for a mixed parent result."""
+) -> tuple[str, str | None]:
+    """Return aggregate status and reason for a mixed parent result."""
+
+    del child_results
 
     if not child_summaries:
-        return "invalid_input"
+        return "invalid_input", None
 
     child_statuses = [
         summary.get("status")
@@ -2875,25 +2891,21 @@ def _mixed_parent_status(
         if isinstance(summary.get("status"), str)
     ]
     if not child_statuses or len(child_statuses) != len(child_summaries):
-        return "needs_review"
+        return "needs_review", "mixed_child_requires_review"
 
     success_statuses = {"accepted", "accepted_with_warning"}
     warning_statuses = {"accepted_with_warning"}
-    failed_statuses = {
-        "invalid_input",
-        "needs_review",
-        "rejected",
-        "duplicate",
-        "conflict_blocked",
-    }
 
     transactional_summaries = [
         summary
         for summary in child_summaries
         if _summary_blocks_transactional_processing(summary)
     ]
-    if not transactional_summaries:
-        transactional_summaries = child_summaries
+    intelligence_summaries = [
+        summary
+        for summary in child_summaries
+        if not _summary_blocks_transactional_processing(summary)
+    ]
 
     transactional_statuses = [
         summary.get("status")
@@ -2901,28 +2913,23 @@ def _mixed_parent_status(
         if isinstance(summary.get("status"), str)
     ]
     if len(transactional_statuses) != len(transactional_summaries):
-        return "needs_review"
-    transactional_status_set = set(transactional_statuses)
-
-    if transactional_status_set & failed_statuses:
-        return "needs_review"
-    if not transactional_status_set <= success_statuses:
-        return "needs_review"
+        return "needs_review", "mixed_child_requires_review"
+    if any(status not in success_statuses for status in transactional_statuses):
+        return "needs_review", "mixed_child_requires_review"
 
     intelligence_requires_attention = any(
-        not _summary_blocks_transactional_processing(summary)
-        and (
+        (
             summary.get("status") not in success_statuses
             or _child_summary_has_warnings(summary)
         )
-        for summary in child_summaries
+        for summary in intelligence_summaries
     )
 
-    if transactional_status_set & warning_statuses or intelligence_requires_attention:
-        return "accepted_with_warning"
-    if child_results:
-        return "accepted_split"
-    return "invalid_input"
+    if intelligence_requires_attention:
+        return "accepted_with_warning", "mixed_intelligence_warning"
+    if any(status in warning_statuses for status in transactional_statuses):
+        return "accepted_with_warning", None
+    return "accepted", None
 
 
 def _mixed_confidence(child_results: list[AgentResult]) -> float:

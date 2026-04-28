@@ -1396,6 +1396,8 @@ def test_orchestrator_splits_actual_backlog_sales_and_supervisor_message(
     assert raw_meta["split_child_count"] == 2
     assert raw_meta["split_child_report_types"] == ["sales_income", "supervisor_control"]
     assert raw_meta["processing_status"] == "rejected"
+    assert raw_meta["governance_status"] == "needs_review"
+    assert raw_meta["governance_reasons"] == ["mixed_child_requires_review"]
 
     sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-10.json"
     supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-10" / "waigani.json"
@@ -1406,6 +1408,8 @@ def test_orchestrator_splits_actual_backlog_sales_and_supervisor_message(
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["classification"]["report_type"] == "mixed"
     assert result.payload["status"] == "needs_review"
+    assert result.payload["routing"]["review_reason"] == "mixed_child_requires_review"
+    assert result.payload["governance"]["reasons"] == ["mixed_child_requires_review"]
     assert len(result.payload["fanout"]["children"]) == 2
     assert result.payload["output_paths"] == ["records/intelligence/supervisor_control/2026-04-10/waigani.json"]
 
