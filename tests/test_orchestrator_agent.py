@@ -439,7 +439,7 @@ def test_orchestrator_routes_stylized_unicode_attendance_sample_to_structured_ou
     assert raw_meta["resolved_report_date"] == "2026-04-06"
     assert raw_meta["raw_report_date"] == "MONDAY:06/04/26"
     assert raw_meta["processing_status"] == "processed"
-    assert raw_meta["governance_status"] == "needs_review"
+    assert raw_meta["governance_status"] == "accepted"
     assert raw_meta["human_tolerance"]["human_tolerance_applied"] is True
 
     structured_path = tmp_path / "records" / "structured" / "hr_attendance" / "waigani" / "2026-04-06.json"
@@ -449,7 +449,7 @@ def test_orchestrator_routes_stylized_unicode_attendance_sample_to_structured_ou
     assert result.payload["branch"] == "waigani"
     assert result.payload["report_date"] == "2026-04-06"
     assert result.payload["signal_subtype"] == "staff_attendance"
-    assert result.payload["status"] == "needs_review"
+    assert result.payload["status"] == "accepted"
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
     assert "unknown_attendance_status" not in warning_codes
 
@@ -492,7 +492,7 @@ def test_orchestrator_human_tolerance_normalizes_real_world_sunday_attendance_in
     assert result.payload["signal_subtype"] == "staff_attendance"
     assert result.payload["branch"] == "waigani"
     assert result.payload["report_date"] == "2026-04-26"
-    assert result.payload["status"] == "needs_review"
+    assert result.payload["status"] == "accepted"
     assert item_statuses == {
         "Alice Koko": "off",
         "Grace Masson": "leave",
@@ -1279,7 +1279,7 @@ def test_orchestrator_routes_actual_backlog_attendance_message(
     assert structured_path.exists()
 
     assert result.agent_name == "hr_agent"
-    assert result.payload["status"] == "needs_review"
+    assert result.payload["status"] == "accepted"
     assert result.payload["signal_subtype"] == "staff_attendance"
 
 

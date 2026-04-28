@@ -77,11 +77,8 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             staffing=staffing,
             coverage=coverage,
         )
-        warnings = dedupe_warnings(parsed.warnings + derived_warnings)
-        if any(warning.severity == "error" for warning in warnings):
-            status = "invalid_input"
-        else:
-            status = "accepted" if not warnings else "needs_review"
+        warnings, insights = _partition_alerts(parsed.warnings + derived_warnings)
+        status = _final_status(warnings)
 
         result = AgentResult(
             agent_name=AGENT_NAME,
@@ -114,6 +111,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                     "notes": parsed.notes,
                 },
                 "warnings": [warning.to_payload() for warning in warnings],
+                **({"insights": [insight.to_payload() for insight in insights]} if insights else {}),
                 "status": status,
             },
             metadata=_validation_metadata(status=status, warnings=warnings, report_type=report_type, work_item_payload=payload),
@@ -302,14 +300,35 @@ def _compute_confidence(
     penalties = {
         "missing_fields": 0.25,
         "data_mismatch": 0.15,
+        "attendance_totals_mismatch": 0.15,
+        "duplicate_staff_names": 0.15,
         "low_coverage": 0.15,
         "unknown_attendance_status": 0.1,
-        "attendance_gap_present": 0.1,
     }
     for warning in warnings:
+        if warning.severity != "warning":
+            continue
         confidence -= penalties.get(warning.code, 0.0)
 
     return round(max(confidence, 0.0), 2)
+
+
+def _partition_alerts(entries: list[WarningEntry]) -> tuple[list[WarningEntry], list[WarningEntry]]:
+    """Split blocking warnings from informational HR insights."""
+
+    warnings = dedupe_warnings([entry for entry in entries if entry.severity != "info"])
+    insights = dedupe_warnings([entry for entry in entries if entry.severity == "info"])
+    return warnings, insights
+
+
+def _final_status(warnings: list[WarningEntry]) -> str:
+    """Return the HR result status using severity-aware warning handling."""
+
+    if any(warning.severity == "error" for warning in warnings):
+        return "invalid_input"
+    if any(warning.severity == "warning" for warning in warnings):
+        return "needs_review"
+    return "accepted"
 
 
 def _validation_metadata(
