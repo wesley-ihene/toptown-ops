@@ -476,7 +476,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             return fallback_result
 
     if isinstance(specialist_report_type, str):
-        result = _finalize_strict_candidate(
+        result = _finalize_specialist_candidate(
             routed_work_item=routed_work_item,
             candidate_result=result,
             specialist_report_type=specialist_report_type,
@@ -713,6 +713,66 @@ def _should_attempt_specialist_fallback(
     return classification_confidence >= CLASSIFICATION_CONFIDENCE_MIN_FOR_FALLBACK
 
 
+def _finalize_specialist_candidate(
+    *,
+    routed_work_item: WorkItem,
+    candidate_result: AgentResult,
+    specialist_report_type: str,
+    raw_audit: RawAuditRecord,
+) -> AgentResult:
+    """Finalize one specialist result using strict or intelligence-only handling."""
+
+    if _should_bypass_strict_validation(
+        routed_work_item=routed_work_item,
+        specialist_report_type=specialist_report_type,
+    ):
+        return _finalize_intelligence_candidate(
+            routed_work_item=routed_work_item,
+            candidate_result=candidate_result,
+        )
+    return _finalize_strict_candidate(
+        routed_work_item=routed_work_item,
+        candidate_result=candidate_result,
+        specialist_report_type=specialist_report_type,
+        raw_audit=raw_audit,
+    )
+
+
+def _finalize_intelligence_candidate(
+    *,
+    routed_work_item: WorkItem,
+    candidate_result: AgentResult,
+) -> AgentResult:
+    """Persist intelligence candidates without shared strict validation or review output."""
+
+    finalized_payload = dict(candidate_result.payload) if isinstance(candidate_result.payload, dict) else {}
+    _hydrate_intelligence_scope(finalized_payload, routed_work_item)
+    finalized_result = AgentResult(
+        agent_name=candidate_result.agent_name,
+        payload=finalized_payload,
+        metadata=_intelligence_write_metadata(
+            candidate_result=candidate_result,
+            routed_work_item=routed_work_item,
+        ),
+    )
+
+    write_result = _write_final_structured_result(finalized_result)
+    if write_result is not None:
+        _apply_final_governance(finalized_result, write_result)
+        return finalized_result
+
+    governance_status = _result_status(finalized_result)
+    governance_reasons = _governance_reasons_without_write(finalized_result)
+    finalized_result.payload["status"] = governance_status
+    finalized_result.payload["export_allowed"] = False
+    finalized_result.payload["governance"] = _governance_outcome_payload(
+        status=governance_status,
+        reasons=governance_reasons,
+        export_allowed=False,
+    )
+    return finalized_result
+
+
 def _finalize_strict_candidate(
     *,
     routed_work_item: WorkItem,
@@ -825,10 +885,82 @@ def _strict_write_metadata(
     return metadata
 
 
+def _intelligence_write_metadata(
+    *,
+    candidate_result: AgentResult,
+    routed_work_item: WorkItem,
+) -> dict[str, Any]:
+    """Return sidecar metadata for intelligence records without strict orchestrator validation."""
+
+    metadata = dict(candidate_result.metadata) if isinstance(candidate_result.metadata, dict) else {}
+    routed_payload = routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}
+    existing_validation = _mapping(metadata.get("validation"))
+    validation_payload = dict(existing_validation) if existing_validation else {
+        "stage": AGENT_NAME,
+        "status": "bypassed",
+        "accepted": True,
+        "rejections": [],
+        "reason_codes": [],
+        "normalization": {},
+    }
+    validation_details = dict(_mapping(validation_payload.get("details")))
+    validation_details["orchestrator_validation_bypassed"] = True
+    validation_details["candidate_status"] = _result_status(candidate_result)
+    validation_payload["details"] = validation_details
+    metadata["validation"] = validation_payload
+    metadata.pop("acceptance", None)
+    metadata["governance_context"] = {
+        **_mapping(metadata.get("governance_context")),
+        **_routing_governance_context(routed_payload),
+    }
+    return metadata
+
+
+def _hydrate_intelligence_scope(
+    finalized_payload: dict[str, Any],
+    routed_work_item: WorkItem,
+) -> None:
+    """Fill missing intelligence branch/report_date values from routed context."""
+
+    routed_payload = routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}
+    routing = _mapping(routed_payload.get("routing"))
+    branch = _string_or_none(finalized_payload.get("branch"))
+    if branch is None:
+        branch_hint = _string_or_none(routing.get("branch_hint"))
+        if branch_hint is not None:
+            finalized_payload["branch"] = branch_hint
+
+    report_date = _string_or_none(finalized_payload.get("report_date"))
+    if report_date is None:
+        for field_name in ("report_date", "normalized_report_date", "raw_report_date"):
+            candidate = _string_or_none(routing.get(field_name))
+            if candidate is not None:
+                finalized_payload["report_date"] = candidate
+                break
+
+
+def _should_bypass_strict_validation(
+    *,
+    routed_work_item: WorkItem,
+    specialist_report_type: str,
+) -> bool:
+    """Return whether the shared strict validation layer should be skipped."""
+
+    if _is_intelligence_report_type(specialist_report_type):
+        return True
+    routed_payload = routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}
+    classification = _mapping(routed_payload.get("classification"))
+    return _is_intelligence_report_family(classification.get("report_family"))
+
+
 def _routing_governance_context(routed_payload: Mapping[str, Any]) -> dict[str, Any]:
     """Return governance context from the routed work item without losing raw links."""
 
     governance_context = {
+        "classified_report_family": _string_or_default(
+            _mapping(routed_payload.get("classification")).get("report_family"),
+            default="unknown",
+        ),
         "classified_report_type": _string_or_default(
             _mapping(routed_payload.get("classification")).get("report_type"),
             default="unknown",
@@ -1084,7 +1216,9 @@ def _process_mixed_work_item(
                 {
                     "agent_name": None,
                     "report_family": segment.detected_report_family,
+                    "report_family_label": getattr(segment, "report_family_label", segment.detected_report_family),
                     "status": "needs_review",
+                    "blocks_transactional_processing": getattr(segment, "blocks_transactional_processing", True),
                     "output_paths": [],
                     "lineage": _build_mixed_child_lineage(
                         raw_audit=raw_audit,
@@ -1121,7 +1255,9 @@ def _process_mixed_work_item(
                 {
                     "agent_name": None,
                     "report_family": segment.detected_report_family,
+                    "report_family_label": getattr(segment, "report_family_label", segment.detected_report_family),
                     "status": "invalid_input",
+                    "blocks_transactional_processing": getattr(segment, "blocks_transactional_processing", True),
                     "output_paths": [],
                     "lineage": dict(child_work_item.payload.get("lineage", {})),
                     "segment_id": segment.segment_id,
@@ -1131,7 +1267,7 @@ def _process_mixed_work_item(
             )
             continue
 
-        child_result = _finalize_strict_candidate(
+        child_result = _finalize_specialist_candidate(
             routed_work_item=child_work_item,
             candidate_result=child_result,
             specialist_report_type=route.specialist_type,
@@ -1145,9 +1281,11 @@ def _process_mixed_work_item(
             {
                 "agent_name": child_result.agent_name,
                 "report_family": segment.detected_report_family,
+                "report_family_label": getattr(segment, "report_family_label", segment.detected_report_family),
                 "branch": _result_branch(child_result),
                 "report_date": _result_report_date(child_result),
                 "status": _result_status(child_result),
+                "blocks_transactional_processing": getattr(segment, "blocks_transactional_processing", True),
                 "output_paths": child_output_paths,
                 "lineage": dict(child_work_item.payload.get("lineage", {})),
                 "segment_id": segment.segment_id,
@@ -2300,7 +2438,8 @@ def _has_intelligence_segment(segments: list[object]) -> bool:
     """Return whether one split result contains an intelligence child segment."""
 
     return any(
-        _is_intelligence_report_family(getattr(segment, "detected_report_family", None))
+        _is_intelligence_report_family(getattr(segment, "report_family_label", None))
+        or _is_intelligence_report_family(getattr(segment, "detected_report_family", None))
         for segment in segments
     )
 
@@ -2320,7 +2459,7 @@ def _can_safely_split_mixed_report(*, mixed_detection, split_result) -> bool:
         transactional_segments = [
             segment
             for segment in split_result.segments
-            if not _is_intelligence_report_family(segment.detected_report_family)
+            if getattr(segment, "blocks_transactional_processing", not _is_intelligence_report_family(segment.detected_report_family))
         ]
         return bool(transactional_segments) and all(
             segment.split_confidence >= MIXED_SPLIT_CONFIDENCE_MIN
@@ -2703,6 +2842,23 @@ def _display_structured_path(path: Path) -> str:
     return str(path)
 
 
+def _summary_blocks_transactional_processing(summary: Mapping[str, Any]) -> bool:
+    """Return whether one mixed child summary should block transactional acceptance."""
+
+    blocks = summary.get("blocks_transactional_processing")
+    if isinstance(blocks, bool):
+        return blocks
+    return not _is_intelligence_report_family(summary.get("report_family"))
+
+
+def _child_summary_has_warnings(summary: Mapping[str, Any]) -> bool:
+    """Return whether one mixed child summary carries warning entries."""
+
+    payload = _mapping(summary.get("payload"))
+    warnings = payload.get("warnings")
+    return isinstance(warnings, list) and any(isinstance(warning, Mapping) for warning in warnings)
+
+
 def _mixed_parent_status(
     *,
     child_results: list[AgentResult],
@@ -2734,7 +2890,7 @@ def _mixed_parent_status(
     transactional_summaries = [
         summary
         for summary in child_summaries
-        if not _is_intelligence_report_family(summary.get("report_family"))
+        if _summary_blocks_transactional_processing(summary)
     ]
     if not transactional_summaries:
         transactional_summaries = child_summaries
@@ -2754,8 +2910,11 @@ def _mixed_parent_status(
         return "needs_review"
 
     intelligence_requires_attention = any(
-        _is_intelligence_report_family(summary.get("report_family"))
-        and summary.get("status") not in success_statuses
+        not _summary_blocks_transactional_processing(summary)
+        and (
+            summary.get("status") not in success_statuses
+            or _child_summary_has_warnings(summary)
+        )
         for summary in child_summaries
     )
 

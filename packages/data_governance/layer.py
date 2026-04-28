@@ -130,6 +130,7 @@ def build_governance_context(work_item_payload: Mapping[str, Any]) -> dict[str, 
         or _string_or_none(ingress_payload.get("raw_txt_path")),
         "raw_meta_path": _string_or_none(raw_record_payload.get("raw_meta_path")),
         "raw_text": _string_or_none(raw_message_payload.get("text")),
+        "classified_report_family": _string_or_none(classification_payload.get("report_family")),
         "classified_report_type": _string_or_none(classification_payload.get("report_type")),
         "human_tolerance": dict(human_tolerance_payload) if human_tolerance_payload else None,
     }
@@ -154,10 +155,12 @@ def govern_record(
     message_id = _string_or_none(governance_context.get("message_id"))
     raw_sha256 = _string_or_none(governance_context.get("raw_sha256"))
     raw_meta_path = _string_or_none(governance_context.get("raw_meta_path"))
+    classified_report_family = _string_or_none(governance_context.get("classified_report_family"))
     classified_report_type = _string_or_none(governance_context.get("classified_report_type"))
     intelligence_signal = _is_intelligence_signal(
         signal_type=signal_type,
         classified_report_type=classified_report_type,
+        classified_report_family=classified_report_family,
     )
 
     report_family = _report_family_for_signal_type(signal_type, governance_context)
@@ -489,18 +492,34 @@ def _scope(*, report_family: str, branch: str | None, report_date: str | None) -
 
 
 def _report_family_for_signal_type(signal_type: str, governance_context: Mapping[str, Any]) -> str:
+    classified_report_family = _string_or_none(governance_context.get("classified_report_family"))
     classified_report_type = _string_or_none(governance_context.get("classified_report_type"))
-    if _is_intelligence_signal(signal_type=signal_type, classified_report_type=classified_report_type):
+    if _is_intelligence_signal(
+        signal_type=signal_type,
+        classified_report_type=classified_report_type,
+        classified_report_family=classified_report_family,
+    ):
         return INTELLIGENCE_REPORT_FAMILY
+    if classified_report_family is not None:
+        return classified_report_family
     if classified_report_type is not None:
         return classified_report_type
     return _SIGNAL_TYPE_TO_REPORT_FAMILY.get(signal_type, "unknown")
 
 
-def _is_intelligence_signal(*, signal_type: str, classified_report_type: str | None) -> bool:
+def _is_intelligence_signal(
+    *,
+    signal_type: str,
+    classified_report_type: str | None,
+    classified_report_family: str | None,
+) -> bool:
     """Return whether one governed record is intelligence-only."""
 
-    return signal_type == "supervisor_control" or classified_report_type == "supervisor_control"
+    return (
+        signal_type == "supervisor_control"
+        or classified_report_type == "supervisor_control"
+        or classified_report_family == INTELLIGENCE_REPORT_FAMILY
+    )
 
 
 def _matching_report_families(*, report_family: str, signal_type: str) -> set[str]:

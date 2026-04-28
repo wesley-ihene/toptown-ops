@@ -54,6 +54,8 @@ def test_splitter_handles_messy_title_variants_without_overlapping_segments() ->
     assert split_result.segments[1].segment_index == 1
     assert split_result.segments[0].end_line < split_result.segments[1].start_line
     assert split_result.segments[0].segment_id != split_result.segments[1].segment_id
+    assert split_result.segments[1].report_family_label == "intelligence"
+    assert split_result.segments[1].blocks_transactional_processing is False
 
 
 def test_splitter_forces_confidence_for_real_world_sales_and_supervisor_summary_sections() -> None:
@@ -104,6 +106,8 @@ def test_orchestra_splitter_recognizes_supervisor_control_summary_sections() -> 
         "sales",
         "supervisor_control",
     ]
+    assert split_result.child_work_items[1].payload["classification"]["report_family"] == "intelligence"
+    assert split_result.child_work_items[1].payload["classification"]["blocks_transactional_processing"] is False
     assert split_result.child_work_items[0].payload["raw_message"]["text"].startswith("Total Sales:")
     assert split_result.child_work_items[1].payload["raw_message"]["text"].startswith("Floor Check:")
 
@@ -123,6 +127,8 @@ def test_orchestra_splitter_recognizes_supervisor_summary_alias_after_separator(
         "sales",
         "supervisor_control",
     ]
+    assert split_result.child_work_items[1].payload["classification"]["report_family"] == "intelligence"
+    assert split_result.child_work_items[1].payload["classification"]["blocks_transactional_processing"] is False
     assert split_result.child_work_items[0].payload["raw_message"]["text"].startswith("Total Sales:")
     assert split_result.child_work_items[1].payload["raw_message"]["text"].startswith("Floor Check:")
 
@@ -234,6 +240,96 @@ def test_orchestrator_accepts_split_for_sales_and_supervisor_control_summary(
     assert child_two["report_family"] == "supervisor_control"
     assert child_two["agent_name"] == "supervisor_control_agent"
     assert child_two["status"] == "accepted"
+
+
+def test_orchestrator_accepts_incomplete_supervisor_control_as_intelligence_warning(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_and_incomplete_supervisor_control_text()},
+                "metadata": {
+                    "received_at": "2026-04-28T13:00:00Z",
+                    "sender": "mixed-incomplete-supervisor",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-28.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-28" / "waigani.json"
+    supervisor_validation_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-28" / "waigani.validation.json"
+    legacy_structured_supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-28.json"
+
+    assert sales_path.exists()
+    assert supervisor_path.exists()
+    assert not legacy_structured_supervisor_path.exists()
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["status"] == "accepted_with_warning"
+
+    sales_child, supervisor_child = result.payload["fanout"]["children"]
+    assert sales_child["report_family"] == "sales_income"
+    assert sales_child["status"] == "accepted"
+    assert supervisor_child["report_family"] == "supervisor_control"
+    assert supervisor_child["report_family_label"] == "intelligence"
+    assert supervisor_child["blocks_transactional_processing"] is False
+    assert supervisor_child["status"] == "accepted"
+    supervisor_warning_codes = {warning["code"] for warning in supervisor_child["payload"]["warnings"]}
+    assert "missing_fields" in supervisor_warning_codes
+
+    supervisor_validation = json.loads(supervisor_validation_path.read_text(encoding="utf-8"))
+    assert supervisor_validation["validation"]["accepted"] is True
+    assert supervisor_validation["validation"]["details"]["orchestrator_validation_bypassed"] is True
+    assert "acceptance" not in supervisor_validation
+
+
+def test_orchestrator_records_supervisor_control_date_mismatch_without_blocking_sales(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_and_mismatched_supervisor_control_text()},
+                "metadata": {
+                    "received_at": "2026-04-28T13:15:00Z",
+                    "sender": "mixed-supervisor-date-mismatch",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-28.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-22" / "waigani.json"
+    legacy_structured_supervisor_path = tmp_path / "records" / "structured" / "supervisor_control" / "waigani" / "2026-04-22.json"
+
+    assert sales_path.exists()
+    assert supervisor_path.exists()
+    assert not legacy_structured_supervisor_path.exists()
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["status"] == "accepted_with_warning"
+
+    sales_child, supervisor_child = result.payload["fanout"]["children"]
+    assert sales_child["status"] == "accepted"
+    assert supervisor_child["status"] == "accepted"
+    supervisor_warning_codes = {warning["code"] for warning in supervisor_child["payload"]["warnings"]}
+    assert "supervisor_control_date_mismatch" in supervisor_warning_codes
+
+    supervisor_payload = json.loads(supervisor_path.read_text(encoding="utf-8"))
+    stored_warning_codes = {warning["code"] for warning in supervisor_payload["warnings"]}
+    assert "supervisor_control_date_mismatch" in stored_warning_codes
 
 
 def test_orchestrator_keeps_intelligence_child_when_transactional_child_fails(
@@ -363,6 +459,46 @@ def _sales_and_supervisor_control_summary_text() -> str:
             "Floor Check: Passed",
             "Cashier Reconciled: Yes",
             "Store Locked: Yes",
+        ]
+    )
+
+
+def _sales_and_incomplete_supervisor_control_text() -> str:
+    return "\n".join(
+        [
+            "Branch: Waigani Branch",
+            "Date: 28/04/2026",
+            "",
+            "DAY-END SALES REPORT",
+            "Gross Sales: 1200",
+            "Cash Sales: 600",
+            "Eftpos Sales: 600",
+            "Traffic: 12",
+            "Served: 9",
+            "",
+            "Supervisor Control Summary",
+            "Notes: Skeleton team only",
+        ]
+    )
+
+
+def _sales_and_mismatched_supervisor_control_text() -> str:
+    return "\n".join(
+        [
+            "Branch: Waigani Branch",
+            "Date: 28/04/2026",
+            "",
+            "DAY-END SALES REPORT",
+            "Gross Sales: 1200",
+            "Cash Sales: 600",
+            "Eftpos Sales: 600",
+            "Traffic: 12",
+            "Served: 9",
+            "",
+            "Supervisor Control Summary",
+            "Date: 22/04/2026",
+            "Cashier Reconciled: Yes",
+            "Floor Check: Passed",
         ]
     )
 

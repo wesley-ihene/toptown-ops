@@ -12,6 +12,7 @@ from apps.mixed_content_detector_agent.worker import BoundaryHint, MixedContentD
 _MIXED_SPLIT_CONFIDENCE_MIN: Final[float] = 0.85
 _SALES_SUPERVISOR_SEPARATOR_CONFIDENCE: Final[float] = 0.95
 _SALES_SUPERVISOR_FAMILIES: Final[frozenset[str]] = frozenset({"sales_income", "supervisor_control"})
+_INTELLIGENCE_REPORT_FAMILIES: Final[frozenset[str]] = frozenset({"supervisor_control"})
 _NON_ALPHANUMERIC_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
 _SECTION_SEPARATOR_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\s*[-=_*]{3,}\s*$")
 _SUPERVISOR_CONTROL_HEADER_ALIASES: Final[tuple[str, ...]] = (
@@ -65,6 +66,8 @@ class ReportSegment:
     segment_id: str
     segment_index: int
     detected_report_family: str
+    report_family_label: str
+    blocks_transactional_processing: bool
     raw_text: str
     start_line: int
     end_line: int
@@ -115,6 +118,8 @@ def split_report(text: str, detection: MixedContentDetection) -> ReportSplitResu
                 segment_id=f"{parent_sha}:{segment_index}",
                 segment_index=segment_index,
                 detected_report_family=hint.report_family,
+                report_family_label=_report_family_label(hint.report_family),
+                blocks_transactional_processing=_blocks_transactional_processing(hint.report_family),
                 raw_text=segment_text,
                 start_line=start_line,
                 end_line=end_line,
@@ -224,6 +229,20 @@ def _eligible_for_sales_supervisor_boost(detection: MixedContentDetection) -> bo
 
     detected_families = {family for family in detection.detected_families if family}
     return len(detected_families) == 2 and detected_families <= _SALES_SUPERVISOR_FAMILIES
+
+
+def _report_family_label(detected_report_family: str) -> str:
+    """Return the governance-facing report family label for one segment."""
+
+    if detected_report_family in _INTELLIGENCE_REPORT_FAMILIES:
+        return "intelligence"
+    return detected_report_family
+
+
+def _blocks_transactional_processing(detected_report_family: str) -> bool:
+    """Return whether one segment should block transactional mixed acceptance."""
+
+    return detected_report_family not in _INTELLIGENCE_REPORT_FAMILIES
 
 
 def _sales_and_supervisor_segments(

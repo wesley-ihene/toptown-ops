@@ -72,7 +72,9 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         controls = derive_controls(exceptions)
         escalation = derive_escalation(exceptions)
         warnings = dedupe_warnings(
-            parsed.warnings + generate_alerts(parsed=parsed, exceptions=exceptions, controls=controls, escalation=escalation)
+            parsed.warnings
+            + _routing_context_warnings(parsed=parsed, payload=payload)
+            + generate_alerts(parsed=parsed, exceptions=exceptions, controls=controls, escalation=escalation)
         )
 
         if any(warning.severity == "error" for warning in warnings):
@@ -313,6 +315,40 @@ def _apply_routing_fallbacks(
                 break
 
     return parsed
+
+
+def _routing_context_warnings(
+    *,
+    parsed: ParsedSupervisorControlReport,
+    payload: Mapping[str, Any],
+) -> list[WarningEntry]:
+    """Return non-blocking intelligence warnings derived from routed context."""
+
+    routing = payload.get("routing")
+    if not isinstance(routing, Mapping):
+        return []
+
+    routed_report_date = None
+    for field_name in ("report_date", "normalized_report_date"):
+        candidate = _string_or_none(routing.get(field_name))
+        if candidate is not None:
+            routed_report_date = candidate
+            break
+
+    if parsed.report_date is None or routed_report_date is None or parsed.report_date == routed_report_date:
+        return []
+
+    return [
+        make_warning(
+            code="supervisor_control_date_mismatch",
+            severity="warning",
+            message=(
+                "Supervisor control date "
+                f"{parsed.report_date} differs from the routed message date {routed_report_date}; "
+                "stored as intelligence without blocking transactional processing."
+            ),
+        )
+    ]
 
 
 def _write_result_to_outbox(result: AgentResult) -> Path:

@@ -312,7 +312,9 @@ def _create_split_child(
     payload["raw_message"] = raw_message
     payload["message_hash"] = stable_message_hash(raw_message)
     payload["classification"] = {
+        "report_family": _classification_report_family(report_type),
         "report_type": report_type,
+        "blocks_transactional_processing": _blocks_transactional_processing(report_type),
         "matched_markers": {report_type: matched_markers},
     }
     payload["message_role"] = "split_child"
@@ -337,6 +339,20 @@ def _matched_markers_for_type(
     if isinstance(markers, list):
         return [marker for marker in markers if isinstance(marker, str)]
     return []
+
+
+def _classification_report_family(report_type: ConcreteReportType) -> str:
+    """Return the routed family label for one split child."""
+
+    if report_type == "supervisor_control":
+        return "intelligence"
+    return report_type
+
+
+def _blocks_transactional_processing(report_type: ConcreteReportType) -> bool:
+    """Return whether one split child should block transactional mixed handling."""
+
+    return report_type != "supervisor_control"
 
 
 def _extract_raw_text(work_item: WorkItem) -> str:
