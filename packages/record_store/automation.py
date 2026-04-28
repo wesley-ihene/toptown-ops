@@ -57,6 +57,7 @@ ENABLE_REPLAY_LEARNING_ENV_VAR = "TOPTOWN_ENABLE_REPLAY_LEARNING"
 ENABLE_REPLAY_RESPONSES_ENV_VAR = "TOPTOWN_ENABLE_REPLAY_RESPONSES"
 WHATSAPP_RESPONSE_MODE_ENV_VAR = "TOPTOWN_WHATSAPP_RESPONSE_MODE"
 WHATSAPP_OUTBOUND_MODE_ENV_VAR = "WHATSAPP_OUTBOUND_MODE"
+DUPLICATE_KEEP_DAYS = 7
 LOGGER = logging.getLogger(__name__)
 
 
@@ -348,6 +349,82 @@ def log_post_write_failure(
     )
 
 
+def run_post_duplicate_archive_automation(
+    *,
+    archive_path: str | Path,
+    source_root: str | Path | None = None,
+    keep_days: int = DUPLICATE_KEEP_DAYS,
+    now: str | datetime | None = None,
+) -> dict[str, Any]:
+    """Generate duplicate analytics after one duplicate archive write."""
+
+    source_repo_root = Path(source_root) if source_root is not None else REPO_ROOT
+    archive_file = Path(archive_path)
+    archive_payload = _read_json_or_empty(archive_file)
+    archive_date = _duplicate_archive_date(archive_file, archive_payload)
+    branch = _string_or_none(archive_payload.get("branch"))
+
+    analytics_result: dict[str, Any]
+    try:
+        from scripts.analytics.duplicate_analytics import generate_duplicate_analytics
+
+        analytics_result = generate_duplicate_analytics(
+            archive_date,
+            root=source_repo_root,
+            branches=[branch] if branch is not None else None,
+        )
+        _log_event(
+            "info",
+            "duplicate_analytics_generated",
+            status=analytics_result.get("status", "completed"),
+            report_date=archive_date,
+            branch=branch,
+            source_archive_path=str(archive_file),
+            output_paths=_duplicate_analytics_output_paths(analytics_result),
+        )
+    except Exception as exc:
+        analytics_result = {
+            "status": "failed",
+            "error": str(exc),
+            "report_date": archive_date,
+            "branch": branch,
+        }
+        _log_event(
+            "exception",
+            "duplicate_analytics_generated",
+            status="failed",
+            report_date=archive_date,
+            branch=branch,
+            source_archive_path=str(archive_file),
+            error=str(exc),
+        )
+
+    disposal_result = {
+        "status": "not_invoked",
+        "reason": "explicit_apply_required",
+        "keep_days": keep_days,
+        "requested_at": _utc_timestamp(),
+    }
+    _log_event(
+        "info",
+        "duplicate_disposal_skipped",
+        status="not_invoked",
+        report_date=archive_date,
+        branch=branch,
+        keep_days=keep_days,
+        source_archive_path=str(archive_file),
+        reason="explicit_apply_required",
+    )
+
+    return {
+        "archive_path": str(archive_file),
+        "report_date": archive_date,
+        "branch": branch,
+        "analytics": analytics_result,
+        "disposal": disposal_result,
+    }
+
+
 def generate_whatsapp_conversation_reply(
     *,
     outcome: Mapping[str, Any] | Any,
@@ -448,6 +525,17 @@ def dispatch_whatsapp_response(
         output_root=source_repo_root,
         overwrite=existing_artifact is not None,
     )
+    if response_type == "duplicate_notice":
+        _log_event(
+            "info",
+            "duplicate_notice_generated",
+            response_id=artifact["response_id"],
+            source_message_id=source_message_id,
+            sender_phone=sender_phone,
+            governance_status=_string_or_none(response_context.get("governance_status")),
+            report_type=_string_or_none(response_context.get("report_type")),
+            reason=_string_or_none(response_context.get("reason")),
+        )
 
     dispatch_status = "generated"
     dispatch_error = None
@@ -551,6 +639,51 @@ def _log_event(level: str, event: str, **fields: Any) -> None:
 
 def _duration_ms(started_at: float) -> int:
     return int((perf_counter() - started_at) * 1000)
+
+
+def _duplicate_analytics_output_paths(result: Mapping[str, Any]) -> list[str]:
+    paths: list[str] = []
+    global_path = _string_or_none(result.get("global_path"))
+    if global_path is not None:
+        paths.append(global_path)
+    branch_paths = result.get("branch_paths")
+    if isinstance(branch_paths, Mapping):
+        for path in branch_paths.values():
+            cleaned = _string_or_none(path)
+            if cleaned is not None:
+                paths.append(cleaned)
+    trend_paths = result.get("trend_paths")
+    if isinstance(trend_paths, Mapping):
+        for path in trend_paths.values():
+            cleaned = _string_or_none(path)
+            if cleaned is not None:
+                paths.append(cleaned)
+    return paths
+
+
+def _duplicate_archive_date(path: Path, payload: Mapping[str, Any]) -> str:
+    created_at = _string_or_none(payload.get("created_at"))
+    if created_at is not None and len(created_at) >= 10:
+        candidate = created_at[:10]
+        if (
+            candidate[4] == "-"
+            and candidate[7] == "-"
+            and candidate[:4].isdigit()
+            and candidate[5:7].isdigit()
+            and candidate[8:10].isdigit()
+        ):
+            return candidate
+    parent_name = path.parent.name
+    if (
+        len(parent_name) == 10
+        and parent_name[4] == "-"
+        and parent_name[7] == "-"
+        and parent_name[:4].isdigit()
+        and parent_name[5:7].isdigit()
+        and parent_name[8:10].isdigit()
+    ):
+        return parent_name
+    return _utc_timestamp()[:10]
 
 
 def _run_autonomous_actions(
