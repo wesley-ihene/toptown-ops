@@ -410,13 +410,17 @@ def test_orchestrator_exposes_blocking_sales_child_details_for_mixed_review(
     assert sales_child["blocks_transactional_processing"] is True
     assert sales_child["metrics"]["cash_sales"] == 2205.0
     assert sales_child["metrics"]["gross_sales"] == 2575.0
-    assert sales_child["metrics"]["till_total"] == 2640.0
-    assert sales_child["metrics"]["eftpos_sales"] == 805.0
-    assert "till_mismatch" in {warning["code"] for warning in sales_child["warnings"]}
-    assert "invalid_totals" in {
-        rejection.get("reason_code") or rejection.get("code")
-        for rejection in sales_child["validation"]["rejections"]
-    }
+    assert sales_child["metrics"]["eftpos_sales"] == 370.0
+    assert sales_child["warnings"] == []
+
+    rejection = sales_child["validation"]["rejections"][0]
+    assert rejection["reason_code"] == "sales_totals_mismatch"
+    assert rejection["declared_total_cash"] == 2205.0
+    assert rejection["expected_total_cash"] == 2640.0
+    assert rejection["declared_total_card"] == 370.0
+    assert rejection["expected_total_card"] == 370.0
+    assert rejection["declared_total_sales"] == 2575.0
+    assert rejection["expected_total_sales"] == 3010.0
     assert supervisor_child["report_type"] == "supervisor_control"
     assert supervisor_child["blocks_transactional_processing"] is False
     assert supervisor_child["status"] == "accepted"
@@ -564,11 +568,22 @@ def _sales_totals_mismatch_and_supervisor_control_text() -> str:
             "Date: 28/04/2026",
             "",
             "DAY-END SALES REPORT",
+            "Till #1: Main Shop",
+            "Cashier: Alice",
+            "T/Cash: 2205",
+            "T/Card: 345",
+            "Z/Reading: 2550",
+            "",
+            "Till #3: Side Counter",
+            "Cashier: Bob",
+            "T/Cash: 435",
+            "T/Card: 25",
+            "Z/Reading: 460",
+            "",
+            "TOTALS",
             "Total Sales: 2575",
             "Total Cash: 2205",
-            "Total Card: 805",
-            "Till Total: 2640",
-            "Deposit Total: 0",
+            "Total Card: 370",
             "Traffic: 20",
             "Served: 18",
             "",

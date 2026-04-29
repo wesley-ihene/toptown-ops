@@ -536,6 +536,15 @@ def _mixed_child_issue_lines(
 def _mixed_sales_issue_lines(blocking_child: Mapping[str, Any]) -> list[str]:
     """Return concrete totals guidance for one blocking sales child."""
 
+    validation = _mixed_child_validation(blocking_child)
+    payload_validation = _mapping(_mapping(blocking_child.get("payload")).get("validation"))
+    structured_rejection = _structured_sales_totals_mismatch_rejection(
+        validation,
+        payload_validation,
+    )
+    if structured_rejection is not None:
+        return _structured_sales_issue_lines(structured_rejection)
+
     warning_codes = {
         code
         for code in (
@@ -544,11 +553,8 @@ def _mixed_sales_issue_lines(blocking_child: Mapping[str, Any]) -> list[str]:
         )
         if code is not None
     }
-    validation_codes = _validation_reason_codes(
-        _mixed_child_validation(blocking_child),
-        _mapping(_mapping(blocking_child.get("payload")).get("validation")),
-    )
-    if not ({"invalid_totals", "till_mismatch"} & (warning_codes | validation_codes)):
+    validation_codes = _validation_reason_codes(validation, payload_validation)
+    if not ({"invalid_totals", "sales_totals_mismatch", "till_mismatch"} & (warning_codes | validation_codes)):
         return []
 
     metrics = _mixed_child_metrics(blocking_child)
@@ -578,6 +584,53 @@ def _mixed_sales_issue_lines(blocking_child: Mapping[str, Any]) -> list[str]:
         generic_lines = _mixed_child_generic_issue_lines(blocking_child)
         if generic_lines:
             lines.extend(generic_lines)
+    return lines
+
+
+def _structured_sales_totals_mismatch_rejection(*validation_blocks: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the canonical sales totals mismatch rejection when present."""
+
+    structured_fields = {
+        "declared_total_cash",
+        "expected_total_cash",
+        "declared_total_card",
+        "expected_total_card",
+        "declared_total_sales",
+        "expected_total_sales",
+    }
+    for validation in validation_blocks:
+        rejections = validation.get("rejections")
+        if not isinstance(rejections, list):
+            continue
+        for rejection in rejections:
+            if not isinstance(rejection, Mapping):
+                continue
+            code = _text(rejection.get("reason_code")) or _text(rejection.get("code"))
+            if code not in {"sales_totals_mismatch", "invalid_totals"}:
+                continue
+            if structured_fields & set(rejection.keys()):
+                return dict(rejection)
+    return None
+
+
+def _structured_sales_issue_lines(rejection: Mapping[str, Any]) -> list[str]:
+    """Return sales issue lines from structured validation detail."""
+
+    message = (
+        _text(rejection.get("reason_detail"))
+        or _text(rejection.get("message"))
+        or "Sales totals do not match till/payment totals."
+    )
+    lines = [message]
+    for label, field_name in (
+        ("Declared Total Cash", "declared_total_cash"),
+        ("Expected Total Cash", "expected_total_cash"),
+        ("Declared Total Card", "declared_total_card"),
+        ("Expected Total Card", "expected_total_card"),
+        ("Declared Total Sales", "declared_total_sales"),
+        ("Expected Total Sales", "expected_total_sales"),
+    ):
+        lines.append(f"- {label}: {_format_money_value(rejection.get(field_name))}")
     return lines
 
 

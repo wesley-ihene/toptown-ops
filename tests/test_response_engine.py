@@ -205,16 +205,22 @@ def test_review_ack_mixed_child_requires_review_surfaces_blocking_sales_totals()
                         "validation": {
                             "rejections": [
                                 {
-                                    "reason_code": "invalid_totals",
-                                    "reason_detail": "Total sales does not match payment totals.",
+                                    "reason_code": "sales_totals_mismatch",
+                                    "reason_detail": "Sales totals do not match till/payment totals.",
+                                    "declared_total_cash": 2205.0,
+                                    "expected_total_cash": 2640.0,
+                                    "declared_total_card": 370.0,
+                                    "expected_total_card": 370.0,
+                                    "declared_total_sales": 2575.0,
+                                    "expected_total_sales": 3010.0,
                                 }
                             ]
                         },
                         "metrics": {
-                            "cash_sales": 2205.0,
-                            "eftpos_sales": 805.0,
-                            "gross_sales": 2575.0,
-                            "till_total": 2640.0,
+                            "cash_sales": 435.0,
+                            "eftpos_sales": 25.0,
+                            "gross_sales": 460.0,
+                            "till_total": 435.0,
                             "deposit_total": 0.0,
                         },
                     },
@@ -243,9 +249,13 @@ def test_review_ack_mixed_child_requires_review_surfaces_blocking_sales_totals()
     assert "Date: 28/04/26" in rendered["response_text"]
     assert "Sales totals do not match till/payment totals." in rendered["response_text"]
     assert "Declared Total Cash: K2,205.00" in rendered["response_text"]
-    assert "Calculated Till Cash: K2,640.00" in rendered["response_text"]
+    assert "Expected Total Cash: K2,640.00" in rendered["response_text"]
+    assert "Declared Total Card: K370.00" in rendered["response_text"]
+    assert "Expected Total Card: K370.00" in rendered["response_text"]
     assert "Declared Total Sales: K2,575.00" in rendered["response_text"]
     assert "Expected Total Sales: K3,010.00" in rendered["response_text"]
+    assert "Declared Total Sales: K460.00" not in rendered["response_text"]
+    assert "Expected Total Sales: K805.00" not in rendered["response_text"]
     assert "Correct the TOTALS section and resend the Day-End Sales Report." in rendered["response_text"]
     assert "One split report still needs review" not in rendered["response_text"]
     assert "Supervisor Control Report format" not in rendered["response_text"]

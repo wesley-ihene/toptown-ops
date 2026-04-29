@@ -559,6 +559,7 @@ def _process_specialist_fallback(
     validation_payload = _fallback_validation_payload(
         normalized_report=normalized_report,
         routing_payload=routed_work_item.payload.get("routing") if isinstance(routed_work_item.payload, dict) else {},
+        raw_text=_extract_raw_text(routed_work_item.payload) if isinstance(routed_work_item.payload, dict) else None,
     )
 
     validation_result = validate_report(specialist_report_type, validation_payload)
@@ -783,7 +784,13 @@ def _finalize_strict_candidate(
     """Apply shared validation, acceptance, governance, and final action centrally."""
 
     candidate_payload = candidate_result.payload if isinstance(candidate_result.payload, dict) else {}
-    validation_result = validate_report(specialist_report_type, candidate_payload)
+    validation_result = validate_report(
+        specialist_report_type,
+        _validation_payload_with_raw_text(
+            payload=candidate_payload,
+            routed_work_item=routed_work_item,
+        ),
+    )
     acceptance_result = decide_acceptance(
         specialist_report_type,
         validation_result=validation_result,
@@ -1116,6 +1123,7 @@ def _fallback_validation_payload(
     *,
     normalized_report: Mapping[str, Any],
     routing_payload: object,
+    raw_text: str | None = None,
 ) -> dict[str, Any]:
     """Return the payload sent to SOP validation for fallback extraction."""
 
@@ -1132,7 +1140,24 @@ def _fallback_validation_payload(
         date_result = normalize_report_date(report_date)
         if date_result.normalized_value is not None:
             payload["report_date"] = date_result.normalized_value
+    if isinstance(raw_text, str) and raw_text.strip():
+        payload["raw_text"] = raw_text
     return payload
+
+
+def _validation_payload_with_raw_text(
+    *,
+    payload: Mapping[str, Any],
+    routed_work_item: WorkItem,
+) -> dict[str, Any]:
+    """Return one validation payload augmented with the segment raw text."""
+
+    validation_payload = dict(payload)
+    routed_payload = routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}
+    raw_text = _extract_raw_text(routed_payload)
+    if raw_text:
+        validation_payload["raw_text"] = raw_text
+    return validation_payload
 
 
 def _downgrade_resolved_fallback_date_rejection(

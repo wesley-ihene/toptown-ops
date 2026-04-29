@@ -623,11 +623,22 @@ def test_live_webhook_mixed_sales_totals_mismatch_surfaces_sales_blocker_details
                         "Date: 28/04/2026",
                         "",
                         "DAY-END SALES REPORT",
+                        "Till #1: Main Shop",
+                        "Cashier: Alice",
+                        "T/Cash: 2205",
+                        "T/Card: 345",
+                        "Z/Reading: 2550",
+                        "",
+                        "Till #3: Side Counter",
+                        "Cashier: Bob",
+                        "T/Cash: 435",
+                        "T/Card: 25",
+                        "Z/Reading: 460",
+                        "",
+                        "TOTALS",
                         "Total Sales: 2575",
                         "Total Cash: 2205",
-                        "Total Card: 805",
-                        "Till Total: 2640",
-                        "Deposit Total: 0",
+                        "Total Card: 370",
                         "Traffic: 20",
                         "Served: 18",
                         "",
@@ -653,9 +664,13 @@ def test_live_webhook_mixed_sales_totals_mismatch_surfaces_sales_blocker_details
     assert "Report: Day-End Sales Report" in artifact_payload["response_text"]
     assert "Sales totals do not match till/payment totals." in artifact_payload["response_text"]
     assert "Declared Total Cash: K2,205.00" in artifact_payload["response_text"]
-    assert "Calculated Till Cash: K2,640.00" in artifact_payload["response_text"]
+    assert "Expected Total Cash: K2,640.00" in artifact_payload["response_text"]
+    assert "Declared Total Card: K370.00" in artifact_payload["response_text"]
+    assert "Expected Total Card: K370.00" in artifact_payload["response_text"]
     assert "Declared Total Sales: K2,575.00" in artifact_payload["response_text"]
     assert "Expected Total Sales: K3,010.00" in artifact_payload["response_text"]
+    assert "Declared Total Sales: K460.00" not in artifact_payload["response_text"]
+    assert "Expected Total Sales: K805.00" not in artifact_payload["response_text"]
     assert "Correct the TOTALS section and resend the Day-End Sales Report." in artifact_payload["response_text"]
     assert "One split report still needs review" not in artifact_payload["response_text"]
     assert "Supervisor Control Report format" not in artifact_payload["response_text"]
