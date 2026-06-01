@@ -17,12 +17,14 @@ from urllib.parse import parse_qs, urlparse
 
 from apps.ceo_api.routes import route_request as ceo_route_request
 from apps.ceo_dashboard_ui.routes import render_ceo_dashboard_response
-from apps.dashboard_api.routes import route_request as route_request
+from apps.dashboard_api.routes import route_request as dashboard_route_request
+from apps.taop_ops_api.routes import route_request as taop_ops_route_request
 from apps.dashboard_ui.routes import render_dashboard_response, render_not_found_page
 from analytics.phase5_executive import (
     build_ceo_dashboard,
 )
 from packages.feedback_store import build_action_feedback_state
+from packages.openclaw_adapter import get_runtime_status
 from packages.common.analytics_loader import (
     build_catalog,
     canonical_branch_or_none,
@@ -38,6 +40,12 @@ OPERATOR_DASHBOARD_ROUTES = {"/", "/dashboard"}
 DEPRECATED_EXECUTIVE_DASHBOARD_ROUTES = {"/ceo", "/ceo/dashboard"}
 DEPRECATED_EXECUTIVE_API_PREFIXES = ("/api/ceo", "/api/executive")
 COMPATIBILITY_QUERY_PARAM = "compat"
+RUNTIME_STATUS = "LIVE_RUNTIME"
+RUNTIME_OWNER = "phase4_portal"
+RUNTIME_NOTE = (
+    "Live read-only dashboard/API router. Deprecated executive surfaces remain "
+    "compatibility-only behind this portal."
+)
 
 
 @dataclass(slots=True)
@@ -87,7 +95,12 @@ def dispatch_http_request(
     if _is_hidden_deprecated_surface(path) and not compatibility_mode:
         return _deprecated_surface_hidden_response(path=path)
 
-    result = route_request(path, params, root=str(root) if root is not None else None)
+    result = dashboard_route_request(path, params, root=str(root) if root is not None else None)
+    if result is not None:
+        status_code, payload = result
+        return _json_response(status_code, payload)
+
+    result = taop_ops_route_request(path, params, root=str(root) if root is not None else None)
     if result is not None:
         status_code, payload = result
         return _json_response(status_code, payload)
@@ -344,6 +357,7 @@ def _load_bundle(
             branch=branch,
             output_root=root,
         ),
+        "openclaw_runtime": get_runtime_status(),
     }
 
 

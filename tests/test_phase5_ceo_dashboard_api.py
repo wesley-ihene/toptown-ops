@@ -229,6 +229,21 @@ def test_ceo_api_handles_success_and_missing_data_cleanly(tmp_path: Path) -> Non
         assert body["deprecated"] is True
         assert body["operator_routes"] == ["/dashboard", "/api/analytics/*", "/api/dashboard"]
 
+    dashboard_response = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/api/ceo/dashboard?branch=lae_malaita&date=2026-04-07&compat=1",
+        root=tmp_path,
+    )
+    dashboard_body = json.loads(dashboard_response.body.decode("utf-8"))
+    assert dashboard_body["payload"]["openclaw_runtime"] == {
+        "openclaw": {
+            "enabled": False,
+            "gateway_url": "ws://127.0.0.1:18789",
+            "status": "disabled",
+            "reason": "TAOP_OPENCLAW_ENABLED is disabled",
+        }
+    }
+
     missing = phase4_portal.dispatch_http_request(
         method="GET",
         target="/api/ceo/overview?date=2026-04-08&compat=1",
@@ -413,10 +428,31 @@ def test_ceo_dashboard_renders_executive_control_sections_in_compatibility_mode(
     assert "Staff Compatibility View" in html
     assert "Section Compatibility View" in html
     assert "Deprecated Alerts Panel" in html
+    assert "OpenClaw Runtime" in html
+    assert "Standby" in html
+    assert "ws://127.0.0.1:18789" in html
     assert "operator dashboard at" in html
     assert "/api/ceo/overview?date=2026-04-07" not in html
     assert "lae_malaita" in html
     assert 'name="compat" value="1"' in html
+
+
+def test_ceo_dashboard_reports_configured_openclaw_runtime_when_enabled(monkeypatch, tmp_path: Path) -> None:
+    _seed_ceo_fixture(tmp_path)
+    monkeypatch.setenv("TAOP_OPENCLAW_ENABLED", "1")
+    monkeypatch.setenv("OPENCLAW_GATEWAY_URL", "ws://gateway.internal:18789")
+
+    response = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/ceo?branch=lae_malaita&date=2026-04-07&compat=1",
+        root=tmp_path,
+    )
+    html = response.body.decode("utf-8")
+
+    assert response.status_code == 200
+    assert "OpenClaw Runtime" in html
+    assert "Configured" in html
+    assert "ws://gateway.internal:18789" in html
 
 
 def _seed_ceo_fixture(root: Path) -> None:

@@ -39,6 +39,7 @@ def render_dashboard_response(
     operator_action_state = bundle.get("operator_action_state") or {}
     action_summary = operator_action_state.get("summary") or {}
     pending_actions = operator_action_state.get("pending_actions") or []
+    openclaw_runtime = (bundle.get("openclaw_runtime") or {}).get("openclaw") or {}
     branch_options = catalog.get("available_branches") or []
     date_options = catalog.get("available_dates") or []
     branch_query = urlencode({"branch": selected_branch, "date": selected_date})
@@ -191,6 +192,17 @@ def render_dashboard_response(
           <p><a href="/api/feedback/summary?{escape(branch_query)}">/api/feedback/summary</a></p>
           <p><a href="/api/learning/summary">/api/learning/summary</a></p>
           <p><a href="/api/learning/recommendations">/api/learning/recommendations</a></p>
+        </article>
+        <article class="panel">
+          <h3>OpenClaw Runtime</h3>
+          <table>
+            <tbody>
+              {_summary_row("Enabled", openclaw_runtime.get("enabled"))}
+              {_summary_row("Status", _openclaw_status_label(openclaw_runtime))}
+              {_summary_row("Gateway URL", openclaw_runtime.get("gateway_url"))}
+            </tbody>
+          </table>
+          <p class="subtle">Config-only adapter visibility. No gateway connectivity check is performed from the dashboard.</p>
         </article>
       </div>
     </section>
@@ -689,6 +701,18 @@ def _render_format_drift_notes(payload: Any) -> str:
 def _summary_row(label: str, value: Any) -> str:
     rendered = "n/a" if value is None else escape(str(value))
     return f"<tr><th>{escape(label)}</th><td>{rendered}</td></tr>"
+
+
+def _openclaw_status_label(payload: Mapping[str, Any]) -> str | None:
+    enabled = payload.get("enabled")
+    if enabled is True:
+        return "Configured"
+    if enabled is False:
+        return "Standby"
+    status = payload.get("status")
+    if isinstance(status, str) and status.strip():
+        return status.strip()
+    return None
 
 
 def _count_requires_ack(rows: list[dict[str, Any]]) -> int:

@@ -162,8 +162,35 @@ def test_dashboard_renders_required_operational_views(tmp_path: Path) -> None:
     assert "Operator Action Loop" in html
     assert "Pending Actions" in html
     assert "Acknowledged" in html
+    assert "OpenClaw Runtime" in html
+    assert "Standby" in html
+    assert "ws://127.0.0.1:18789" in html
     assert "Alice Demo" in html
     assert "Unknown Rack" in html
+
+
+def test_dashboard_json_includes_openclaw_runtime_status(tmp_path: Path) -> None:
+    _write_branch_daily(tmp_path, "waigani", "2026-04-07", gross_sales=1200.0)
+    _write_staff_daily(tmp_path, "waigani", "2026-04-07")
+    _write_section_daily(tmp_path, "waigani", "2026-04-07")
+    _write_branch_comparison(tmp_path, "2026-04-07", ["waigani"])
+
+    response = phase4_portal.dispatch_http_request(
+        method="GET",
+        target="/api/dashboard?branch=waigani&date=2026-04-07",
+        root=tmp_path,
+    )
+    body = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert body["datasets"]["openclaw_runtime"] == {
+        "openclaw": {
+            "enabled": False,
+            "gateway_url": "ws://127.0.0.1:18789",
+            "status": "disabled",
+            "reason": "TAOP_OPENCLAW_ENABLED is disabled",
+        }
+    }
 
 
 def test_dashboard_branch_and_date_filters_handle_partial_and_missing_data(tmp_path: Path) -> None:

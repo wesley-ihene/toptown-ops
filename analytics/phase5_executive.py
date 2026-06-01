@@ -26,6 +26,7 @@ from packages.common.analytics_loader import (
     load_branch_analytics,
     load_branch_comparison,
 )
+from packages.openclaw_adapter import get_runtime_status
 from packages.common.paths import REPO_ROOT
 from packages.record_store.writer import ensure_directory, write_json_file, write_text_file
 
@@ -587,6 +588,7 @@ def build_ceo_dashboard(branch: str | None, report_date: str, *, root: str | Non
         "sections": sections_payload,
         "alerts": alerts_payload,
         "selected_branch_scorecard": selected_branch_scorecard,
+        "openclaw_runtime": get_runtime_status(),
     }, None
 
 

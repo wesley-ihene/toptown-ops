@@ -34,6 +34,7 @@ def render_ceo_dashboard_response(
     sections = dashboard.get("sections") or {}
     alerts = dashboard.get("alerts") or {}
     selected_scorecard = dashboard.get("selected_branch_scorecard") or {}
+    openclaw_runtime = (dashboard.get("openclaw_runtime") or {}).get("openclaw") or {}
     effective_branch = selected_branch or dashboard.get("selected_branch")
     branch_query = urlencode({"branch": effective_branch or "", "date": selected_date})
 
@@ -222,6 +223,17 @@ def render_ceo_dashboard_response(
         <p>Direct CEO/executive API routes remain available only for rollback safety and automation compatibility.</p>
         <p>Normal TopTown Ops usage should stay on the operator dashboard and operator analytics API.</p>
       </article>
+      <article class="panel">
+        <h2>OpenClaw Runtime</h2>
+        <table>
+          <tbody>
+            {_summary_row("Enabled", openclaw_runtime.get("enabled"))}
+            {_summary_row("Status", _openclaw_status_label(openclaw_runtime))}
+            {_summary_row("Gateway URL", openclaw_runtime.get("gateway_url"))}
+          </tbody>
+        </table>
+        <p>Config-only adapter visibility. No gateway connectivity check is performed from this compatibility view.</p>
+      </article>
     </section>
   </main>
 </body>
@@ -307,6 +319,18 @@ def _render_alerts(rows: list[dict[str, Any]], severity: str) -> str:
 def _summary_row(label: str, value: Any) -> str:
     rendered = "n/a" if value is None else escape(str(value))
     return f"<tr><th>{escape(label)}</th><td>{rendered}</td></tr>"
+
+
+def _openclaw_status_label(payload: Mapping[str, Any]) -> str | None:
+    enabled = payload.get("enabled")
+    if enabled is True:
+        return "Configured"
+    if enabled is False:
+        return "Standby"
+    status = payload.get("status")
+    if isinstance(status, str) and status.strip():
+        return status.strip()
+    return None
 
 
 def _nested(mapping: Mapping[str, Any] | None, key: str, child: str) -> Any:
