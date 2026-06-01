@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import packages.record_store.paths as record_paths
@@ -34,7 +35,10 @@ def test_help_command_bypasses_validator_and_orchestrator(tmp_path: Path, monkey
     assert body["agent"] == "command_handler"
     assert body["orchestrator_status"] == "skipped"
     assert artifact_payload["response_type"] == "command_reply"
-    assert artifact_payload["response_text"].startswith("Supported commands:")
+    if _taop_feedback_enabled():
+        assert artifact_payload["response_text"].startswith("Supported commands:")
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def test_format_command_generates_template_reply_artifact(tmp_path: Path, monkeypatch) -> None:
@@ -53,7 +57,10 @@ def test_format_command_generates_template_reply_artifact(tmp_path: Path, monkey
 
     assert response.status_code == 200
     assert body["command_name"] == "format"
-    assert artifact_payload["response_text"].startswith("SUPERVISOR CONTROL REPORT")
+    if _taop_feedback_enabled():
+        assert artifact_payload["response_text"].startswith("SUPERVISOR CONTROL REPORT")
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def test_status_command_reads_latest_response_record(tmp_path: Path, monkeypatch) -> None:
@@ -81,7 +88,10 @@ def test_status_command_reads_latest_response_record(tmp_path: Path, monkeypatch
     artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
 
     assert response.status_code == 200
-    assert artifact_payload["response_text"] == "Latest status: DAY-END SALES REPORT for Waigani is accepted."
+    if _taop_feedback_enabled():
+        assert artifact_payload["response_text"] == "Latest status: DAY-END SALES REPORT for Waigani is accepted."
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def test_why_rejected_command_reads_last_rejection_reason(tmp_path: Path, monkeypatch) -> None:
@@ -109,10 +119,13 @@ def test_why_rejected_command_reads_last_rejection_reason(tmp_path: Path, monkey
     artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
 
     assert response.status_code == 200
-    assert artifact_payload["response_text"] == (
-        "Last rejection: ATTENDANCE REPORT for Waigani. "
-        "Reason: required report fields were missing or invalid."
-    )
+    if _taop_feedback_enabled():
+        assert artifact_payload["response_text"] == (
+            "Last rejection: ATTENDANCE REPORT for Waigani. "
+            "Reason: required report fields were missing or invalid."
+        )
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def test_replay_command_reply_is_suppressed_by_default(tmp_path: Path, monkeypatch) -> None:
@@ -225,6 +238,13 @@ def _patch_environment(monkeypatch, tmp_path: Path) -> None:
 
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+_TAOP_DISABLED_RESPONSE_TEXT = "[TAOP DISABLED - AGENT OUTPUT ONLY]"
+
+
+def _taop_feedback_enabled() -> bool:
+    return os.getenv("TAOP_FEEDBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 
 
 def _write_response(

@@ -29,10 +29,11 @@ def write_structured_record(
     if not isinstance(report_date, str) or not report_date.strip():
         return None
 
+    persisted_payload = dict(payload)
     return write_governed_structured(
         signal_type=SIGNAL_TYPE,
-        branch=branch,
+        branch=branch.strip(),
         date=report_date,
-        payload=dict(payload),
-        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
+        payload=persisted_payload,
+        metadata=metadata if isinstance(metadata, dict) else dict(metadata) if isinstance(metadata, Mapping) else None,
     )

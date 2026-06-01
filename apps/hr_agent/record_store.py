@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from apps.hr_agent.date_branch_resolver import normalize_report_date
-from apps.hr_agent.field_mapper import canonical_branch_slug
+from packages.branch_registry import canonical_branch_slug_or_none
 from packages.record_store.writer import write_governed_structured
 
 _SUBTYPE_TO_RECORD_TYPE = {
@@ -48,22 +48,25 @@ def write_structured_record(
 
     canonical_branch = _canonical_branch_or_none(branch)
     iso_report_date = _iso_date_or_none(report_date)
-    if canonical_branch is None or iso_report_date is None:
+    if iso_report_date is None:
         return None
 
+    persisted_payload = dict(payload)
+    if canonical_branch is not None:
+        persisted_payload["branch"] = canonical_branch
     return write_governed_structured(
         signal_type=_SUBTYPE_TO_RECORD_TYPE[signal_subtype],
-        branch=canonical_branch,
+        branch=canonical_branch or branch.strip(),
         date=iso_report_date,
-        payload=dict(payload),
-        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
+        payload=persisted_payload,
+        metadata=metadata if isinstance(metadata, dict) else dict(metadata) if isinstance(metadata, Mapping) else None,
     )
 
 
 def _canonical_branch_or_none(branch: str) -> str | None:
     """Return a canonical branch slug suitable for structured record paths."""
 
-    candidate = canonical_branch_slug(branch.strip())
+    candidate = canonical_branch_slug_or_none(branch.strip())
     if not candidate or not _CANONICAL_BRANCH_PATTERN.fullmatch(candidate):
         return None
     return candidate

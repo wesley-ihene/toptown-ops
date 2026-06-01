@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from apps.analytics_query_engine import worker as query_worker
@@ -204,10 +205,13 @@ def test_bridge_bypasses_pipeline_for_cross_branch_query(tmp_path: Path, monkeyp
     assert body["command"] is True
     assert body["command_name"] == "cross_branch_query"
     assert artifact_payload["response_type"] == "command_reply"
-    assert artifact_payload["response_text"] == (
-        "Waigani ranks 1 of 2 branches by sales on 2026-04-23. "
-        "Waigani: K1,000.00. Top branch: Waigani (K1,000.00)."
-    )
+    if _taop_feedback_enabled():
+        assert artifact_payload["response_text"] == (
+            "Waigani ranks 1 of 2 branches by sales on 2026-04-23. "
+            "Waigani: K1,000.00. Top branch: Waigani (K1,000.00)."
+        )
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def _patch_environment(monkeypatch, tmp_path: Path) -> None:
@@ -310,3 +314,10 @@ def _meta_payload(*, message_id: str, text: str) -> dict[str, object]:
             }
         ],
     }
+
+
+_TAOP_DISABLED_RESPONSE_TEXT = "[TAOP DISABLED - AGENT OUTPUT ONLY]"
+
+
+def _taop_feedback_enabled() -> bool:
+    return os.getenv("TAOP_FEEDBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}

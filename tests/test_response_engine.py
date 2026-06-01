@@ -141,10 +141,14 @@ def test_review_ack_missing_branch_uses_deterministic_branch_guidance() -> None:
         }
     )
 
-    assert "❌ Branch is missing" in rendered["response_text"]
-    assert "1. Branch is missing from the report text." in rendered["response_text"]
-    assert "2. TAOP cannot route the report without a branch." in rendered["response_text"]
-    assert "Add the Branch line and resend." in rendered["response_text"]
+    assert "❌ Branch unresolved" in rendered["response_text"]
+    assert "FAILED CHECKS" in rendered["response_text"]
+    assert "1. Branch could not be resolved." in rendered["response_text"]
+    assert "- Expected: Branch: <branch>" in rendered["response_text"]
+    assert "- Received: missing" in rendered["response_text"]
+    assert "ACTION REQUIRED" in rendered["response_text"]
+    assert "Branch missing or unclear. Add Branch: <branch>." in rendered["response_text"]
+    assert "2. Branch could not be resolved from the report." not in rendered["response_text"]
 
 
 def test_review_ack_supervisor_control_invalid_format_uses_deterministic_guidance() -> None:
@@ -172,9 +176,10 @@ def test_review_ack_supervisor_control_invalid_format_uses_deterministic_guidanc
         }
     )
 
-    assert "Supervisor Control Report format did not match the expected structure." in rendered["response_text"]
-    assert "Use the exact Supervisor Control Report fields before resending." in rendered["response_text"]
-    assert "Resend using the exact Supervisor Control Report format." in rendered["response_text"]
+    assert "FAILED CHECKS" in rendered["response_text"]
+    assert "1. Supervisor control fields were incomplete." in rendered["response_text"]
+    assert "ACTION REQUIRED" in rendered["response_text"]
+    assert "Report format failed SOP validation. Recheck required fields and totals." in rendered["response_text"]
 
 
 def test_review_ack_mixed_child_requires_review_surfaces_blocking_sales_totals() -> None:
@@ -248,12 +253,8 @@ def test_review_ack_mixed_child_requires_review_surfaces_blocking_sales_totals()
     assert "Branch: BENA ROAD" in rendered["response_text"]
     assert "Date: 28/04/26" in rendered["response_text"]
     assert "Sales totals do not match till/payment totals." in rendered["response_text"]
-    assert "Declared Total Cash: K2,205.00" in rendered["response_text"]
-    assert "Expected Total Cash: K2,640.00" in rendered["response_text"]
-    assert "Declared Total Card: K370.00" in rendered["response_text"]
-    assert "Expected Total Card: K370.00" in rendered["response_text"]
-    assert "Declared Total Sales: K2,575.00" in rendered["response_text"]
-    assert "Expected Total Sales: K3,010.00" in rendered["response_text"]
+    assert "- Expected: Cash K2,640.00 | Card K370.00 | Sales K3,010.00" in rendered["response_text"]
+    assert "- Received: Cash K2,205.00 | Card K370.00 | Sales K2,575.00" in rendered["response_text"]
     assert "Declared Total Sales: K460.00" not in rendered["response_text"]
     assert "Expected Total Sales: K805.00" not in rendered["response_text"]
     assert "Correct the TOTALS section and resend the Day-End Sales Report." in rendered["response_text"]
@@ -290,8 +291,160 @@ def test_review_ack_mixed_child_requires_review_falls_back_when_child_detail_mis
         }
     )
 
-    assert "TAOP split the message into multiple reports." in rendered["response_text"]
-    assert "One split report still needs review before final processing." in rendered["response_text"]
+    assert "Report: Day-End Sales Report" in rendered["response_text"]
+    assert "ℹ Branch resolution not surfaced in reply metadata" in rendered["response_text"]
+    assert "ℹ Date resolution not surfaced in reply metadata" in rendered["response_text"]
+    assert "TAOP split the message into multiple reports, but one split report still needs review." in rendered["response_text"]
+    assert "Please resend the report that still needs review as one report per message." in rendered["response_text"]
+
+
+def test_review_ack_mixed_child_requires_review_lists_child_accountability_for_truncated_supervisor_summary() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "mixed",
+            "reason": "mixed_child_requires_review",
+            "feedback_context": {
+                "mixed_children": [
+                    {
+                        "child_index": 1,
+                        "report_type": "sales_income",
+                        "report_family": "sales_income",
+                        "branch": "waigani",
+                        "report_date": "2026-04-28",
+                        "response_report_type": "day_end_sales",
+                        "status": "accepted",
+                        "response_status": "accepted",
+                        "reason": "totals_reconciled",
+                        "blocks_transactional_processing": True,
+                    },
+                    {
+                        "child_index": 2,
+                        "report_type": "supervisor_control",
+                        "report_family": "supervisor_control",
+                        "branch": "waigani",
+                        "report_date": "2026-04-28",
+                        "response_report_type": "supervisor_control_summary",
+                        "status": "needs_review",
+                        "response_status": "review",
+                        "reason": 'incomplete after "Exceptions es\u2026"',
+                        "validation_error_code": "child_report_incomplete_or_truncated",
+                        "validation_error_message": 'incomplete after "Exceptions es\u2026"',
+                        "blocks_transactional_processing": False,
+                        "header_line": "Supervisor Control Summary",
+                    },
+                ]
+            },
+        }
+    )
+
+    assert "Report: Supervisor Control Report" in rendered["response_text"]
+    assert "Branch: WAIGANI" in rendered["response_text"]
+    assert "Date: 28/04/26" in rendered["response_text"]
+    assert '1. incomplete after "Exceptions es\u2026"' in rendered["response_text"]
+    assert "- Received: child_report_incomplete_or_truncated" in rendered["response_text"]
+    assert "Please resend the report that still needs review as one report per message." in rendered["response_text"]
+    assert "child_1" not in rendered["response_text"]
+    assert "One split report still needs review" not in rendered["response_text"]
+
+
+def test_accepted_ack_mixed_partial_success_surfaces_only_reviewed_sales_child() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "accepted_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "mixed",
+            "feedback_context": {
+                "mixed_children": [
+                    {
+                        "child_index": 1,
+                        "report_type": "sales_income",
+                        "report_family": "sales_income",
+                        "branch": "bena_road",
+                        "report_date": "2026-04-28",
+                        "response_report_type": "day_end_sales",
+                        "status": "rejected",
+                        "response_status": "review",
+                        "validation_error_code": "sales_totals_mismatch",
+                        "validation_error_message": "Sales totals do not match till/payment totals.",
+                        "blocks_transactional_processing": True,
+                    },
+                    {
+                        "child_index": 2,
+                        "report_type": "supervisor_control",
+                        "report_family": "supervisor_control",
+                        "report_family_label": "intelligence",
+                        "branch": "bena_road",
+                        "report_date": "2026-04-28",
+                        "response_report_type": "supervisor_control_summary",
+                        "status": "accepted",
+                        "response_status": "accepted",
+                        "blocks_transactional_processing": False,
+                    },
+                ]
+            },
+        }
+    )
+
+    assert "✅ Mixed split reports received for BENA ROAD, 28/04/26." in rendered["response_text"]
+    assert "Processed: Supervisor Control Summary." in rendered["response_text"]
+    assert "Needs review: Day-End Sales Report." in rendered["response_text"]
+    assert "Resend only the Day-End Sales Report as one complete report." in rendered["response_text"]
+    assert "TAOP REVIEW REQUIRED" not in rendered["response_text"]
+    assert "Please resend the report" not in rendered["response_text"]
+
+
+def test_accepted_ack_mixed_partial_success_surfaces_only_reviewed_supervisor_child() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "accepted_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "mixed",
+            "feedback_context": {
+                "mixed_children": [
+                    {
+                        "child_index": 1,
+                        "report_type": "sales_income",
+                        "report_family": "sales_income",
+                        "branch": "waigani",
+                        "report_date": "2026-04-28",
+                        "response_report_type": "day_end_sales",
+                        "status": "accepted",
+                        "response_status": "accepted",
+                        "reason": "totals_reconciled",
+                        "blocks_transactional_processing": True,
+                    },
+                    {
+                        "child_index": 2,
+                        "report_type": "supervisor_control",
+                        "report_family": "supervisor_control",
+                        "report_family_label": "intelligence",
+                        "branch": "waigani",
+                        "report_date": "2026-04-28",
+                        "response_report_type": "supervisor_control_summary",
+                        "status": "needs_review",
+                        "response_status": "review",
+                        "validation_error_code": "child_report_incomplete_or_truncated",
+                        "validation_error_message": 'incomplete after "Exceptions es\u2026"',
+                        "blocks_transactional_processing": False,
+                    },
+                ]
+            },
+        }
+    )
+
+    assert "✅ Mixed split reports received for WAIGANI, 28/04/26." in rendered["response_text"]
+    assert "Processed: Day-End Sales Report." in rendered["response_text"]
+    assert "Needs review: Supervisor Control Summary." in rendered["response_text"]
+    assert "Resend only the Supervisor Control Summary as one complete report." in rendered["response_text"]
+    assert "TAOP REVIEW REQUIRED" not in rendered["response_text"]
 
 
 def test_rejected_fix_request_renders_correctly() -> None:
@@ -312,13 +465,209 @@ def test_rejected_fix_request_renders_correctly() -> None:
             "Report: Staff Attendance Report",
             "",
             "ISSUES",
-            "1. Required report fields were missing or invalid.",
+            "1. Report format failed SOP validation. Recheck required fields and totals.",
             "2. TAOP could not approve this report with the current format.",
             "",
             "ACTION",
-            "Resend using the exact SOP format for Staff Attendance Report.",
+            "Recheck required fields and totals, then resend using the exact SOP format for Staff Attendance Report.",
         ]
     )
+
+
+def test_rejected_fix_request_renders_correction_requires_full_report_message() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "rejected_fix_request",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "bale_summary",
+            "branch": "waigani",
+            "report_date": "2026-04-24",
+            "reason": "correction_request_requires_full_report",
+        }
+    )
+
+    assert "Correction request detected, but full replacement report rows are required." in rendered["response_text"]
+    assert "Resend the full replacement report with all bale item rows and totals." in rendered["response_text"]
+
+
+def test_rejected_fix_request_surfaces_unsupported_sales_title() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "rejected_fix_request",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "sales_income",
+            "branch": "waigani",
+            "report_date": "2026-04-24",
+            "reason": "validation_failed",
+            "feedback_context": {
+                "validation": {
+                    "reason_codes": ["unsupported_report_title"],
+                    "rejections": [
+                        {
+                            "reason_code": "unsupported_report_title",
+                            "reason_detail": "Unsupported report title.",
+                            "expected_title": "DAY-END SALES REPORT",
+                            "received_title": "Sales report.",
+                        }
+                    ],
+                },
+                "raw_text": "\n".join(
+                    [
+                        "Sales report.",
+                        "Branch: Waigani",
+                        "Date: 24/04/26",
+                        "Gross Sales: 1200",
+                    ]
+                ),
+            },
+        }
+    )
+
+    assert rendered["response_text"].startswith(
+        "❌ TAOP REPORT REJECTED\nReport: Day-End Sales Report\nBranch: WAIGANI\nDate: 24/04/26"
+    )
+    assert "1. Unsupported report title." in rendered["response_text"]
+    assert "- Expected: DAY-END SALES REPORT" in rendered["response_text"]
+    assert "- Received: Sales report." in rendered["response_text"]
+    assert "ACTION REQUIRED\nUse the exact title DAY-END SALES REPORT and resend the Day-End Sales Report." in rendered[
+        "response_text"
+    ]
+
+
+def test_rejected_fix_request_surfaces_sales_parser_field_failures() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "rejected_fix_request",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "sales_income",
+            "branch": "waigani",
+            "report_date": "2026-04-24",
+            "reason": "validation_failed",
+            "feedback_context": {
+                "validation": {
+                    "details": {"parser_failure": True},
+                },
+                "raw_text": "\n".join(
+                    [
+                        "DAY-END SALES REPORT",
+                        "Branch: Waigani",
+                        "Date: 24/04/26",
+                        "Till 01",
+                        "Cashier: Alice",
+                        "T/Cash: 500",
+                        "Total Cash: 500",
+                        "Total Card: 200",
+                        "Total Sales: 700",
+                        "Total Guest: 12",
+                        "Head Count: 10",
+                    ]
+                ),
+            },
+        }
+    )
+
+    assert "❌ Specialist parser failed: sales_income_agent" in rendered["response_text"]
+    assert "Unsupported till header format." in rendered["response_text"]
+    assert "- Expected: Till#1 or Till#2" in rendered["response_text"]
+    assert "- Received: Till 01" in rendered["response_text"]
+    assert "Missing required till support operator." in rendered["response_text"]
+    assert "Unsupported customer count labels." in rendered["response_text"]
+    assert "ACTION REQUIRED\nCorrect only the failed fields above and resend the Day-End Sales Report." in rendered[
+        "response_text"
+    ]
+
+
+def test_review_ack_mixed_split_failure_surfaces_detected_titles_and_resend_guidance() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "review_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "mixed",
+            "reason": "mixed_report_split_not_safe",
+            "feedback_context": {
+                "raw_text": "\n".join(
+                    [
+                        "DAY-END SALES REPORT",
+                        "Branch: Waigani",
+                        "Date: 24/04/26",
+                        "Gross Sales: 1200",
+                        "SUPERVISOR CONTROL REPORT",
+                        "Cashier Reconciled: Yes",
+                    ]
+                ),
+                "mixed_detection": {
+                    "boundary_hints": [
+                        {
+                            "line_number": 5,
+                            "raw_line": "SUPERVISOR CONTROL REPORT",
+                        }
+                    ]
+                },
+            },
+        }
+    )
+
+    assert "❌ Mixed content split failed: Mixed content could not be safely split for fan-out." in rendered["response_text"]
+    assert "❌ Specialist parser not run: Mixed fan-out stopped before specialist parsing." in rendered["response_text"]
+    assert "1. Mixed content could not be safely split." in rendered["response_text"]
+    assert "Detected titles:" in rendered["response_text"]
+    assert "DAY-END SALES REPORT" in rendered["response_text"]
+    assert "SUPERVISOR CONTROL REPORT" in rendered["response_text"]
+    assert "Unsafe boundary: line 5: SUPERVISOR CONTROL REPORT" in rendered["response_text"]
+    assert "ACTION REQUIRED\nSend one report family per WhatsApp message and resend." in rendered["response_text"]
+
+
+def test_rejected_fix_request_bale_parser_failure_surfaces_expected_item_format() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "rejected_fix_request",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "bale_summary",
+            "branch": "waigani",
+            "report_date": "2026-04-24",
+            "reason": "validation_failed",
+            "feedback_context": {
+                "metrics": {
+                    "total_qty": 10,
+                    "total_amount": 100.0,
+                },
+                "validation": {
+                    "reason_codes": ["missing_items"],
+                    "rejections": [
+                        {
+                            "reason_code": "missing_items",
+                            "reason_detail": "No bale items were parsed.",
+                        }
+                    ],
+                },
+                "raw_text": "\n".join(
+                    [
+                        "DAILY BALE SUMMARY - RELEASED TO RAIL",
+                        "Branch: Waigani",
+                        "Date: 24/04/26",
+                        "Total Qty: 10",
+                        "Total Amount: K100",
+                    ]
+                ),
+            },
+        }
+    )
+
+    assert "❌ Specialist parser failed: pricing_stock_release_agent" in rendered["response_text"]
+    assert "1. Bale item rows were not recognized." in rendered["response_text"]
+    assert "- Expected: # 01. Item Name / Qty: 10 / Amt: K100" in rendered["response_text"]
+    assert "- Received: Totals were present but no item rows were parsed." in rendered["response_text"]
+    assert "ACTION REQUIRED\nResend the bale rows using one supported item format." in rendered["response_text"]
 
 
 def test_duplicate_notice_renders_correctly() -> None:
@@ -492,21 +841,27 @@ def test_bale_review_ack_renders_specific_taop_feedback() -> None:
         }
     )
 
-    assert rendered["response_text"].startswith("📊 TAOP BALE SUMMARY REVIEW – LAE 5TH STREET\nDate: 25/04/26")
-    assert "STATUS: ⚠️ REVIEW REQUIRED" in rendered["response_text"]
-    assert "VALIDATION RESULTS" in rendered["response_text"]
-    assert "✔ Total Qty matches item sum: 486 pcs" in rendered["response_text"]
-    assert "✔ Total Amount matches item sum: K2,335.00" in rendered["response_text"]
-    assert '"Day: Saturday" is not required by SOP' in rendered["response_text"]
-    assert '"K1, 508.00" should be "1508.00"' in rendered["response_text"]
-    assert 'Use numbers only, e.g. "74" not "74 pcs"' in rendered["response_text"]
-    assert "ACTION REQUIRED\nPlease resend using the standard bale summary format." in rendered["response_text"]
+    assert rendered["response_text"].startswith(
+        "⚠️ TAOP REVIEW REQUIRED\nReport: Daily Bale Summary\nBranch: LAE 5TH STREET\nDate: 25/04/26"
+    )
+    assert "VALIDATION" in rendered["response_text"]
+    assert "✔ Specialist parser passed: pricing_stock_release_agent" in rendered["response_text"]
+    assert "1. Confidence is below the auto-accept threshold." in rendered["response_text"]
+    assert "- Expected: >= 0.88" in rendered["response_text"]
+    assert "- Received: 0.76" in rendered["response_text"]
+    assert '"Day: Saturday" is not required by SOP' not in rendered["response_text"]
+    assert '"K1, 508.00" should be "1508.00"' not in rendered["response_text"]
+    assert 'Use numbers only, e.g. "74" not "74 pcs"' not in rendered["response_text"]
+    assert (
+        "ACTION REQUIRED\nCorrect only the failed fields above and resend if the report values were wrong."
+        in rendered["response_text"]
+    )
     assert "Score: 0.76" in rendered["response_text"]
-    assert "Auto-accept threshold: 0.88" in rendered["response_text"]
-    assert rendered["feedback"]["validation_results"][0]["label"] == "Total Qty matches item sum"
+    assert rendered["feedback"]["confidence"] == 0.76
+    assert rendered["feedback"]["diagnostics"]["stage"] == "governance"
 
 
-def test_bale_review_ack_shows_total_mismatches() -> None:
+def test_bale_review_ack_uses_agent_metrics_instead_of_recalculating_raw_totals() -> None:
     rendered = render_whatsapp_response(
         {
             "response_type": "review_ack",
@@ -559,14 +914,14 @@ def test_bale_review_ack_shows_total_mismatches() -> None:
         }
     )
 
-    assert "❌ Total Qty mismatch" in rendered["response_text"]
-    assert "Declared: 486" in rendered["response_text"]
-    assert "Calculated: 485" in rendered["response_text"]
-    assert "Difference: 1" in rendered["response_text"]
-    assert "❌ Total Amount mismatch" in rendered["response_text"]
-    assert "Declared: K2,335.00" in rendered["response_text"]
-    assert "Calculated: K2,334.00" in rendered["response_text"]
-    assert "Difference: K1.00" in rendered["response_text"]
+    assert "1. Confidence is below the auto-accept threshold." in rendered["response_text"]
+    assert "Total Qty: 485 pcs" not in rendered["response_text"]
+    assert "Total Amount: K2,334.00" not in rendered["response_text"]
+    assert "❌ Total Qty mismatch" not in rendered["response_text"]
+    assert "❌ Total Amount mismatch" not in rendered["response_text"]
+    assert "Declared:" not in rendered["response_text"]
+    assert "Calculated:" not in rendered["response_text"]
+    assert "Difference:" not in rendered["response_text"]
 
 
 def test_bale_accepted_ack_includes_validation_summary() -> None:
@@ -635,15 +990,77 @@ def test_bale_accepted_ack_includes_validation_summary() -> None:
     )
 
     assert rendered["response_text"].startswith("✅ TAOP BALE SUMMARY ACCEPTED – LAE MALAITA\nDate: 25/04/26")
-    assert "✔ Total Qty matches item sum: 529 pcs" in rendered["response_text"]
-    assert "✔ Total Amount matches item sum: K6,132.00" in rendered["response_text"]
-    assert "✔ Branch resolved" in rendered["response_text"]
-    assert "✔ Report stored successfully" in rendered["response_text"]
+    assert "STATUS: ✅ ACCEPTED" in rendered["response_text"]
     assert "SUMMARY" in rendered["response_text"]
     assert "Items: 5" in rendered["response_text"]
     assert "Total Qty: 529 pcs" in rendered["response_text"]
     assert "Total Amount: K6,132.00" in rendered["response_text"]
-    assert rendered["response_text"].endswith("No correction required.")
+    assert "VALIDATION RESULTS" not in rendered["response_text"]
+    assert "No correction required." in rendered["response_text"]
+
+
+def test_bale_accepted_with_warning_ack_shows_warnings_without_resend() -> None:
+    rendered = render_whatsapp_response(
+        {
+            "response_type": "accepted_ack",
+            "channel": "whatsapp",
+            "should_reply": True,
+            "is_replay": False,
+            "report_type": "bale_summary",
+            "branch": "lae_5th_street",
+            "report_date": "2026-05-01",
+            "governance_status": "accepted_with_warning",
+            "feedback_context": {
+                "report_type": "bale_summary",
+                "branch": "lae_5th_street",
+                "report_date": "2026-05-01",
+                "status": "accepted_with_warning",
+                "metrics": {
+                    "total_qty": 492,
+                    "total_amount": 3292.0,
+                },
+                "items": [
+                    {"qty": 419, "amount": 2179.0},
+                    {"qty": 73, "amount": 1113.0},
+                ],
+                "warnings": [
+                    {
+                        "code": "format_cleanup",
+                        "severity": "warning",
+                        "message": "One or more bale rows required safe currency or quantity format cleanup before parsing.",
+                    }
+                ],
+                "raw_text": "\n".join(
+                    [
+                        "DAILY BALE SUMMARY - RELEASED TO RAIL",
+                        "Branch: TTC LAE 5TH STREET BRANCH",
+                        "Date: 01/05/26",
+                        "Prepared By: Joyce - Supervisor",
+                        "#01. OSH",
+                        "Qty: 419pcs",
+                        "Amt: K2, 179.00",
+                        "#02. Jeans",
+                        "Qty: 73pcs",
+                        "Amt: K1, 113.00",
+                        "Total Qty: 492pcs",
+                        "Total Amount: K3, 292.00",
+                    ]
+                ),
+            },
+        }
+    )
+
+    assert rendered["response_text"].startswith(
+        "✅ TAOP BALE SUMMARY ACCEPTED WITH WARNING – LAE 5TH STREET\nDate: 01/05/26"
+    )
+    assert "STATUS: ⚠️ ACCEPTED WITH WARNING" in rendered["response_text"]
+    assert "Total Qty: 492 pcs" in rendered["response_text"]
+    assert "Total Amount: K3,292.00" in rendered["response_text"]
+    assert "WARNINGS" in rendered["response_text"]
+    assert "Format cleanup applied" in rendered["response_text"]
+    assert "ACTION REQUIRED" not in rendered["response_text"]
+    assert "Please resend" not in rendered["response_text"]
+    assert rendered["response_text"].endswith("No resend required.")
 
 
 def test_duplicate_notice_renders_specific_report_scope() -> None:

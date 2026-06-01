@@ -428,9 +428,16 @@ def test_ceo_dashboard_renders_executive_control_sections_in_compatibility_mode(
     assert "Staff Compatibility View" in html
     assert "Section Compatibility View" in html
     assert "Deprecated Alerts Panel" in html
-    assert "OpenClaw Runtime" in html
+    assert "AI Infrastructure" in html
+    assert "TAOP" in html
+    assert "IOI Colony" in html
+    assert "OpenClaw" in html
+    assert "Advisory Engine" in html
+    assert "Available" in html
     assert "Standby" in html
+    assert "Disabled" in html
     assert "ws://127.0.0.1:18789" in html
+    assert "does not call the OpenClaw gateway or send advisory prompts" in html
     assert "operator dashboard at" in html
     assert "/api/ceo/overview?date=2026-04-07" not in html
     assert "lae_malaita" in html
@@ -450,8 +457,10 @@ def test_ceo_dashboard_reports_configured_openclaw_runtime_when_enabled(monkeypa
     html = response.body.decode("utf-8")
 
     assert response.status_code == 200
-    assert "OpenClaw Runtime" in html
+    assert "AI Infrastructure" in html
+    assert "OpenClaw" in html
     assert "Configured" in html
+    assert "Enabled" in html
     assert "ws://gateway.internal:18789" in html
 
 

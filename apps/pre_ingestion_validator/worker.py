@@ -17,7 +17,7 @@ _STRONG_HEADER_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("bale_summary", ("bale summary report", "bale summary", "pricing stock release report", "pricing stock release")),
     ("staff_attendance", ("staff attendance report",)),
     ("staff_performance", ("staff performance report",)),
-    ("supervisor_control", ("supervisor control report",)),
+    ("supervisor_control", ("supervisor control report", "supervisor control summary")),
 )
 
 

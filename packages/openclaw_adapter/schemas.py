@@ -18,6 +18,12 @@ class GatewayHealthPayload(TypedDict):
     reason: str
 
 
+class RuntimeStatusPayload(TypedDict):
+    """Structured TAOP runtime visibility payload for OpenClaw state."""
+
+    openclaw: GatewayHealthPayload
+
+
 class AdvisoryPromptPayload(TypedDict):
     """Structured placeholder response for advisory prompt requests."""
 

@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from apps.hr_agent.date_branch_resolver import normalize_report_date, resolve_branch
-from apps.hr_agent.normalizer import normalize_status, parse_count
+from apps.hr_agent.normalizer import normalize_key_text, normalize_status, parse_count, strip_formatting_noise
 from packages.common.warnings import WarningEntry, dedupe_warnings, make_warning
 from packages.normalization.engine import normalize_report
 from packages.normalization.labels import internal_field_name
@@ -17,29 +17,51 @@ from packages.signal_contracts.work_item import WorkItem
 _KEY_VALUE_PATTERN = re.compile(r"^\s*([^:=]+)\s*[:=]\s*(.+?)\s*$")
 _NUMBERED_LINE_PATTERN = re.compile(r"^\s*(\d+)\s*(?:[.)\-:]+|\s)\s*(.+?)\s*$")
 _STRICT_RECORD_PATTERN = re.compile(r"^\s*(?P<staff>.+?)\s*(?:=|--+|-|:|\||/)\s*(?P<status>.+?)\s*$")
+_CONTINUATION_STATUS_PATTERN = re.compile(r"^\s*(?:=|--+|-|:|\||/)\s*(?P<status>.+?)\s*$")
 _DATE_ONLY_PATTERN = re.compile(r"^\s*\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}\s*$")
 _WEEKDAY_DATE_PATTERN = re.compile(
-    r"^\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}\s*$",
+    r"^\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}\s*[.,]?\s*$",
     flags=re.IGNORECASE,
 )
-_NOTE_HEADER_PATTERN = re.compile(r"^\s*(?:notes?|remarks?)\s*:?\s*(.*?)\s*$", flags=re.IGNORECASE)
+_DATE_FALLBACK_PATTERN = re.compile(r"\b\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}\b")
+_NOTE_HEADER_PATTERN = re.compile(r"^\s*(?:notes?|remarks?|notices?)\s*:?\s*(.*?)\s*$", flags=re.IGNORECASE)
 _SUMMARY_METRIC_ALIASES = {
     "total staff": "total_staff",
     "total staffs": "total_staff",
+    "total current staff": "total_staff",
+    "current staff": "total_staff",
+    "staff total": "total_staff",
     "staff present": "staff_present",
+    "staff press": "staff_present",
+    "staff pres": "staff_present",
+    "total staff present": "staff_present",
     "staffs present": "staff_present",
+    "total staff press": "staff_present",
+    "total staff pres": "staff_present",
     "total staffs present": "staff_present",
+    "total staffs pres": "staff_present",
     "total staffs press": "staff_present",
     "present": "staff_present",
+    "press": "staff_present",
+    "pres": "staff_present",
     "p": "staff_present",
     "not at work": "not_at_work",
     "staff off": "staff_off",
+    "staff day off": "staff_off",
+    "total staff day off": "staff_off",
+    "total staff off": "staff_off",
     "staffs day off": "staff_off",
+    "total staffs day off": "staff_off",
+    "total staffs off": "staff_off",
     "day off": "staff_off",
     "off": "staff_off",
     "off duty": "staff_off",
+    "total leave": "leave",
+    "total staff leave": "leave",
+    "staff leave": "leave",
     "staffs lay off": "lay_off",
     "lay off": "lay_off",
+    "layoff": "lay_off",
     "staffs late": "late",
     "late": "late",
     "suspend": "suspend",
@@ -48,10 +70,12 @@ _SUMMARY_METRIC_ALIASES = {
     "absent": "absent",
     "staffs absent with notice": "absent_with_notice",
     "absent with notice": "absent_with_notice",
+    "awn": "absent_with_notice",
     "staffs absent without": "absent_without_notice",
     "staffs absent without notice": "absent_without_notice",
     "absent without": "absent_without_notice",
     "absent without notice": "absent_without_notice",
+    "awon": "absent_without_notice",
     "leave": "leave",
     "staffs on leave": "leave",
     "staffs on leavebreak": "leave",
@@ -59,6 +83,14 @@ _SUMMARY_METRIC_ALIASES = {
     "on leavebreak": "leave",
     "sick": "sick",
     "staffs sick": "sick",
+    "resign": "non_active",
+    "resigned": "non_active",
+    "resignation pending": "non_active",
+    "decision pending": "non_active",
+    "decission pending": "non_active",
+    "terminated": "non_active",
+    "termination pending": "non_active",
+    "non active": "non_active",
     "staffs transfer": "transfer",
     "transfer": "transfer",
 }
@@ -74,6 +106,7 @@ _DECLARED_STATUS_KEYS = {
     "absent_without_notice": "awon",
     "leave": "leave",
     "sick": "sick",
+    "non_active": "non_active",
     "transfer": "transfer",
 }
 _NIL_COUNT_VALUES = {"nil", "nill"}
@@ -91,6 +124,8 @@ _NON_RECORD_PREFIXES = (
     "absent",
     "leave",
     "sick",
+    "summary",
+    "notice",
     "note",
     "notes",
     "remark",
@@ -108,6 +143,7 @@ class ParsedAttendanceRecord:
     staff_name: str
     status: str
     raw_status: str | None
+    normalized_status: str | None = None
     record_number: int | None = None
 
 
@@ -125,7 +161,18 @@ class ParsedHrReport:
     raw_branch: str | None = None
     raw_date: str | None = None
     notes: list[str] = field(default_factory=list)
+    normalization_attempts: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[WarningEntry] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ParsedSummaryCount:
+    """One summary metric extracted from the report body."""
+
+    metric_name: str
+    count: int
+    raw_key: str
+    raw_value: str
 
 
 def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
@@ -135,10 +182,11 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
     raw_text = _raw_text(payload)
     parsed = ParsedHrReport()
     _seed_routing_metadata(parsed, payload)
-    numbered_record_mode = _has_numbered_attendance_rows(raw_text)
+    raw_lines = _coalesced_lines(raw_text)
+    numbered_record_mode = _has_numbered_attendance_rows(raw_lines)
     note_section_active = False
 
-    for raw_line in raw_text.splitlines():
+    for raw_line in raw_lines:
         line = raw_line.strip()
         if not line:
             note_section_active = False
@@ -158,12 +206,23 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
             if field_name == "branch":
                 parsed.raw_branch = value
                 parsed.branch, parsed.branch_slug = resolve_branch(value)
+                _record_normalization_attempt(
+                    parsed,
+                    field="branch",
+                    raw_value=value,
+                    normalized_value=parsed.branch_slug or parsed.branch,
+                    layer="hr_parser",
+                )
             elif field_name == "report_date":
                 parsed.raw_date = value
                 parsed.report_date = normalize_report_date(value)
-            elif field_name == "total_staff":
-                parsed.declared_total_staff = value
-                parsed.declared_summary_metrics["total_staff"] = value
+                _record_normalization_attempt(
+                    parsed,
+                    field="report_date",
+                    raw_value=value,
+                    normalized_value=parsed.report_date,
+                    layer="hr_parser",
+                )
             elif field_name == "notes":
                 parsed.notes.append(value)
             continue
@@ -172,17 +231,38 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
         if explicit_date is not None:
             parsed.raw_date = line
             parsed.report_date = explicit_date
+            _record_normalization_attempt(
+                parsed,
+                field="report_date",
+                raw_value=line,
+                normalized_value=explicit_date,
+                layer="hr_parser",
+            )
             continue
 
         summary = _parse_summary_count_line(line)
         if summary is not None:
-            metric_name, count = summary
-            parsed.declared_summary_metrics[metric_name] = count
-            if metric_name == "total_staff":
-                parsed.declared_total_staff = count
-            declared_status_key = _DECLARED_STATUS_KEYS.get(metric_name)
+            parsed.declared_summary_metrics[summary.metric_name] = summary.count
+            if summary.metric_name == "total_staff":
+                parsed.declared_total_staff = summary.count
+            declared_status_key = _DECLARED_STATUS_KEYS.get(summary.metric_name)
             if declared_status_key is not None:
-                parsed.declared_status_totals[declared_status_key] = count
+                parsed.declared_status_totals[declared_status_key] = summary.count
+            _record_normalization_attempt(
+                parsed,
+                field="summary_label",
+                raw_value=summary.raw_key,
+                normalized_value=_summary_metric_display(summary.metric_name),
+                layer="hr_parser",
+            )
+            _record_normalization_attempt(
+                parsed,
+                field="summary_count",
+                raw_value=summary.raw_value,
+                normalized_value=summary.count,
+                layer="hr_parser",
+                context={"metric": _summary_metric_display(summary.metric_name)},
+            )
             continue
 
         if note_section_active:
@@ -191,6 +271,14 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
 
         record = _parse_record_line(line, allow_unnumbered=not numbered_record_mode)
         if record is not None:
+            _record_normalization_attempt(
+                parsed,
+                field="attendance_status",
+                raw_value=record.raw_status,
+                normalized_value=record.normalized_status,
+                layer="hr_normalizer",
+                context={"staff_name": record.staff_name},
+            )
             if record.status == "unknown":
                 parsed.warnings.append(
                     make_warning(
@@ -207,15 +295,28 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
     if not parsed.branch_slug:
         parsed.warnings.append(
             make_warning(
-                code="missing_fields",
+                code="missing_branch",
                 severity="error",
                 message="Branch could not be resolved from the HR attendance report.",
             )
         )
     if not parsed.report_date:
+        fallback_raw_date, fallback_report_date = _resolve_fallback_report_date(raw_lines)
+        if fallback_report_date is not None:
+            parsed.raw_date = fallback_raw_date
+            parsed.report_date = fallback_report_date
+            _record_normalization_attempt(
+                parsed,
+                field="report_date",
+                raw_value=fallback_raw_date,
+                normalized_value=fallback_report_date,
+                layer="hr_parser",
+                context={"strategy": "first_10_non_empty_lines"},
+            )
+    if not parsed.report_date:
         parsed.warnings.append(
             make_warning(
-                code="missing_fields",
+                code="missing_report_date",
                 severity="error",
                 message="Report date could not be resolved from the HR attendance report.",
             )
@@ -223,7 +324,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedHrReport:
     if not parsed.records and not parsed.declared_status_totals:
         parsed.warnings.append(
             make_warning(
-                code="missing_fields",
+                code="no_attendance_rows",
                 severity="error",
                 message="No attendance rows or declared attendance totals were extracted from the HR report.",
             )
@@ -264,15 +365,12 @@ def _parse_metadata_line(line: str) -> tuple[str, Any] | None:
     raw_key = match.group(1).strip()
     raw_value = match.group(2).strip()
     field_name = internal_field_name(raw_key, report_family="attendance")
-    if field_name == "total_staff":
-        count = parse_count(raw_value)
-        return (field_name, count) if count is not None else None
     if field_name in {"branch", "report_date", "notes"}:
         return field_name, raw_value
     return None
 
 
-def _parse_summary_count_line(line: str) -> tuple[str, int] | None:
+def _parse_summary_count_line(line: str) -> ParsedSummaryCount | None:
     match = _KEY_VALUE_PATTERN.match(line)
     if match is None:
         return None
@@ -284,7 +382,9 @@ def _parse_summary_count_line(line: str) -> tuple[str, int] | None:
         return None
 
     metric_name = _SUMMARY_METRIC_ALIASES.get(_normalize_key(raw_key))
-    return (metric_name, count) if metric_name is not None else None
+    if metric_name is None:
+        return None
+    return ParsedSummaryCount(metric_name=metric_name, count=count, raw_key=raw_key, raw_value=raw_value)
 
 
 def _parse_record_line(line: str, *, allow_unnumbered: bool) -> ParsedAttendanceRecord | None:
@@ -309,13 +409,15 @@ def _parse_record_line(line: str, *, allow_unnumbered: bool) -> ParsedAttendance
     if _looks_like_non_record_label(staff_name, numbered=numbered):
         return None
 
-    canonical_status = _canonical_status(raw_status) or "unknown"
+    canonical_status, normalized_status = normalize_status(raw_status)
+    canonical_status = canonical_status or "unknown"
 
     return ParsedAttendanceRecord(
         record_number=record_number,
         staff_name=staff_name,
         status=canonical_status,
         raw_status=raw_status,
+        normalized_status=normalized_status,
     )
 
 
@@ -339,17 +441,62 @@ def _raw_text(payload: dict[str, Any]) -> str:
     return (normalization.normalized_text or stripped).strip()
 
 
-def _canonical_status(value: str) -> str | None:
-    canonical_status, _ = normalize_status(value)
-    return canonical_status
+def _coalesced_lines(raw_text: str) -> list[str]:
+    """Join split attendance continuation lines before field parsing."""
 
+    raw_lines = raw_text.splitlines()
+    coalesced: list[str] = []
+    index = 0
+
+    while index < len(raw_lines):
+        current_line = raw_lines[index]
+        next_line = raw_lines[index + 1] if index + 1 < len(raw_lines) else None
+        if next_line is not None and _should_merge_record_continuation(current_line, next_line):
+            coalesced.append(f"{current_line.rstrip()} {next_line.lstrip()}")
+            index += 2
+            continue
+        coalesced.append(current_line)
+        index += 1
+
+    return coalesced
 
 def _parse_explicit_date_line(line: str) -> str | None:
     stripped = line.strip()
     normalized_key = _normalize_key(stripped)
-    if _DATE_ONLY_PATTERN.match(stripped) or _WEEKDAY_DATE_PATTERN.match(stripped) or normalized_key.startswith("date "):
+    if (
+        _DATE_ONLY_PATTERN.match(stripped.rstrip(".,"))
+        or _WEEKDAY_DATE_PATTERN.match(stripped)
+        or normalized_key.startswith("date")
+    ):
         return normalize_report_date(stripped)
     return None
+
+
+def _resolve_fallback_report_date(lines: list[str], *, limit: int = 10) -> tuple[str | None, str | None]:
+    """Return the first recoverable report date from the early non-empty lines."""
+
+    for line in _first_non_empty_lines(lines, limit=limit):
+        stripped = line.strip()
+        if not stripped or _DATE_FALLBACK_PATTERN.search(stripped) is None:
+            continue
+        normalized_date = normalize_report_date(stripped)
+        if normalized_date is None:
+            continue
+        return stripped, normalized_date
+    return None, None
+
+
+def _first_non_empty_lines(lines: list[str], *, limit: int) -> list[str]:
+    """Return the first `limit` non-empty raw lines."""
+
+    first_lines: list[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        first_lines.append(line)
+        if len(first_lines) >= limit:
+            break
+    return first_lines
 
 
 def _split_record_content(content: str) -> tuple[str, str] | None:
@@ -364,7 +511,37 @@ def _split_record_content(content: str) -> tuple[str, str] | None:
 
 
 def _has_numbered_attendance_rows(raw_text: str) -> bool:
-    return any(_NUMBERED_LINE_PATTERN.match(line.strip()) for line in raw_text.splitlines())
+    if isinstance(raw_text, str):
+        lines = raw_text.splitlines()
+    else:
+        lines = raw_text
+    return any(_NUMBERED_LINE_PATTERN.match(line.strip()) for line in lines)
+
+
+def _should_merge_record_continuation(current_line: str, next_line: str) -> bool:
+    """Return whether a numbered staff row continues on the next line."""
+
+    numbered_match = _NUMBERED_LINE_PATTERN.match(current_line.strip())
+    if numbered_match is None:
+        return False
+
+    content = numbered_match.group(2).strip()
+    if _split_record_content(content) is not None:
+        return False
+
+    if _looks_like_non_record_label(_clean_text(content) or "", numbered=True):
+        return False
+
+    continuation_match = _CONTINUATION_STATUS_PATTERN.match(next_line.strip())
+    if continuation_match is None:
+        return False
+
+    raw_status = _clean_text(continuation_match.group("status") or "")
+    if raw_status is None:
+        return False
+
+    canonical_status, _ = normalize_status(raw_status)
+    return canonical_status is not None
 
 
 def _looks_like_non_record_label(value: str, *, numbered: bool) -> bool:
@@ -381,16 +558,65 @@ def _looks_like_non_record_label(value: str, *, numbered: bool) -> bool:
 
 
 def _clean_text(value: str) -> str | None:
-    cleaned = " ".join(value.replace("_", " ").split()).strip(" -|/=:,")
+    cleaned = strip_formatting_noise(value).strip(" -*|/:=,")
     return cleaned or None
 
 
 def _normalize_key(value: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold().replace("_", " ")).split())
+    return normalize_key_text(value)
 
 
 def _parse_summary_count(raw_value: str) -> int | None:
-    normalized = _normalize_key(raw_value)
+    cleaned_value = strip_formatting_noise(raw_value)
+    normalized = _normalize_key(cleaned_value)
     if normalized in _NIL_COUNT_VALUES:
         return 0
-    return parse_count(raw_value)
+    count = parse_count(cleaned_value)
+    if count is not None:
+        return count
+    leading_count_match = re.match(r"^\s*[([]?(\d+)\b", cleaned_value)
+    if leading_count_match is not None:
+        return int(leading_count_match.group(1))
+    return None
+
+
+def _summary_metric_display(metric_name: str) -> str:
+    labels = {
+        "total_staff": "Total_Staff",
+        "staff_present": "Total_Present",
+        "not_at_work": "Total_Not_At_Work",
+        "staff_off": "Total_Off",
+        "lay_off": "Total_Lay_Off",
+        "late": "Total_Late",
+        "suspend": "Total_Suspend",
+        "absent": "Total_Absent",
+        "absent_with_notice": "Total_Absent_With_Notice",
+        "absent_without_notice": "Total_Absent_Without_Notice",
+        "leave": "Total_Leave",
+        "sick": "Total_Sick",
+        "non_active": "Total_Non_Active",
+        "transfer": "Total_Transfer",
+    }
+    return labels.get(metric_name, metric_name)
+
+
+def _record_normalization_attempt(
+    parsed: ParsedHrReport,
+    *,
+    field: str,
+    raw_value: object,
+    normalized_value: object,
+    layer: str,
+    context: Mapping[str, object] | None = None,
+) -> None:
+    """Capture one normalization attempt for downstream accountability."""
+
+    parsed.normalization_attempts.append(
+        {
+            "field": field,
+            "layer": layer,
+            "raw_value": raw_value,
+            "normalized_value": normalized_value,
+            **({"context": dict(context)} if context is not None else {}),
+        }
+    )

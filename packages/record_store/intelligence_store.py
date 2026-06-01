@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 INTELLIGENCE_REPORT_FAMILY = "intelligence"
@@ -15,6 +16,7 @@ _CHECKLIST_SIGNAL_KEYS = {
     "pricing_or_system_issues": "Pricing_System_Issues",
     "exceptions_escalated": "Exceptions",
 }
+_NON_ALPHANUMERIC_PATTERN = re.compile(r"[^a-z0-9]+")
 
 
 def build_supervisor_control_intelligence_record(
@@ -45,31 +47,40 @@ def build_supervisor_control_intelligence_record(
     warning_payloads = [dict(warning) for warning in warnings if isinstance(warning, Mapping)]
     note_list = [note for note in notes if isinstance(note, str)]
 
-    cash_variance = _checklist_signal_value(item_payloads, "cash_variance")
-    staffing_issues = _checklist_signal_value(item_payloads, "staffing_issues")
-    stock_issues = _checklist_signal_value(item_payloads, "stock_issues")
-    pricing_or_system_issues = _checklist_signal_value(item_payloads, "pricing_or_system_issues")
-    exceptions_escalated = _checklist_signal_value(item_payloads, "exceptions_escalated")
+    cash_variance, cash_variance_detail = _checklist_signal_state(item_payloads, "cash_variance")
+    staffing_issues, staffing_issues_detail = _checklist_signal_state(item_payloads, "staffing_issues")
+    stock_issues, stock_issues_detail = _checklist_signal_state(item_payloads, "stock_issues")
+    pricing_or_system_issues, pricing_or_system_issues_detail = _checklist_signal_state(
+        item_payloads,
+        "pricing_or_system_issues",
+    )
+    exceptions_escalated, exceptions_escalated_detail = _checklist_signal_state(item_payloads, "exceptions_escalated")
     if exceptions_escalated is None:
         exceptions_escalated = _escalation_flag(metrics)
 
     key_values = {
         "Supervisor": supervisor,
         "Supervisor confirmation": supervisor_confirmation,
-        "Cash variance": cash_variance,
-        "Staffing issues": staffing_issues,
-        "Stock issues": stock_issues,
-        "Pricing or system issues": pricing_or_system_issues,
-        "Exceptions escalated": exceptions_escalated,
+        "Cash variance": _display_checklist_value(cash_variance, cash_variance_detail),
+        "Staffing issues": _display_checklist_value(staffing_issues, staffing_issues_detail),
+        "Stock issues affecting sales": _display_checklist_value(stock_issues, stock_issues_detail),
+        "Pricing or system issues": _display_checklist_value(
+            pricing_or_system_issues,
+            pricing_or_system_issues_detail,
+        ),
+        "Exceptions escalated": _display_checklist_value(exceptions_escalated, exceptions_escalated_detail),
     }
     checklist = [
         f"{label}: {value}"
         for label, value in (
-            ("Cash variance", cash_variance),
-            ("Staffing issues", staffing_issues),
-            ("Stock issues", stock_issues),
-            ("Pricing or system issues", pricing_or_system_issues),
-            ("Exceptions escalated", exceptions_escalated),
+            ("Cash variance", _display_checklist_value(cash_variance, cash_variance_detail)),
+            ("Staffing issues", _display_checklist_value(staffing_issues, staffing_issues_detail)),
+            ("Stock issues affecting sales", _display_checklist_value(stock_issues, stock_issues_detail)),
+            (
+                "Pricing or system issues",
+                _display_checklist_value(pricing_or_system_issues, pricing_or_system_issues_detail),
+            ),
+            ("Exceptions escalated", _display_checklist_value(exceptions_escalated, exceptions_escalated_detail)),
         )
         if value is not None
     ]
@@ -84,10 +95,17 @@ def build_supervisor_control_intelligence_record(
         "report_date": report_date,
         "supervisor": supervisor,
         "cash_variance": cash_variance,
+        "cash_variance_detail": cash_variance_detail,
         "staffing_issues": staffing_issues,
+        "staffing_issues_detail": staffing_issues_detail,
         "stock_issues": stock_issues,
+        "stock_issues_detail": stock_issues_detail,
+        "stock_issues_affecting_sales": stock_issues,
+        "stock_issues_affecting_sales_detail": stock_issues_detail,
         "pricing_or_system_issues": pricing_or_system_issues,
+        "pricing_or_system_issues_detail": pricing_or_system_issues_detail,
         "exceptions_escalated": exceptions_escalated,
+        "exceptions_escalated_detail": exceptions_escalated_detail,
         "supervisor_confirmation": supervisor_confirmation,
         "raw_text": raw_text,
         "confidence": confidence,
@@ -113,8 +131,11 @@ def build_supervisor_control_intelligence_record(
     }
 
 
-def _checklist_signal_value(items: Sequence[Mapping[str, Any]], signal_name: str) -> str | None:
-    """Return the explicit checklist value for one supervisor-control signal."""
+def _checklist_signal_state(
+    items: Sequence[Mapping[str, Any]],
+    signal_name: str,
+) -> tuple[bool | None, str | None]:
+    """Return the normalized checklist boolean and any preserved detail text."""
 
     expected_key = _CHECKLIST_SIGNAL_KEYS[signal_name]
     for item in items:
@@ -124,11 +145,15 @@ def _checklist_signal_value(items: Sequence[Mapping[str, Any]], signal_name: str
         if action_taken != expected_key and detail_key != expected_key:
             continue
         if detail_value is not None:
-            return detail_value
+            normalized_detail = _boolean_checklist_value(detail_value)
+            if normalized_detail is not None:
+                return normalized_detail, None
+            return True, detail_value
         supervisor_confirmed = _string_or_none(item.get("supervisor_confirmed"))
-        if supervisor_confirmed in {"YES", "NO"}:
-            return supervisor_confirmed
-    return None
+        normalized_confirmation = _boolean_checklist_value(supervisor_confirmed)
+        if normalized_confirmation is not None:
+            return normalized_confirmation, None
+    return None, None
 
 
 def _detail_key_value(details: str | None) -> tuple[str | None, str | None]:
@@ -138,11 +163,35 @@ def _detail_key_value(details: str | None) -> tuple[str | None, str | None]:
     return _string_or_none(key), _string_or_none(value)
 
 
-def _escalation_flag(metrics: Mapping[str, Any]) -> str | None:
+def _boolean_checklist_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = _string_or_none(value)
+    if text is None:
+        return None
+    normalized = _normalize_value_token(text)
+    if normalized in {"yes", "y", "true", "present", "issue", "issues"}:
+        return True
+    if normalized in {"no", "n", "false", "none", "nil", "na", "n a", "no issue", "no issues", "nothing"}:
+        return False
+    return None
+
+
+def _display_checklist_value(value: bool | None, detail: str | None = None) -> str | None:
+    if detail is not None:
+        return detail
+    if value is True:
+        return "YES"
+    if value is False:
+        return "NO"
+    return None
+
+
+def _escalation_flag(metrics: Mapping[str, Any]) -> bool | None:
     value = metrics.get("escalated_count")
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
-    return "YES" if value > 0 else "NO"
+    return value > 0
 
 
 def _string_or_none(value: Any) -> str | None:
@@ -150,6 +199,12 @@ def _string_or_none(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _normalize_value_token(value: str) -> str:
+    """Return one compact comparison token for tolerant supervisor checklist values."""
+
+    return " ".join(_NON_ALPHANUMERIC_PATTERN.sub(" ", value.casefold()).split())
 
 
 def _utc_timestamp() -> str:

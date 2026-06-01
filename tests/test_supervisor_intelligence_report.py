@@ -79,11 +79,12 @@ def test_supervisor_control_writes_intelligence_record_without_structured_copy(t
     assert stored["branch"] == "waigani"
     assert stored["report_date"] == "2026-04-07"
     assert stored["supervisor"] == "Francis Ano"
-    assert stored["cash_variance"] == "NO"
-    assert stored["staffing_issues"] == "YES"
-    assert stored["stock_issues"] == "NO"
-    assert stored["pricing_or_system_issues"] == "YES"
-    assert stored["exceptions_escalated"] == "NO"
+    assert stored["cash_variance"] is False
+    assert stored["staffing_issues"] is True
+    assert stored["stock_issues"] is False
+    assert stored["stock_issues_affecting_sales"] is False
+    assert stored["pricing_or_system_issues"] is True
+    assert stored["exceptions_escalated"] is False
     assert stored["supervisor_confirmation"] == "YES"
     assert stored["raw_text"] is not None
     assert stored["confidence"] >= 0.0

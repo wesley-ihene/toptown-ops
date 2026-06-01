@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import packages.record_store.paths as record_paths
+from packages.branch_registry import is_canonical_branch_slug
 
 GovernedStatus = Literal[
     "accepted",
@@ -23,11 +24,13 @@ GovernedStatus = Literal[
 
 GovernanceReason = Literal[
     "invalid_pricing_card_format",
+    "correction_request_requires_full_report",
     "duplicate_message_id",
     "duplicate_raw_sha256",
     "duplicate_semantic",
     "conflicting_record_same_scope",
     "unknown_report_type",
+    "unknown_branch_slug",
     "ambiguous_branch",
     "ambiguous_report_date",
     "insufficient_structure",
@@ -49,6 +52,7 @@ _IGNORED_SEMANTIC_FIELDS = {
     "confidence",
     "export_allowed",
     "governance",
+    "reconciliation",
     "review_policy",
     "source_agent",
     "status",
@@ -266,6 +270,36 @@ def govern_record(
                 source_status=source_status,
                 duplicate_of=str(existing_record_path),
             )
+        if _replacement_write_requested(
+            signal_type=signal_type,
+            report_family=report_family,
+            governance_context=governance_context,
+        ):
+            replacement_status = (
+                _intelligence_governed_status()
+                if intelligence_signal
+                else _governed_status(
+                    source_status=source_status,
+                    warnings=_warning_codes(payload),
+                    acceptance=acceptance,
+                )
+            )
+            return GovernanceDecision(
+                status=replacement_status,
+                export_allowed=True if intelligence_signal else replacement_status in EXPORTABLE_FINAL_STATUSES,
+                report_family=report_family,
+                signal_type=signal_type,
+                branch=branch,
+                report_date=report_date,
+                message_id=message_id,
+                raw_sha256=raw_sha256,
+                normalized_scope=normalized_scope,
+                semantic_sha256=semantic_sha256,
+                reasons=[],
+                warnings=_warning_codes(payload),
+                source_status=source_status,
+                duplicate_of=str(existing_record_path),
+            )
         return GovernanceDecision(
             status="conflict_blocked",
             export_allowed=False,
@@ -345,8 +379,10 @@ def _taxonomy_reasons(
         reasons.append("invalid_pricing_card_format")
     if report_family == "unknown" or classified_report_type == "unknown":
         reasons.append("unknown_report_type")
-    if _is_missing_scope_value(branch):
+    if branch is None or not branch.strip():
         reasons.append("ambiguous_branch")
+    elif not is_canonical_branch_slug(branch):
+        reasons.append("unknown_branch_slug")
     if _is_missing_scope_value(report_date):
         reasons.append("ambiguous_report_date")
     validation_details = _mapping(validation.get("details"))
@@ -356,6 +392,8 @@ def _taxonomy_reasons(
         or "parser_failure" in _reason_codes(validation)
     ):
         reasons.append("parser_failure")
+    if _has_reason_code(validation, "correction_request_requires_full_report") or "correction_request_requires_full_report" in _warning_codes(payload):
+        reasons.append("correction_request_requires_full_report")
     if source_status in {"invalid_input", "rejected"}:
         reasons.append("insufficient_structure")
     if acceptance.get("decision") == "reject":
@@ -486,7 +524,7 @@ def _has_meaningful_structure(*, signal_type: str, payload: Mapping[str, Any]) -
 
 
 def _scope(*, report_family: str, branch: str | None, report_date: str | None) -> str | None:
-    if _is_missing_scope_value(branch) or _is_missing_scope_value(report_date):
+    if _is_missing_scope_value(branch) or _is_missing_scope_value(report_date) or not is_canonical_branch_slug(branch):
         return None
     return f"{report_family}:{branch}:{report_date}"
 
@@ -553,7 +591,7 @@ def _legacy_record_path_if_present(
 
     if not record_paths.is_intelligence_signal_type(signal_type):
         return None
-    if _is_missing_scope_value(branch) or _is_missing_scope_value(report_date):
+    if _is_missing_scope_value(branch) or _is_missing_scope_value(report_date) or not is_canonical_branch_slug(branch):
         return None
     legacy_path = record_paths.get_legacy_structured_path_for_root(
         source_root / "records" / "structured",
@@ -577,6 +615,24 @@ def _warning_codes(payload: Mapping[str, Any]) -> list[str]:
             if code is not None:
                 codes.append(code)
     return _dedupe_text_items(codes)
+
+
+def _has_reason_code(validation: Mapping[str, Any], reason_code: str) -> bool:
+    return reason_code in _reason_codes(validation)
+
+
+def _replacement_write_requested(
+    *,
+    signal_type: str,
+    report_family: str,
+    governance_context: Mapping[str, Any],
+) -> bool:
+    return (
+        signal_type == "pricing_stock_release"
+        and report_family == "bale_summary"
+        and governance_context.get("correction_intent_detected") is True
+        and governance_context.get("allow_same_scope_supersede") is True
+    )
 
 
 def _reason_codes(validation: Mapping[str, Any]) -> list[str]:

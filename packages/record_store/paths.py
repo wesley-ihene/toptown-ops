@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from packages.branch_registry import canonical_branch_slug_or_none
 from packages.common.paths import REPO_ROOT
 
 from .naming import build_structured_filename, safe_segment
@@ -21,6 +22,7 @@ PROPOSALS_DIR = RECORDS_DIR / "proposals"
 OBSERVABILITY_DIR = RECORDS_DIR / "observability"
 ACTIONS_DIR = RECORDS_DIR / "actions"
 _INTELLIGENCE_SIGNAL_TYPES = frozenset({"supervisor_control"})
+_UNKNOWN_BRANCH_BUCKET = "unknown"
 
 
 def get_raw_path(report_type: str) -> Path:
@@ -55,7 +57,7 @@ def get_structured_path_for_root(root: Path, signal_type: str, branch: str, date
     return (
         storage_root
         / safe_segment(signal_type)
-        / safe_segment(branch)
+        / _branch_segment(branch)
         / build_structured_filename(date)
     )
 
@@ -78,7 +80,7 @@ def get_intelligence_path_for_root(root: Path, signal_type: str, branch: str, da
         root
         / safe_segment(signal_type)
         / build_structured_filename(date).removesuffix(".json")
-        / f"{safe_segment(branch)}.json"
+        / f"{_branch_segment(branch)}.json"
     )
 
 
@@ -99,7 +101,7 @@ def get_legacy_structured_path_for_root(root: Path, signal_type: str, branch: st
     return (
         root
         / safe_segment(signal_type)
-        / safe_segment(branch)
+        / _branch_segment(branch)
         / build_structured_filename(date)
     )
 
@@ -118,7 +120,11 @@ def get_duplicate_archive_dir(
     """Return the duplicate-archive directory for one UTC archive date."""
 
     duplicates_dir = DUPLICATES_DIR if output_root is None else Path(output_root) / "records" / "duplicates" / "whatsapp"
-    return duplicates_dir / safe_segment(archive_date)
+    try:
+        date_segment = build_structured_filename(archive_date).removesuffix(".json")
+    except ValueError:
+        date_segment = safe_segment(archive_date)
+    return duplicates_dir / date_segment
 
 
 def get_review_path(
@@ -134,7 +140,7 @@ def get_review_path(
     return (
         review_dir
         / safe_segment(date)
-        / safe_segment(branch)
+        / _branch_segment(branch, allow_unknown_bucket=True)
         / safe_segment(report_type)
     )
 
@@ -152,7 +158,7 @@ def get_feedback_path(
     return (
         feedback_dir
         / report_date
-        / safe_segment(branch)
+        / _branch_segment(branch)
         / f"{safe_segment(action_id)}.json"
     )
 
@@ -164,7 +170,7 @@ def get_provenance_path(outcome: str, date: str, branch: str, report_type: str) 
         PROVENANCE_DIR
         / safe_segment(outcome)
         / safe_segment(date)
-        / safe_segment(branch)
+        / _branch_segment(branch, allow_unknown_bucket=True)
         / safe_segment(report_type)
     )
 
@@ -200,7 +206,7 @@ def get_action_path(
     return (
         actions_dir
         / report_date
-        / safe_segment(branch)
+        / _branch_segment(branch)
         / safe_segment(action_type)
         / f"{safe_segment(action_id)}.json"
     )
@@ -243,7 +249,7 @@ def structured_records_dir(
     if record_type is not None:
         path /= safe_segment(record_type)
     if branch is not None:
-        path /= safe_segment(branch)
+        path /= _branch_segment(branch)
     return path
 
 
@@ -277,3 +283,18 @@ def _storage_root_for_signal_type(root: Path, signal_type: str) -> Path:
     if root.name == STRUCTURED_DIR.name:
         return root.parent / INTELLIGENCE_DIR.name
     return root
+
+
+def _branch_segment(branch: str, *, allow_unknown_bucket: bool = False) -> str:
+    """Return the canonical branch directory segment for one branch input."""
+
+    cleaned = branch.strip()
+    if allow_unknown_bucket and cleaned == _UNKNOWN_BRANCH_BUCKET:
+        return _UNKNOWN_BRANCH_BUCKET
+
+    canonical = canonical_branch_slug_or_none(cleaned)
+    if canonical is not None:
+        return canonical
+    if allow_unknown_bucket:
+        return _UNKNOWN_BRANCH_BUCKET
+    raise ValueError(f"unknown_branch_slug: {branch!r}")

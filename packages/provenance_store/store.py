@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from packages.branch_registry import canonical_branch_slug_or_none
 from packages.record_store.naming import safe_segment
 from packages.record_store.paths import get_provenance_path
 from packages.record_store.writer import write_json_file
@@ -31,11 +32,12 @@ def write_provenance_record(
 ) -> str:
     """Write one provenance record and return its path."""
 
-    provenance_path = get_provenance_path(outcome, report_date, branch, report_type) / f"{safe_segment(raw_message_hash)}.json"
+    canonical_branch = canonical_branch_slug_or_none(branch) or "unknown"
+    provenance_path = get_provenance_path(outcome, report_date, canonical_branch, report_type) / f"{safe_segment(raw_message_hash)}.json"
     payload = {
         "outcome": outcome,
         "report_type": report_type,
-        "branch": branch,
+        "branch": canonical_branch,
         "date": report_date,
         "raw_message_hash": raw_message_hash,
         "parser_used": parser_used,
@@ -52,7 +54,7 @@ def write_provenance_record(
     if record_latency:
         record_processing_event(
             report_date=report_date,
-            branch=branch,
+            branch=canonical_branch,
             report_type=report_type,
             outcome=outcome,
             parse_mode=parse_mode,

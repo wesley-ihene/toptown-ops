@@ -1,4 +1,10 @@
-"""Detect and split explicit mixed-content reports into routed child sections."""
+"""Detect and split explicit mixed-content reports into routed child sections.
+
+Runtime ownership note:
+- Live mixed-report splitting is owned by ``apps.report_splitter_agent.worker``.
+- This alternate splitter is retained on disk but is not wired into the current
+  runtime orchestration path.
+"""
 
 from __future__ import annotations
 
@@ -9,36 +15,31 @@ import json
 import re
 from typing import Any
 
-from packages.report_registry import route_for_family
+from apps.branch_resolver_agent.worker import resolve_branch
+from apps.date_resolver_agent.worker import resolve_report_date
+from apps.header_normalizer_agent.worker import normalize_headers
+from packages.report_registry import APPROVED_MIXED_SPLIT_TITLES, route_for_family
 from packages.signal_contracts.work_item import WorkItem
 
 TEXT_FIELDS = ("text", "body", "message", "caption", "content")
 SPLIT_STRATEGY = "explicit_report_headers"
 
 SECTION_HEADERS: dict[str, tuple[str, ...]] = {
-    "sales_income": (
-        "day end sales report",
-        "sales income report",
-        "sales report",
-    ),
-    "attendance": (
-        "staff attendance report",
-        "staff attendance",
-        "attendance report",
-    ),
-    "pricing_stock_release": (
-        "daily bale summary",
-        "pricing stock release",
-        "released to rail",
-    ),
-    "staff_performance": (
-        "staff performance report",
-        "staff assisting customers",
-        "staff assisting report",
-    ),
+    "sales_income": APPROVED_MIXED_SPLIT_TITLES["sales_income"],
+    "attendance": APPROVED_MIXED_SPLIT_TITLES["attendance"],
+    "pricing_stock_release": APPROVED_MIXED_SPLIT_TITLES["pricing_stock_release"],
+    "staff_performance": APPROVED_MIXED_SPLIT_TITLES["staff_performance"],
+    "supervisor_control": APPROVED_MIXED_SPLIT_TITLES["supervisor_control"],
+    "store_monitoring": APPROVED_MIXED_SPLIT_TITLES["store_monitoring"],
 }
 
 _NON_ALPHANUMERIC_PATTERN = re.compile(r"[^a-z0-9]+")
+RUNTIME_STATUS = "DISABLED"
+RUNTIME_OWNER = "report_splitter_agent"
+RUNTIME_NOTE = (
+    "Alternate splitter retained on disk; current runtime orchestration uses "
+    "apps.report_splitter_agent.worker."
+)
 
 
 @dataclass(slots=True)
@@ -99,6 +100,8 @@ def detect_and_split_mixed_report(work_item: WorkItem) -> MixedSplitPlan:
         section_lines = raw_lines[start_index:end_index]
         child_raw_text = "\n".join(common_prefix_lines + [line.rstrip() for line in section_lines if line.strip()]).strip()
         if not child_raw_text:
+            continue
+        if not _child_has_required_scope(child_raw_text):
             continue
         lineage = {
             "message_role": "split_child",
@@ -235,6 +238,15 @@ def _extract_raw_text(work_item: WorkItem) -> str:
                 text_fields.append(value)
         return "\n".join(text_fields)
     return str(raw_message)
+
+
+def _child_has_required_scope(child_raw_text: str) -> bool:
+    """Return whether one mixed child has an approved title plus inherited branch/date."""
+
+    header_result = normalize_headers(child_raw_text, max_lines=12)
+    branch_resolution = resolve_branch(header_result)
+    date_resolution = resolve_report_date(header_result)
+    return branch_resolution.branch_hint is not None and date_resolution.iso_date is not None
 
 
 def _child_raw_message(raw_message: Any, section_text: str) -> str | dict[str, Any]:

@@ -604,11 +604,17 @@ def _supervisor_ceo_advisory(record: Mapping[str, Any]) -> dict[str, Any] | None
             "supervisor": provenance.get("supervisor") or _string_or_none(record.get("supervisor")),
             "supervisor_confirmation": provenance.get("supervisor_confirmation")
             or _string_or_none(record.get("supervisor_confirmation")),
-            "cash_variance": _string_or_none(record.get("cash_variance")),
-            "staffing_issues": _string_or_none(record.get("staffing_issues")),
-            "stock_issues": _string_or_none(record.get("stock_issues")),
-            "pricing_or_system_issues": _string_or_none(record.get("pricing_or_system_issues")),
-            "exceptions_escalated": _string_or_none(record.get("exceptions_escalated")),
+            "cash_variance": _supervisor_flag_text(record, "cash_variance"),
+            "staffing_issues": _supervisor_flag_text(record, "staffing_issues"),
+            "stock_issues": _supervisor_flag_text(record, "stock_issues", "stock_issues_affecting_sales"),
+            "stock_issues_detail": _supervisor_detail_text(
+                record,
+                "stock_issues_detail",
+                "stock_issues_affecting_sales_detail",
+            ),
+            "pricing_or_system_issues": _supervisor_flag_text(record, "pricing_or_system_issues"),
+            "pricing_or_system_issues_detail": _supervisor_detail_text(record, "pricing_or_system_issues_detail"),
+            "exceptions_escalated": _supervisor_flag_text(record, "exceptions_escalated"),
             "exception_count": _number_or_value(metrics.get("exception_count")),
             "open_exception_count": _number_or_value(metrics.get("open_exception_count")),
             "escalated_count": _number_or_value(metrics.get("escalated_count")),
@@ -636,13 +642,54 @@ def _supervisor_key_values(record: Mapping[str, Any], *, provenance: Mapping[str
             "Supervisor": provenance.get("supervisor") or _string_or_none(record.get("supervisor")),
             "Supervisor confirmation": provenance.get("supervisor_confirmation")
             or _string_or_none(record.get("supervisor_confirmation")),
-            "Cash variance": _string_or_none(record.get("cash_variance")),
-            "Staffing issues": _string_or_none(record.get("staffing_issues")),
-            "Stock issues": _string_or_none(record.get("stock_issues")),
-            "Pricing or system issues": _string_or_none(record.get("pricing_or_system_issues")),
-            "Exceptions escalated": _string_or_none(record.get("exceptions_escalated")),
+            "Cash variance": _supervisor_flag_or_detail_text(record, "cash_variance", "cash_variance_detail"),
+            "Staffing issues": _supervisor_flag_or_detail_text(record, "staffing_issues", "staffing_issues_detail"),
+            "Stock issues affecting sales": _supervisor_flag_or_detail_text(
+                record,
+                "stock_issues",
+                "stock_issues_detail",
+                "stock_issues_affecting_sales",
+                "stock_issues_affecting_sales_detail",
+            ),
+            "Pricing or system issues": _supervisor_flag_or_detail_text(
+                record,
+                "pricing_or_system_issues",
+                "pricing_or_system_issues_detail",
+            ),
+            "Exceptions escalated": _supervisor_flag_or_detail_text(
+                record,
+                "exceptions_escalated",
+                "exceptions_escalated_detail",
+            ),
         }
     )
+
+
+def _supervisor_flag_or_detail_text(record: Mapping[str, Any], *field_names: str) -> str | None:
+    for field_name in field_names:
+        detail = _supervisor_detail_text(record, field_name)
+        if detail is not None:
+            return detail
+    return _supervisor_flag_text(record, *field_names)
+
+
+def _supervisor_flag_text(record: Mapping[str, Any], *field_names: str) -> str | None:
+    for field_name in field_names:
+        value = record.get(field_name)
+        if isinstance(value, bool):
+            return "YES" if value else "NO"
+        text = _string_or_none(value)
+        if text is not None:
+            return text
+    return None
+
+
+def _supervisor_detail_text(record: Mapping[str, Any], *field_names: str) -> str | None:
+    for field_name in field_names:
+        text = _string_or_none(record.get(field_name))
+        if text is not None:
+            return text
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:

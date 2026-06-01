@@ -6,6 +6,7 @@ from packages.openclaw_adapter import (
     DEFAULT_OPENCLAW_GATEWAY_URL,
     check_gateway_health,
     get_gateway_url,
+    get_runtime_status,
     is_openclaw_enabled,
     send_advisory_prompt,
 )
@@ -38,6 +39,38 @@ def test_gateway_health_reports_enabled_config(monkeypatch) -> None:
         "gateway_url": "ws://gateway.internal:18789",
         "status": "configured",
         "reason": "OpenClaw gateway configured; connectivity check not implemented",
+    }
+
+
+def test_runtime_status_reports_disabled_config(monkeypatch) -> None:
+    monkeypatch.setenv("TAOP_OPENCLAW_ENABLED", "0")
+    monkeypatch.setenv("OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:19999")
+
+    payload = get_runtime_status()
+
+    assert payload == {
+        "openclaw": {
+            "enabled": False,
+            "gateway_url": "ws://127.0.0.1:19999",
+            "status": "disabled",
+            "reason": "TAOP_OPENCLAW_ENABLED is disabled",
+        }
+    }
+
+
+def test_runtime_status_reports_enabled_config(monkeypatch) -> None:
+    monkeypatch.setenv("TAOP_OPENCLAW_ENABLED", "1")
+    monkeypatch.setenv("OPENCLAW_GATEWAY_URL", "ws://gateway.internal:18789")
+
+    payload = get_runtime_status()
+
+    assert payload == {
+        "openclaw": {
+            "enabled": True,
+            "gateway_url": "ws://gateway.internal:18789",
+            "status": "configured",
+            "reason": "OpenClaw gateway configured; connectivity check not implemented",
+        }
     }
 
 

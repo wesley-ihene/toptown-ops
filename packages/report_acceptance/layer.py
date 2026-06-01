@@ -8,8 +8,12 @@ from typing import Any, Literal
 
 from packages.report_policy import get_report_policy
 from packages.sop_validation.contracts import ValidationResult
+from packages.validation.sales_reconciliation import TOLERANCE as SALES_RECONCILIATION_TOLERANCE
 
 AcceptanceDecision = Literal["accept", "review", "reject"]
+_SALES_REPORT_TYPES = frozenset({"sales", "sales_income"})
+_SALES_RECONCILIATION_REJECTION_CODES = frozenset({"sales_totals_mismatch", "invalid_totals"})
+_SALES_REVIEW_WARNING_CODES = frozenset({"missing_variance_reason", "high_cash_variance"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -63,6 +67,23 @@ def decide_acceptance(
     candidate_status = _candidate_status(work_item_payload)
     thresholds = get_report_policy(report_type).confidence_thresholds
     if not validation_result.accepted:
+        unexplained_sales_variance = _sales_unexplained_variance(report_type, validation_result)
+        if unexplained_sales_variance is not None and _sales_reconciliation_only_failure(validation_result):
+            if confidence is None or confidence > thresholds.reject_max:
+                return AcceptanceResult(
+                    report_type=report_type,
+                    decision="review",
+                    reason="sales_unexplained_variance_requires_review",
+                    confidence=confidence,
+                    thresholds=thresholds.to_payload(),
+                )
+            return AcceptanceResult(
+                report_type=report_type,
+                decision="reject",
+                reason="sales_unexplained_variance_exceeds_threshold",
+                confidence=confidence,
+                thresholds=thresholds.to_payload(),
+            )
         return AcceptanceResult(
             report_type=report_type,
             decision="reject",
@@ -79,6 +100,16 @@ def decide_acceptance(
             thresholds=thresholds.to_payload(),
         )
     strict_candidate = _is_strict_candidate(work_item_payload)
+    if report_type in _SALES_REPORT_TYPES and candidate_status == "needs_review":
+        review_warning_codes = _sales_review_warning_codes(work_item_payload)
+        if review_warning_codes:
+            return AcceptanceResult(
+                report_type=report_type,
+                decision="review",
+                reason="sales_adjustment_requires_review",
+                confidence=confidence,
+                thresholds=thresholds.to_payload(),
+            )
     if confidence >= thresholds.auto_accept_min:
         return AcceptanceResult(
             report_type=report_type,
@@ -165,3 +196,61 @@ def _candidate_status(work_item_payload: Mapping[str, Any]) -> str | None:
     if isinstance(normalized_status, str) and normalized_status.strip():
         return normalized_status.strip()
     return None
+
+
+def _sales_review_warning_codes(work_item_payload: Mapping[str, Any]) -> set[str]:
+    """Return sales warning codes that should force governance review."""
+
+    warning_blocks = [
+        work_item_payload.get("warnings"),
+        _mapping_value(work_item_payload.get("normalized_report"), "warnings"),
+    ]
+    warning_codes: set[str] = set()
+    for block in warning_blocks:
+        if not isinstance(block, list):
+            continue
+        for warning in block:
+            if not isinstance(warning, Mapping):
+                continue
+            code = warning.get("code")
+            if isinstance(code, str) and code in _SALES_REVIEW_WARNING_CODES:
+                warning_codes.add(code)
+    return warning_codes
+
+
+def _sales_unexplained_variance(report_type: str, validation_result: ValidationResult) -> float | None:
+    """Return unexplained variance for sales validation when available."""
+
+    if report_type not in _SALES_REPORT_TYPES:
+        return None
+
+    normalized_payload = getattr(validation_result, "normalized_payload", None)
+    if isinstance(normalized_payload, Mapping):
+        reconciliation = normalized_payload.get("reconciliation")
+        if isinstance(reconciliation, Mapping):
+            candidate = reconciliation.get("unexplained_variance")
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+                value = float(candidate)
+                return value if value > SALES_RECONCILIATION_TOLERANCE else None
+
+    rejections = getattr(validation_result, "rejections", None)
+    if not isinstance(rejections, list):
+        return None
+    for rejection in rejections:
+        extra = getattr(rejection, "extra", None)
+        if isinstance(extra, Mapping):
+            candidate = extra.get("unexplained_variance")
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+                value = float(candidate)
+                return value if value > SALES_RECONCILIATION_TOLERANCE else None
+    return None
+
+
+def _sales_reconciliation_only_failure(validation_result: ValidationResult) -> bool:
+    """Return whether sales validation failed only on reconciliation mismatch."""
+
+    rejections = getattr(validation_result, "rejections", None)
+    if not isinstance(rejections, list) or not rejections:
+        return False
+    codes = [getattr(rejection, "code", None) for rejection in rejections]
+    return all(isinstance(code, str) and code in _SALES_RECONCILIATION_REJECTION_CODES for code in codes)

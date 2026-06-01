@@ -80,6 +80,37 @@ FAMILY_BOUNDARY_HEADERS: Final[dict[str, tuple[str, ...]]] = {
         "supervisor checklist",
         "control report",
     ),
+    "store_monitoring": (
+        "store monitoring report",
+        "store monitoring",
+    ),
+}
+
+APPROVED_MIXED_SPLIT_TITLES: Final[dict[str, tuple[str, ...]]] = {
+    "sales_income": (
+        "day end sales report",
+        "day-end sales report",
+    ),
+    "attendance": (
+        "attendance report",
+        "staff attendance report",
+        "staffs attendance report",
+    ),
+    "staff_performance": (
+        "staff performance report",
+    ),
+    "pricing_stock_release": (
+        "daily bale summary",
+        "daily bale summary released to rail",
+        "daily bale summary - released to rail",
+    ),
+    "supervisor_control": (
+        "supervisor control report",
+        "supervisor control summary",
+    ),
+    "store_monitoring": (
+        "store monitoring report",
+    ),
 }
 
 NONCRITICAL_TRAILING_NOTE_HEADERS: Final[tuple[str, ...]] = (

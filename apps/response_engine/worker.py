@@ -18,6 +18,7 @@ from packages.observability import record_conversation_llm_event
 from packages.normalization.branches import normalize_branch
 from packages.normalization.dates import normalize_report_date
 from packages.taop_feedback import build_rejection_feedback, build_report_feedback, build_review_feedback
+from packages.validation import build_feedback_diagnostics
 
 CONVERSATION_LLM_ENABLED = False
 CONVERSATION_LLM_MODE = "off"
@@ -39,10 +40,11 @@ logger = logging.getLogger(__name__)
 def render_whatsapp_response(response_context: Mapping[str, Any]) -> dict[str, Any]:
     """Return one deterministic WhatsApp response envelope."""
 
+    normalized_response_context = _with_feedback_diagnostics(response_context)
     channel = _string_or_none(response_context.get("channel")) or "whatsapp"
     is_replay = bool(response_context.get("is_replay") is True)
     should_reply = bool(response_context.get("should_reply") is True)
-    response_type = _string_or_none(response_context.get("response_type"))
+    response_type = _string_or_none(normalized_response_context.get("response_type"))
     if not should_reply or response_type is None:
         return {
             "response_type": None,
@@ -55,7 +57,7 @@ def render_whatsapp_response(response_context: Mapping[str, Any]) -> dict[str, A
         return {
             "response_type": response_type,
             "response_text": _required_text(
-                response_context.get("response_text"),
+                normalized_response_context.get("response_text"),
                 field_name="response_text",
             ),
             "should_send": True,
@@ -66,21 +68,21 @@ def render_whatsapp_response(response_context: Mapping[str, Any]) -> dict[str, A
         rendered = {
             "response_type": response_type,
             "response_text": _required_text(
-                response_context.get("response_text"),
+                normalized_response_context.get("response_text"),
                 field_name="response_text",
             ),
             "should_send": True,
             "channel": channel,
             "is_replay": is_replay,
         }
-        feedback = response_context.get("feedback")
+        feedback = normalized_response_context.get("feedback")
         if isinstance(feedback, Mapping):
             rendered["feedback"] = dict(feedback)
         return rendered
     if response_type not in ALLOWED_RESPONSE_TYPES:
         raise ValueError(f"Unsupported response type `{response_type}`.")
 
-    feedback_payload = build_report_feedback(response_context)
+    feedback_payload = build_report_feedback(normalized_response_context)
 
     structured_feedback: Mapping[str, Any] | None = None
     if feedback_payload is not None:
@@ -90,25 +92,25 @@ def render_whatsapp_response(response_context: Mapping[str, Any]) -> dict[str, A
         if not feedback:
             feedback = None
     elif response_type == "accepted_ack":
-        response_text = _render_accepted_ack(response_context)
+        response_text = _render_accepted_ack(normalized_response_context)
         feedback = None
     elif response_type == "correction_accepted_ack":
-        response_text = _render_correction_accepted_ack(response_context)
+        response_text = _render_correction_accepted_ack(normalized_response_context)
         feedback = None
     elif response_type == "correction_review_ack":
-        response_text = _render_correction_review_ack(response_context)
+        response_text = _render_correction_review_ack(normalized_response_context)
         feedback = None
     elif response_type == "correction_repeat_fix_request":
-        response_text = _render_correction_repeat_fix_request(response_context)
+        response_text = _render_correction_repeat_fix_request(normalized_response_context)
         feedback = None
     elif response_type == "review_ack":
-        response_text = _render_review_ack(response_context)
+        response_text = _render_review_ack(normalized_response_context)
         feedback = None
     elif response_type == "rejected_fix_request":
-        response_text = _render_rejected_fix_request(response_context)
+        response_text = _render_rejected_fix_request(normalized_response_context)
         feedback = None
-    elif response_type == "duplicate_notice":
-        response_text = _render_duplicate_notice()
+    elif response_type in {"duplicate_ack", "duplicate_notice"}:
+        response_text = _render_duplicate_notice(normalized_response_context)
         feedback = None
     else:
         response_text = _render_unknown_message_guidance()
@@ -116,7 +118,7 @@ def render_whatsapp_response(response_context: Mapping[str, Any]) -> dict[str, A
 
     response_text = _maybe_refine_response_text(
         base_text=response_text,
-        response_context=response_context,
+        response_context=normalized_response_context,
         structured_feedback=structured_feedback,
     )
     rendered = {
@@ -129,6 +131,32 @@ def render_whatsapp_response(response_context: Mapping[str, Any]) -> dict[str, A
     if feedback is not None:
         rendered["feedback"] = feedback
     return rendered
+
+
+def _with_feedback_diagnostics(response_context: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Attach diagnostics when direct callers bypass conversation routing."""
+
+    feedback_context = response_context.get("feedback_context")
+    if not isinstance(feedback_context, Mapping) or isinstance(feedback_context.get("diagnostics"), Mapping):
+        return response_context
+
+    diagnostics = build_feedback_diagnostics(
+        response_type=_string_or_none(response_context.get("response_type")),
+        report_type=_string_or_none(response_context.get("report_type")),
+        branch=_string_or_none(response_context.get("branch")),
+        report_date=_string_or_none(response_context.get("report_date")),
+        reason=_string_or_none(response_context.get("reason")),
+        governance_status=_string_or_none(response_context.get("governance_status")),
+        feedback_context=feedback_context,
+    )
+    if diagnostics is None:
+        return response_context
+
+    updated_feedback_context = dict(feedback_context)
+    updated_feedback_context["diagnostics"] = diagnostics
+    updated_response_context = dict(response_context)
+    updated_response_context["feedback_context"] = updated_feedback_context
+    return updated_response_context
 
 
 def _render_accepted_ack(response_context: Mapping[str, Any]) -> str:
@@ -157,10 +185,15 @@ def _render_rejected_fix_request(response_context: Mapping[str, Any]) -> str:
     return build_rejection_feedback(response_context)
 
 
-def _render_duplicate_notice() -> str:
+def _render_duplicate_notice(response_context: Mapping[str, Any]) -> str:
+    feedback = build_report_feedback(response_context)
+    if isinstance(feedback, Mapping):
+        response_text = _string_or_none(feedback.get("response_text"))
+        if response_text is not None:
+            return response_text
     return "\n".join(
         [
-            "ℹ️ This report was already received earlier.",
+            "ℹ️ This report was already received and processed earlier.",
             "No new processing was applied.",
         ]
     )
@@ -375,7 +408,7 @@ def _llm_skip_reason(
         return "channel_not_supported"
     if len(base_text) < 40:
         return "text_too_short"
-    if _string_or_none(response_context.get("response_type")) == "duplicate_notice":
+    if _string_or_none(response_context.get("response_type")) in {"duplicate_ack", "duplicate_notice"}:
         return "duplicate_notice_skipped"
     return None
 
@@ -423,6 +456,8 @@ def _required_keyword_groups(response_context: Mapping[str, Any]) -> tuple[tuple
         return (("received",), ("review",))
     if response_type == "rejected_fix_request":
         return (("processed",), ("resend",))
+    if response_type == "duplicate_ack":
+        return (("duplicate",), ("received", "record"))
     if response_type == "unknown_message_guidance":
         return (("supported",), ("report",))
     return ()

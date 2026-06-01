@@ -1,4 +1,10 @@
-"""Dedicated worker for structured staff performance reports."""
+"""Dedicated worker for structured staff performance reports.
+
+Runtime ownership note:
+- Live staff-performance routing is owned by ``apps.hr_agent.worker``.
+- This standalone worker is retained for replay/tests and manual specialist
+  runs without changing the live runtime owner.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +23,12 @@ from packages.validation import ValidationMetadata, normalize_rejections
 
 AGENT_NAME = "staff_performance_agent"
 SIGNAL_TYPE = "hr"
+RUNTIME_STATUS = "MANUAL_ONLY"
+RUNTIME_OWNER = "hr_agent"
+RUNTIME_NOTE = (
+    "Standalone worker retained for replay/tests and manual specialist runs; "
+    "live routing goes through apps.hr_agent.worker."
+)
 
 
 @dataclass(slots=True)

@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from apps.conversation_router import route_conversation_response
 import apps.orchestrator_agent.worker as orchestrator_worker
 from apps.orchestrator_agent.worker import process_work_item
+from apps.response_engine import render_whatsapp_response
 import packages.record_store.paths as record_paths
 from packages.sop_validation.contracts import Rejection
 from packages.sop_validation.router import validate_report
@@ -901,7 +903,7 @@ def test_orchestrator_mixed_report_goes_to_review_when_safe_split_is_not_possibl
     assert result.payload["warnings"][0]["code"] == "mixed_split_review"
 
 
-def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
+def test_orchestrator_archives_duplicate_message_but_keeps_current_decision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -952,16 +954,17 @@ def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
     rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "sales", "*.meta.json")
 
     assert first_result.agent_name == "sales_income_agent"
-    assert specialist_calls == 1
+    assert specialist_calls == 2
     assert len(raw_meta_paths) == 1
     assert len(rejected_meta_paths) == 0
     assert len(duplicate_paths) == 1
 
     raw_meta = _read_json(raw_meta_paths[0])
-    assert raw_meta["processing_status"] == "duplicate"
-    assert raw_meta["policy_guard"]["action"] == "reject"
-    assert raw_meta["policy_guard"]["reason"] == "duplicate_message"
-    assert raw_meta["policy_guard"]["duplicate"] is True
+    assert raw_meta["processing_status"] == "processed"
+    assert raw_meta["governance_status"] == "accepted"
+    assert raw_meta["policy_guard"]["action"] == "allow"
+    assert raw_meta["duplicate_handling"]["duplicate"] is True
+    assert raw_meta["duplicate_handling"]["write_suppressed"] is True
 
     duplicate_record = _read_json(duplicate_paths[0])
     assert duplicate_record["duplicate_reason"] == "duplicate_message"
@@ -969,13 +972,13 @@ def test_orchestrator_rejects_duplicate_message_before_specialist_processing(
     assert duplicate_record["raw_txt_path"] == raw_meta["raw_txt_path"]
     assert duplicate_record["raw_meta_path"] == raw_meta["raw_meta_path"]
 
-    assert second_result.agent_name == "orchestrator_agent"
-    assert second_result.payload["status"] == "duplicate"
-    assert second_result.payload["warnings"][0]["code"] == "duplicate_message"
-    assert second_result.payload["policy_guard"]["reason"] == "duplicate_message"
+    assert second_result.agent_name == "sales_income_agent"
+    assert second_result.payload["status"] == "accepted"
+    assert second_result.payload["duplicate_handling"]["duplicate"] is True
+    assert second_result.payload["duplicate_handling"]["write_suppressed"] is True
 
 
-def test_orchestrator_rejects_same_raw_sha256_within_24_hours_across_raw_file_boundaries(
+def test_orchestrator_archives_same_raw_sha256_within_24_hours_without_overriding_current_decision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1026,18 +1029,19 @@ def test_orchestrator_rejects_same_raw_sha256_within_24_hours_across_raw_file_bo
     rejected_meta_paths = _paths(tmp_path / "records" / "rejected" / "whatsapp" / "sales", "*.meta.json")
 
     assert first_result.agent_name == "sales_income_agent"
-    assert second_result.agent_name == "orchestrator_agent"
-    assert specialist_calls == 1
+    assert second_result.agent_name == "sales_income_agent"
+    assert specialist_calls == 2
     assert len(raw_meta_paths) == 2
     assert len(rejected_meta_paths) == 0
     assert len(duplicate_paths) == 1
 
     raw_metas = [_read_json(path) for path in raw_meta_paths]
-    duplicate_raw_meta = next(meta for meta in raw_metas if meta.get("policy_guard", {}).get("reason") == "duplicate_message")
+    duplicate_raw_meta = next(meta for meta in raw_metas if meta.get("duplicate_handling", {}).get("duplicate") is True)
     assert duplicate_raw_meta["raw_sha256"] == raw_metas[0]["raw_sha256"] == raw_metas[1]["raw_sha256"]
-    assert duplicate_raw_meta["processing_status"] == "duplicate"
-    assert duplicate_raw_meta["policy_guard"]["duplicate"] is True
-    assert duplicate_raw_meta["policy_guard"]["duplicate_basis"] == "policy_guard:passed"
+    assert duplicate_raw_meta["processing_status"] == "processed"
+    assert duplicate_raw_meta["governance_status"] == "accepted"
+    assert duplicate_raw_meta["duplicate_handling"]["write_suppressed"] is True
+    assert duplicate_raw_meta["duplicate_handling"]["duplicate_basis"] == "policy_guard:passed"
 
     duplicate_record = _read_json(duplicate_paths[0])
     assert duplicate_record["duplicate_reason"] == "duplicate_message"
@@ -1045,9 +1049,9 @@ def test_orchestrator_rejects_same_raw_sha256_within_24_hours_across_raw_file_bo
     assert duplicate_record["raw_txt_path"] == duplicate_raw_meta["raw_txt_path"]
     assert duplicate_record["raw_meta_path"] == duplicate_raw_meta["raw_meta_path"]
 
-    assert second_result.payload["status"] == "duplicate"
-    assert second_result.payload["warnings"][0]["code"] == "duplicate_message"
-    assert second_result.payload["policy_guard"]["duplicate"] is True
+    assert second_result.payload["status"] == "accepted"
+    assert second_result.payload["duplicate_handling"]["duplicate"] is True
+    assert second_result.payload["duplicate_handling"]["write_suppressed"] is True
     assert (tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json").exists()
 
 
@@ -1844,6 +1848,83 @@ def test_orchestrator_fallback_downgrades_resolvable_invalid_report_date_to_warn
     warning_codes = {warning["code"] for warning in result.payload["fallback"]["warnings"]}
     assert "invalid_report_date" in warning_codes
     assert result.payload["fallback"]["validation"]["accepted"] is True
+
+
+def test_orchestrator_fallback_attendance_review_preserves_resolved_report_date(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {
+                    "text": "\n".join(
+                        [
+                            "ATTENDANCE  REPORT",
+                            "Branch :LAE _5th Street",
+                            "Date: Thursday , 21/05/26.",
+                            "",
+                            "1.Marryane Sakias =P",
+                            "2.Imelda Patrick = P",
+                            "3.Merolyne Tobby =P",
+                            "4.George Andau =leave",
+                            "5.Cloe Wofinga =P",
+                            "6.Doil Wai-ah=P",
+                            "7.Donock Levi =OFF",
+                            "8.Joyice Andrew = OFF",
+                            "9.Jackson Kuri =P",
+                            "10.Jennifer Golomb =P",
+                            "11.Sheeba I=P",
+                            "12.Lieb Yawano =P",
+                            "13.Joyce Lovave=Resign /decission pending",
+                            "14.Anuty Mina =P",
+                            "15.Joycelyn Alu =P",
+                            "16.Sandra Daniel=OFF",
+                            "17.Goinake Ihene=P",
+                            "",
+                            "Total Staffs present =12",
+                            "Day off =3",
+                            "LEAVE =1",
+                            "Suspend =Nill",
+                            "Late =Nill",
+                            "AWN =nill",
+                            "AWON =Nill",
+                            "Sick =nill",
+                            "Lay off =Nill",
+                            "Resign =1",
+                            "Total Staffs =17",
+                        ]
+                    )
+                },
+                "metadata": {
+                    "received_at": "2026-05-21T09:00:00Z",
+                    "sender": "attendance-fallback-date",
+                },
+            },
+        )
+    )
+
+    routed = route_conversation_response(
+        result,
+        source_message_id="wamid.attendance-fallback-date",
+        sender_phone="67570000000",
+    )
+    rendered = render_whatsapp_response(routed)
+
+    assert result.agent_name == "hr_agent"
+    assert result.payload["status"] == "needs_review"
+    assert result.payload["branch"] == "lae_5th_street"
+    assert result.payload["report_date"] == "2026-05-21"
+    assert result.payload["validation_error_code"] == "declared_total_staff_mismatch"
+    assert "ACTIVE TOTAL_STAFF = 16" in result.payload["validation_error_message"]
+    assert routed["report_date"] == "2026-05-21"
+    assert routed["branch"] == "lae_5th_street"
+    assert "Date unresolved" not in rendered["response_text"]
+    assert "Received: missing" not in rendered["response_text"]
 
 
 def test_orchestrator_strict_needs_review_is_not_rejected_when_fallback_fails(

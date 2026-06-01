@@ -20,6 +20,9 @@ _QUERY_TYPES = {
     "learning": "executive_learning",
     "proposals": "executive_proposals",
 }
+RUNTIME_STATUS = "LIVE_RUNTIME"
+RUNTIME_OWNER = "ceo_router"
+RUNTIME_NOTE = "Live owner of CEO query parsing and reply-context generation."
 
 
 def parse_ceo_query(

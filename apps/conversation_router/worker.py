@@ -7,6 +7,7 @@ from typing import Any
 
 from apps.conversation_context import resolve_context_flags
 from apps.conversation_policy.rules import ALLOWED_RESPONSE_TYPES, normalize_response_reason
+from packages.validation import build_feedback_diagnostics
 from packages.signal_contracts.agent_result import AgentResult
 
 _ACCEPTED_STATUSES = {"accepted", "accepted_with_warning", "accepted_split", "ready"}
@@ -46,6 +47,7 @@ def route_conversation_response(
 
     governance_status = _governance_status(payload)
     source_status = _string_or_none(payload.get("status"))
+    processing_status = _processing_status(payload, metadata)
     classification = _classification(payload, metadata)
     review_queue_path = _review_queue_path(payload, metadata)
     structured_output_path = _structured_output_path(payload, metadata)
@@ -60,6 +62,8 @@ def route_conversation_response(
         _string_or_none(payload.get("branch"))
         or _string_or_none(payload.get("branch_hint"))
         or _string_or_none(metadata.get("branch"))
+        or _string_or_none(_mapping(metadata.get("governance_context")).get("branch_hint"))
+        or _string_or_none(_mapping(payload.get("routing")).get("branch_hint"))
         or _string_or_none(_mapping(payload.get("metadata")).get("branch_hint"))
     )
     report_date = (
@@ -68,6 +72,12 @@ def route_conversation_response(
         or _string_or_none(_mapping(payload.get("normalized_report")).get("report_date"))
         or _string_or_none(_mapping(payload.get("rejection_feedback")).get("report_date"))
         or _string_or_none(_mapping(payload.get("raw_record")).get("report_date"))
+        or _string_or_none(_mapping(metadata.get("governance_context")).get("report_date"))
+        or _string_or_none(_mapping(metadata.get("governance_context")).get("normalized_report_date"))
+        or _string_or_none(_mapping(metadata.get("governance_context")).get("raw_report_date"))
+        or _string_or_none(_mapping(payload.get("routing")).get("report_date"))
+        or _string_or_none(_mapping(payload.get("routing")).get("normalized_report_date"))
+        or _string_or_none(_mapping(payload.get("routing")).get("raw_report_date"))
     )
     reason = _reason_from_outcome(payload, metadata)
     is_replay = _is_replay(payload, metadata)
@@ -76,6 +86,7 @@ def route_conversation_response(
         metadata=metadata,
         governance_status=governance_status,
         source_status=source_status,
+        processing_status=processing_status,
         report_type=report_type,
         reason=reason,
         review_queue_path=review_queue_path,
@@ -133,6 +144,21 @@ def route_conversation_response(
             ),
         }
     )
+    feedback_context = response.get("feedback_context")
+    if isinstance(feedback_context, Mapping):
+        diagnostics = build_feedback_diagnostics(
+            response_type=response_type,
+            report_type=report_type,
+            branch=branch,
+            report_date=report_date,
+            reason=normalized_reason,
+            governance_status=response.get("governance_status"),
+            feedback_context=feedback_context,
+        )
+        if diagnostics is not None:
+            updated_feedback_context = dict(feedback_context)
+            updated_feedback_context["diagnostics"] = diagnostics
+            response["feedback_context"] = updated_feedback_context
     return response
 
 
@@ -155,6 +181,7 @@ def _classify_response_type(
     metadata: Mapping[str, Any],
     governance_status: str | None,
     source_status: str | None,
+    processing_status: str | None,
     report_type: str | None,
     reason: str | None,
     review_queue_path: str | None,
@@ -162,13 +189,16 @@ def _classify_response_type(
 ) -> str | None:
     status = governance_status or source_status
     duplicate_reason = _duplicate_reason(payload, metadata, reason)
-    if status in _DUPLICATE_STATUSES or duplicate_reason is not None:
-        return "duplicate_notice"
+    duplicate_override = _duplicate_override_active(payload, metadata)
+    if processing_status in _DUPLICATE_STATUSES or status in _DUPLICATE_STATUSES:
+        return _duplicate_response_type(duplicate_reason)
+    if duplicate_reason is not None and not duplicate_override:
+        return _duplicate_response_type(duplicate_reason)
     if reason in _UNKNOWN_REASONS:
         return "unknown_message_guidance"
     if report_type == "unknown":
         return "unknown_message_guidance"
-    if status in _ACCEPTED_STATUSES and structured_output_path is not None:
+    if status in _ACCEPTED_STATUSES and (structured_output_path is not None or duplicate_override):
         return "accepted_ack"
     if review_queue_path is not None:
         return "review_ack"
@@ -179,6 +209,14 @@ def _classify_response_type(
     if _string_or_none(_mapping(_mapping(payload.get("routing")).get("classification")).get("report_type")) == "unknown":
         return "unknown_message_guidance"
     return None
+
+
+def _duplicate_response_type(duplicate_reason: str | None) -> str:
+    """Return the outbound duplicate response type for the current duplicate reason."""
+
+    if duplicate_reason == "duplicate_raw_sha256":
+        return "duplicate_ack"
+    return "duplicate_notice"
 
 
 def _reason_from_outcome(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> str | None:
@@ -196,6 +234,21 @@ def _reason_from_outcome(payload: Mapping[str, Any], metadata: Mapping[str, Any]
         for item in validation_reasons:
             if isinstance(item, Mapping):
                 cleaned = _string_or_none(item.get("code"))
+                if cleaned is not None:
+                    return cleaned
+
+    metadata_validation = _mapping(metadata.get("validation"))
+    metadata_reason_codes = metadata_validation.get("reason_codes")
+    if isinstance(metadata_reason_codes, list):
+        for item in metadata_reason_codes:
+            cleaned = _string_or_none(item)
+            if cleaned is not None:
+                return cleaned
+    metadata_rejections = metadata_validation.get("rejections")
+    if isinstance(metadata_rejections, list):
+        for item in metadata_rejections:
+            if isinstance(item, Mapping):
+                cleaned = _string_or_none(item.get("reason_code")) or _string_or_none(item.get("code"))
                 if cleaned is not None:
                     return cleaned
 
@@ -257,6 +310,18 @@ def _classification(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> 
     return {}
 
 
+def _processing_status(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> str | None:
+    for candidate in (
+        payload.get("processing_status"),
+        _mapping(payload.get("raw_record")).get("processing_status"),
+        _mapping(metadata.get("raw_record")).get("processing_status"),
+    ):
+        cleaned = _string_or_none(candidate)
+        if cleaned is not None:
+            return cleaned
+    return None
+
+
 def _payload_and_metadata_from_outcome(
     outcome: AgentResult | Mapping[str, Any] | None,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
@@ -304,6 +369,10 @@ def _structured_output_path(payload: Mapping[str, Any], metadata: Mapping[str, A
 def _duplicate_reason(payload: Mapping[str, Any], metadata: Mapping[str, Any], reason: str | None) -> str | None:
     if _mapping(payload.get("policy_guard")).get("duplicate") is True:
         return _string_or_none(reason) or "duplicate_message"
+    duplicate_handling = _first_mapping(payload.get("duplicate_handling"), metadata.get("duplicate_handling"))
+    cleaned = _string_or_none(duplicate_handling.get("reason"))
+    if cleaned is not None:
+        return cleaned
     governance = _mapping(payload.get("governance"))
     governance_reasons = governance.get("reasons")
     if isinstance(governance_reasons, list):
@@ -317,6 +386,13 @@ def _duplicate_reason(payload: Mapping[str, Any], metadata: Mapping[str, Any], r
     if isinstance(reason, str) and reason.startswith("duplicate_"):
         return reason
     return None
+
+
+def _duplicate_override_active(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> bool:
+    """Return whether duplicate handling should preserve the current routed decision."""
+
+    duplicate_handling = _first_mapping(payload.get("duplicate_handling"), metadata.get("duplicate_handling"))
+    return duplicate_handling.get("write_suppressed") is True and duplicate_handling.get("duplicate") is True
 
 
 def _is_replay(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> bool:
@@ -388,15 +464,35 @@ def _feedback_context(
     ingress_payload = _mapping(_mapping(payload.get("ingress_envelope")).get("payload"))
     raw_message = _mapping(payload.get("raw_message"))
     governance_context = _mapping(metadata.get("governance_context"))
+    routing = _mapping(payload.get("routing"))
+    routing_classification = routing.get("classification")
     warnings = payload.get("warnings")
     items = payload.get("items")
     metrics = _mapping(payload.get("metrics"))
     governance = _mapping(payload.get("governance"))
+    fanout = _mapping(payload.get("fanout"))
+    mixed_children = _mapping_list(fanout.get("children"))
 
     feedback = {
         "report_type": report_type,
-        "branch": branch,
-        "report_date": report_date,
+        "branch": branch or _string_or_none(governance_context.get("branch_hint")) or _string_or_none(routing.get("branch_hint")),
+        "report_date": (
+            report_date
+            or _string_or_none(governance_context.get("report_date"))
+            or _string_or_none(governance_context.get("normalized_report_date"))
+            or _string_or_none(governance_context.get("raw_report_date"))
+            or _string_or_none(routing.get("report_date"))
+            or _string_or_none(routing.get("normalized_report_date"))
+            or _string_or_none(routing.get("raw_report_date"))
+        ),
+        "normalized_report_date": _string_or_none(governance_context.get("normalized_report_date"))
+        or _string_or_none(routing.get("normalized_report_date")),
+        "raw_report_date": _string_or_none(governance_context.get("raw_report_date"))
+        or _string_or_none(routing.get("raw_report_date")),
+        "route": _string_or_none(routing_classification)
+        or _string_or_none(_mapping(routing_classification).get("report_type"))
+        or report_type,
+        "route_status": _string_or_none(routing.get("route_status")),
         "reason": reason,
         "status": _string_or_none(payload.get("status")),
         "governance_status": _string_or_none(governance.get("status")),
@@ -410,9 +506,12 @@ def _feedback_context(
         "warnings": _mapping_list(warnings),
         "metrics": dict(metrics) if metrics else None,
         "items": _mapping_list(items),
+        "agent_name": _string_or_none(payload.get("source_agent")),
         "raw_text": _first_text(
             _string_or_none(raw_message.get("text")),
             _string_or_none(raw_message.get("normalized_text")),
+            _string_or_none(governance_context.get("raw_text")),
+            _string_or_none(metadata.get("raw_text")),
         ),
         "raw_txt_path": _first_text(
             raw_record.get("raw_txt_path"),
@@ -429,6 +528,8 @@ def _feedback_context(
         or None,
         "structured_output_path": structured_output_path,
         "review_queue_path": review_queue_path,
+        "mixed_detection": dict(_mapping(payload.get("mixed_detection"))) or None,
+        "mixed_children": mixed_children or None,
     }
 
     if not any(

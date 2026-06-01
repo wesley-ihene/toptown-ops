@@ -50,6 +50,16 @@ def safe_div(numerator: float | int | None, denominator: float | int | None) -> 
     return float(numerator) / float(denominator)
 
 
+def customer_conversion_rate(traffic: float | int | None, served: float | int | None) -> float | None:
+    """Return one customer conversion rate or ``None`` when inputs are incomplete."""
+
+    if traffic is None or served is None:
+        return None
+    if float(traffic) == 0:
+        return 0.0
+    return float(served) / float(traffic)
+
+
 def build_branch_daily_analytics(
     branch: str,
     report_date: str,
@@ -149,14 +159,15 @@ def build_branch_daily_analytics(
             warnings.append(flag)
             operational_flags.append(flag)
 
-    conversion_rate = sales_metrics["conversion_rate"]
-    if conversion_rate is not None and conversion_rate < _LOW_CONVERSION_THRESHOLD:
-        flag = _warning(
-            code="low_conversion_rate",
-            severity="warning",
-            message=f"Conversion rate {conversion_rate:.2f} is below the branch review threshold.",
-            source="sales_income",
-        )
+    conversion_rate = customer_conversion_rate(sales_metrics["traffic"], sales_metrics["served"])
+    customer_data_flag = _customer_data_flag(
+        sales_signal=sales_signal,
+        traffic=sales_metrics["traffic"],
+        served=sales_metrics["served"],
+        conversion_rate=conversion_rate,
+    )
+    if customer_data_flag is not None:
+        flag = customer_data_flag
         warnings.append(flag)
         operational_flags.append(flag)
 
@@ -186,10 +197,7 @@ def build_branch_daily_analytics(
             _first_number(sales_metrics["sales_per_labor_hour"], safe_div(gross_sales, labor_hours)),
             2,
         ),
-        "conversion_rate": _round_metric(
-            _first_number(conversion_rate, safe_div(sales_metrics["served"], sales_metrics["traffic"])),
-            4,
-        ),
+        "conversion_rate": _round_metric(conversion_rate, 4),
         "operational_flags": operational_flags,
         "warnings": warnings,
         "traceability": {
@@ -536,19 +544,19 @@ def write_branch_comparison_json(
 def get_branch_daily_analytics_path(branch: str, report_date: str, *, output_root: str | Path | None = None) -> Path:
     """Return the canonical output path for one branch daily analytics file."""
 
-    return _analytics_root(output_root) / "branch_daily" / safe_segment(branch) / f"{report_date}.json"
+    return _analytics_root(output_root) / "branch_daily" / safe_segment(_canonical_branch(branch)) / f"{report_date}.json"
 
 
 def get_staff_leaderboard_path(branch: str, report_date: str, *, output_root: str | Path | None = None) -> Path:
     """Return the canonical output path for one staff leaderboard file."""
 
-    return _analytics_root(output_root) / "staff_daily" / safe_segment(branch) / f"{report_date}.json"
+    return _analytics_root(output_root) / "staff_daily" / safe_segment(_canonical_branch(branch)) / f"{report_date}.json"
 
 
 def get_section_productivity_path(branch: str, report_date: str, *, output_root: str | Path | None = None) -> Path:
     """Return the canonical output path for one section productivity file."""
 
-    return _analytics_root(output_root) / "section_daily" / safe_segment(branch) / f"{report_date}.json"
+    return _analytics_root(output_root) / "section_daily" / safe_segment(_canonical_branch(branch)) / f"{report_date}.json"
 
 
 def get_branch_comparison_path(report_date: str, *, output_root: str | Path | None = None) -> Path:
@@ -644,6 +652,38 @@ def _sales_metrics(signal: Mapping[str, Any] | None) -> dict[str, float | int | 
     }
 
 
+def _customer_data_flag(
+    *,
+    sales_signal: Mapping[str, Any] | None,
+    traffic: float | int | None,
+    served: float | int | None,
+    conversion_rate: float | None,
+) -> dict[str, str] | None:
+    if sales_signal is None:
+        return None
+    if traffic is None or served is None:
+        missing_fields = []
+        if traffic is None:
+            missing_fields.append("traffic")
+        if served is None:
+            missing_fields.append("served")
+        field_label = " and ".join(missing_fields)
+        return _warning(
+            code="missing_customer_data",
+            severity="warning",
+            message=f"Customer {field_label} data is missing, so conversion could not be evaluated.",
+            source="sales_income",
+        )
+    if conversion_rate is not None and conversion_rate < _LOW_CONVERSION_THRESHOLD:
+        return _warning(
+            code="low_conversion_rate",
+            severity="warning",
+            message=f"Conversion rate {conversion_rate:.2f} is below the branch review threshold.",
+            source="sales_income",
+        )
+    return None
+
+
 def _staff_total(signal: Mapping[str, Any] | None, metric_name: str) -> int | None:
     value = _extract_number(signal, f"metrics.{metric_name}", metric_name)
     if value is None:
@@ -733,7 +773,10 @@ def _available_branches(report_date: str, *, root: str | Path | None = None) -> 
             if not branch_dir.is_dir():
                 continue
             if (branch_dir / f"{report_date}.json").exists():
-                branches.add(_canonical_branch(branch_dir.name))
+                try:
+                    branches.add(_canonical_branch(branch_dir.name))
+                except ValueError:
+                    continue
     return branches
 
 

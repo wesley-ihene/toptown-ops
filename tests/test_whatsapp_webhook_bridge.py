@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import logging
+import os
 from pathlib import Path
 
 from packages.observability import load_daily_artifact
 import packages.record_store.paths as record_paths
+from packages.report_acceptance import AcceptanceResult
 from packages.signal_contracts.agent_result import AgentResult
 from scripts import whatsapp_webhook_bridge as bridge
 
@@ -337,7 +339,7 @@ def test_duplicate_live_webhook_does_not_duplicate_raw_write_or_dispatch(
     assert second_body["orchestrator_status"] == "skipped"
 
 
-def test_same_raw_sha256_with_different_message_ids_is_rejected_within_24_hours(
+def test_same_raw_sha256_with_different_message_ids_is_archived_without_overriding_current_decision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -350,15 +352,7 @@ def test_same_raw_sha256_with_different_message_ids_is_rejected_within_24_hours(
     def fake_dispatch_to_specialist(work_item, *, target_agent):
         nonlocal specialist_calls
         specialist_calls += 1
-        return AgentResult(
-            agent_name=target_agent,
-            payload={
-                "status": "accepted",
-                "signal_type": "sales_income",
-                "branch": "waigani",
-                "report_date": "2026-04-07",
-            },
-        )
+        return AgentResult(agent_name=target_agent, payload=_strict_sales_payload())
 
     monkeypatch.setattr(bridge.orchestrator_worker, "_dispatch_to_specialist", fake_dispatch_to_specialist)
 
@@ -378,11 +372,93 @@ def test_same_raw_sha256_with_different_message_ids_is_rejected_within_24_hours(
     assert first_body["duplicate"] is False
     assert second_body["duplicate"] is True
     assert second_body["duplicate_reason"] == "duplicate_message"
-    assert second_body["orchestrator_status"] == "duplicate"
-    assert specialist_calls == 1
+    assert second_body["orchestrator_status"] == "accepted"
+    assert second_body["conversation_response"]["response_type"] == "accepted_ack"
+    assert specialist_calls == 2
     assert len(raw_text_paths) == 2
     assert second_body["raw_txt_path"].endswith(".txt")
     assert "__" in Path(second_body["raw_txt_path"]).stem
+
+
+def test_duplicate_live_webhook_uses_current_decision_when_logic_changes(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("TOPTOWN_WHATSAPP_RESPONSE_MODE", "live")
+    acceptance_calls = 0
+    dispatched_response_types: list[str] = []
+    repeated_text = "DAY-END SALES REPORT\nBranch: Waigani\nDate: 2026-04-07\nGross Sales: 1200"
+    request_one = json.dumps(_meta_payload(message_id="wamid.override-1", text=repeated_text)).encode("utf-8")
+    request_two = json.dumps(_meta_payload(message_id="wamid.override-2", text=repeated_text)).encode("utf-8")
+
+    def fake_dispatch_to_specialist(work_item, *, target_agent):
+        del work_item
+        return AgentResult(agent_name=target_agent, payload=_strict_sales_payload())
+
+    def fake_decide_acceptance(report_type, *, validation_result, work_item_payload):
+        del validation_result, work_item_payload
+        nonlocal acceptance_calls
+        acceptance_calls += 1
+        if acceptance_calls == 1:
+            return AcceptanceResult(
+                report_type=report_type,
+                decision="review",
+                reason="confidence_between_review_and_accept_thresholds",
+                confidence=0.6,
+                thresholds={"reject_max": 0.2, "review_min": 0.5, "auto_accept_min": 0.9},
+            )
+        return AcceptanceResult(
+            report_type=report_type,
+            decision="accept",
+            reason="confidence_meets_auto_accept_threshold",
+            confidence=0.95,
+            thresholds={"reject_max": 0.2, "review_min": 0.5, "auto_accept_min": 0.9},
+        )
+
+    def fake_dispatch_outbound_reply(payload, *, output_root=None):
+        del output_root
+        dispatched_response_types.append(str(payload["response_type"]))
+        return {
+            "dispatch_status": "sent",
+            "provider_message_id": f"wamid.provider.{payload['response_type']}",
+            "http_status": 200,
+            "dispatch_error": None,
+            "json_path": payload.get("json_path"),
+            "text_path": payload.get("text_path"),
+        }
+
+    monkeypatch.setattr(bridge.orchestrator_worker, "_dispatch_to_specialist", fake_dispatch_to_specialist)
+    monkeypatch.setattr(bridge.orchestrator_worker, "decide_acceptance", fake_decide_acceptance)
+    monkeypatch.setattr(bridge, "dispatch_outbound_reply", fake_dispatch_outbound_reply)
+    caplog.set_level(logging.INFO, logger="packages.record_store.automation")
+
+    first = bridge.dispatch_http_request(method="POST", target="/webhook", body=request_one)
+    second = bridge.dispatch_http_request(method="POST", target="/webhook", body=request_two)
+
+    first_body = json.loads(first.body.decode("utf-8"))
+    second_body = json.loads(second.body.decode("utf-8"))
+    structured_dir = tmp_path / "records" / "structured" / "sales_income" / "waigani"
+    structured_paths = sorted(
+        path
+        for path in structured_dir.glob("*.json")
+        if not path.name.endswith(".meta.json")
+        and not path.name.endswith(".governance.json")
+        and not path.name.endswith(".validation.json")
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first_body["conversation_response"]["response_type"] == "review_ack"
+    assert second_body["duplicate"] is True
+    assert second_body["duplicate_reason"] == "duplicate_message"
+    assert second_body["orchestrator_status"] == "accepted"
+    assert second_body["conversation_response"]["response_type"] == "accepted_ack"
+    assert "review_ack" in dispatched_response_types
+    assert dispatched_response_types[-1] == "accepted_ack"
+    assert len(structured_paths) == 1
+    assert "duplicate_decision_override_applied" in caplog.text
 
 
 def test_operational_query_returns_attendance_status_without_validator_or_orchestrator(
@@ -420,8 +496,11 @@ def test_operational_query_returns_attendance_status_without_validator_or_orches
     assert body["orchestrator_status"] == "skipped"
     assert body["conversation_response"]["response_type"] == "operational_query_status"
     artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
-    assert "STATUS: ⚠️ PARTIAL / NEEDS CHECK" in artifact_payload["response_text"]
-    assert "❌ Bena Road" in artifact_payload["response_text"]
+    if _taop_feedback_enabled():
+        assert "STATUS: ⚠️ PARTIAL / NEEDS CHECK" in artifact_payload["response_text"]
+        assert "❌ Bena Road" in artifact_payload["response_text"]
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
     assert observability is not None
     assert observability["events"][0]["response_type"] == "operational_query_status"
     assert observability["events"][0]["report_type"] == "attendance_status"
@@ -661,19 +740,17 @@ def test_live_webhook_mixed_sales_totals_mismatch_surfaces_sales_blocker_details
     assert body["conversation_response"]["response_type"] == "review_ack"
     assert not (tmp_path / "records" / "structured" / "sales_income" / "bena_road" / "2026-04-28.json").exists()
     assert (tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-28" / "bena_road.json").exists()
-    assert "Report: Day-End Sales Report" in artifact_payload["response_text"]
-    assert "Sales totals do not match till/payment totals." in artifact_payload["response_text"]
-    assert "Declared Total Cash: K2,205.00" in artifact_payload["response_text"]
-    assert "Expected Total Cash: K2,640.00" in artifact_payload["response_text"]
-    assert "Declared Total Card: K370.00" in artifact_payload["response_text"]
-    assert "Expected Total Card: K370.00" in artifact_payload["response_text"]
-    assert "Declared Total Sales: K2,575.00" in artifact_payload["response_text"]
-    assert "Expected Total Sales: K3,010.00" in artifact_payload["response_text"]
-    assert "Declared Total Sales: K460.00" not in artifact_payload["response_text"]
-    assert "Expected Total Sales: K805.00" not in artifact_payload["response_text"]
-    assert "Correct the TOTALS section and resend the Day-End Sales Report." in artifact_payload["response_text"]
-    assert "One split report still needs review" not in artifact_payload["response_text"]
-    assert "Supervisor Control Report format" not in artifact_payload["response_text"]
+    if _taop_feedback_enabled():
+        assert "⚠️ TAOP REVIEW REQUIRED" in artifact_payload["response_text"]
+        assert "Report: Day-End Sales Report" in artifact_payload["response_text"]
+        assert "Branch: BENA ROAD" in artifact_payload["response_text"]
+        assert "Date: 28/04/26" in artifact_payload["response_text"]
+        assert "Sales totals do not match till/payment totals." in artifact_payload["response_text"]
+        assert "Correct the TOTALS section and resend the Day-End Sales Report." in artifact_payload["response_text"]
+        assert "One split report still needs review" not in artifact_payload["response_text"]
+        assert "Please resend the report" not in artifact_payload["response_text"]
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def test_live_webhook_mixed_review_keeps_generic_fallback_when_child_detail_missing(
@@ -687,23 +764,30 @@ def test_live_webhook_mixed_review_keeps_generic_fallback_when_child_detail_miss
         return AgentResult(
             agent_name="orchestrator_agent",
             payload={
-                "status": "needs_review",
-                "governance": {"status": "needs_review", "reasons": ["mixed_child_requires_review"]},
-                "routing": {"review_reason": "mixed_child_requires_review"},
+                "status": "accepted_with_warning",
+                "governance": {"status": "accepted_with_warning", "reasons": []},
+                "routing": {"review_reason": None},
                 "classification": {"report_type": "mixed"},
+                "outputs": ["records/intelligence/supervisor_control/2026-04-28/bena_road.json"],
                 "fanout": {
                     "children": [
                         {
+                            "child_index": 1,
                             "report_type": "sales_income",
                             "report_family": "sales_income",
+                            "response_report_type": "day_end_sales",
                             "status": "rejected",
+                            "response_status": "review",
                             "blocks_transactional_processing": True,
                         },
                         {
+                            "child_index": 2,
                             "report_type": "supervisor_control",
                             "report_family": "supervisor_control",
                             "report_family_label": "intelligence",
+                            "response_report_type": "supervisor_control_summary",
                             "status": "accepted",
+                            "response_status": "accepted",
                             "blocks_transactional_processing": False,
                         },
                     ]
@@ -723,9 +807,88 @@ def test_live_webhook_mixed_review_keeps_generic_fallback_when_child_detail_miss
     artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
 
     assert response.status_code == 200
-    assert body["conversation_response"]["response_type"] == "review_ack"
-    assert "TAOP split the message into multiple reports." in artifact_payload["response_text"]
-    assert "One split report still needs review before final processing." in artifact_payload["response_text"]
+    assert body["conversation_response"]["response_type"] == "accepted_ack"
+    if _taop_feedback_enabled():
+        assert "Processed: Supervisor Control Summary." in artifact_payload["response_text"]
+        assert "Needs review: Day-End Sales Report." in artifact_payload["response_text"]
+        assert "Resend only the Day-End Sales Report as one complete report." in artifact_payload["response_text"]
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
+
+
+def test_live_webhook_mixed_review_surfaces_child_accountability_for_truncated_supervisor_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_environment(monkeypatch, tmp_path)
+
+    def fake_process_work_item(work_item):
+        del work_item
+        return AgentResult(
+            agent_name="orchestrator_agent",
+            payload={
+                "status": "accepted_with_warning",
+                "governance": {"status": "accepted_with_warning", "reasons": []},
+                "routing": {"review_reason": None},
+                "classification": {"report_type": "mixed"},
+                "outputs": ["records/structured/sales_income/waigani/2026-04-28.json"],
+                "fanout": {
+                    "children": [
+                        {
+                            "child_index": 1,
+                            "report_type": "sales_income",
+                            "report_family": "sales_income",
+                            "branch": "waigani",
+                            "report_date": "2026-04-28",
+                            "response_report_type": "day_end_sales",
+                            "status": "accepted",
+                            "response_status": "accepted",
+                            "reason": "totals_reconciled",
+                            "blocks_transactional_processing": True,
+                        },
+                        {
+                            "child_index": 2,
+                            "report_type": "supervisor_control",
+                            "report_family": "supervisor_control",
+                            "report_family_label": "intelligence",
+                            "branch": "waigani",
+                            "report_date": "2026-04-28",
+                            "response_report_type": "supervisor_control_summary",
+                            "status": "needs_review",
+                            "response_status": "review",
+                            "reason": 'incomplete after "Exceptions es\u2026"',
+                            "validation_error_code": "child_report_incomplete_or_truncated",
+                            "validation_error_message": 'incomplete after "Exceptions es\u2026"',
+                            "blocks_transactional_processing": False,
+                            "header_line": "Supervisor Control Summary",
+                        },
+                    ]
+                },
+            },
+        )
+
+    monkeypatch.setattr(bridge.orchestrator_worker, "process_work_item", fake_process_work_item)
+
+    response = bridge.dispatch_http_request(
+        method="POST",
+        target="/webhook",
+        body=json.dumps(_meta_payload(message_id="wamid.mixed-review-accountability-1")).encode("utf-8"),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    artifact_payload = _read_json(Path(body["conversation_response"]["json_path"]))
+
+    assert response.status_code == 200
+    assert body["conversation_response"]["response_type"] == "accepted_ack"
+    if _taop_feedback_enabled():
+        assert "✅ Mixed split reports received for WAIGANI, 28/04/26." in artifact_payload["response_text"]
+        assert "Processed: Day-End Sales Report." in artifact_payload["response_text"]
+        assert "Needs review: Supervisor Control Summary." in artifact_payload["response_text"]
+        assert 'Issue: incomplete after "Exceptions es\u2026"' in artifact_payload["response_text"]
+        assert "Resend only the Supervisor Control Summary as one complete report." in artifact_payload["response_text"]
+        assert "TAOP REVIEW REQUIRED" not in artifact_payload["response_text"]
+    else:
+        assert artifact_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def test_health_endpoint_returns_bridge_status(
@@ -809,6 +972,27 @@ def _meta_payload(*, message_id: str = "wamid.live-1", text: str = "DAY-END SALE
     }
 
 
+def _strict_sales_payload() -> dict[str, object]:
+    return {
+        "status": "accepted",
+        "signal_type": "sales_income",
+        "source_agent": "sales_income_agent",
+        "branch": "waigani",
+        "report_date": "2026-04-07",
+        "confidence": 0.95,
+        "metrics": {
+            "gross_sales": 1200.0,
+            "cash_sales": 600.0,
+            "eftpos_sales": 600.0,
+            "mobile_money_sales": 0.0,
+            "traffic": 12,
+            "served": 9,
+        },
+        "items": [],
+        "warnings": [],
+    }
+
+
 def _today_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -860,6 +1044,13 @@ def _paths(directory: Path, pattern: str) -> list[Path]:
 
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+_TAOP_DISABLED_RESPONSE_TEXT = "[TAOP DISABLED - AGENT OUTPUT ONLY]"
+
+
+def _taop_feedback_enabled() -> bool:
+    return os.getenv("TAOP_FEEDBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 
 
 def _write_structured_record(root: Path, signal_type: str, branch: str, report_date: str) -> None:

@@ -38,28 +38,44 @@ import apps.orchestrator_agent.worker as orchestrator_worker
 from dotenv import load_dotenv
 from packages.common.paths import REPO_ROOT
 from packages.human_tolerance import analyze_human_whatsapp_text
-from packages.observability import record_pre_ingestion_validation_event
+from packages.observability import record_conversation_reply_event, record_pre_ingestion_validation_event
 from packages.record_store.automation import dispatch_whatsapp_response, generate_whatsapp_conversation_reply
+from packages.record_store.duplicate_archive import archive_duplicate_record
 from packages.record_store.naming import safe_segment
 from packages.record_store.paths import get_raw_path, get_structured_path
 from packages.record_store.writer import write_json_file, write_text_file
+from packages.response_store import load_response_artifact, write_response_artifacts
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
 from packages.taop_feedback import build_operational_query_response, detect_message_intent
 
-load_dotenv(REPO_ROOT / ".env.whatsapp_bridge")
+load_dotenv(REPO_ROOT / ".env.whatsapp_bridge", override=False)
 
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 SERVICE_NAME = "whatsapp_webhook_bridge"
+RUNTIME_STATUS = "LIVE_RUNTIME"
+RUNTIME_OWNER = "whatsapp_webhook_bridge"
+RUNTIME_NOTE = (
+    "Live report-ingestion owner; legacy apps.orchestra is not wired into the "
+    "current ingress runtime."
+)
 INGRESS_NAME = "whatsapp"
 WEBHOOK_SOURCE = "meta_webhook"
 WEBHOOK_ROUTE = "/webhook"
 SUPPORTED_WEBHOOK_ROUTES = {"/", WEBHOOK_ROUTE, "/webhooks/whatsapp"}
 HEALTH_ROUTE = "/health"
 UNKNOWN_BUCKET = "unknown"
+DUPLICATE_NOTICE_RESPONSE_TEXT = "\n".join(
+    [
+        "ℹ️ TAOP DUPLICATE REPORT DETECTED",
+        "",
+        "This report was already received and processed earlier.",
+        "No new processing was applied.",
+    ]
+)
 
 
 @dataclass(slots=True)
@@ -431,6 +447,20 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             )
         )
     except DuplicateLiveMessage as exc:
+        duplicate_reason = _bridge_duplicate_reason(exc.reason)
+        archive_duplicate_record(
+            source_message_id=envelope.message_id,
+            sender_phone=envelope.sender_phone,
+            branch=envelope.group_name,
+            report_type=None,
+            report_date=None,
+            raw_txt_path=exc.raw_txt_path,
+            raw_meta_path=exc.raw_meta_path,
+            duplicate_reason=duplicate_reason,
+            duplicate_basis=f"bridge_live_raw:{exc.reason}",
+            original_or_duplicate_of=exc.raw_meta_path,
+            output_root=REPO_ROOT,
+        )
         LOGGER.info(
             "duplicate live WhatsApp message skipped: message_id=%s raw_sha256=%s reason=%s raw_txt_path=%s",
             exc.message_id,
@@ -444,7 +474,7 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             "workspace_root": str(REPO_ROOT),
             "raw_written": False,
             "duplicate": True,
-            "duplicate_reason": exc.reason,
+            "duplicate_reason": duplicate_reason,
             "replay": False,
             "orchestrator_status": "skipped",
             "route": None,
@@ -460,8 +490,8 @@ def _process_envelope(envelope: InboundMessageEnvelope) -> dict[str, Any]:
             envelope=envelope,
             outcome={
                 "status": "duplicate",
-                "governance": {"status": "duplicate", "reasons": [exc.reason]},
-                "policy_guard": {"duplicate": True, "reason": exc.reason},
+                "governance": {"status": "duplicate", "reasons": [duplicate_reason]},
+                "policy_guard": {"duplicate": True, "reason": duplicate_reason},
                 "branch_hint": envelope.group_name,
                 "raw_message": {"text": envelope.text},
                 "raw_record": {
@@ -906,9 +936,35 @@ def _success_response(
     status = payload.get("status")
     orchestrator_status = status if isinstance(status, str) else "ok"
     outputs = _outputs_from_result(result)
-    policy_guard = payload.get("policy_guard") if isinstance(payload.get("policy_guard"), Mapping) else {}
-    duplicate = policy_guard.get("duplicate") is True
-    duplicate_reason = _clean_text(policy_guard.get("reason")) if duplicate else None
+    raw_metadata = _read_raw_metadata(raw_meta_path=_clean_text(raw_record.get("raw_meta_path")))
+    policy_guard = {
+        **(
+            raw_metadata.get("policy_guard")
+            if isinstance(raw_metadata.get("policy_guard"), Mapping)
+            else {}
+        ),
+        **(payload.get("policy_guard") if isinstance(payload.get("policy_guard"), Mapping) else {}),
+    }
+    processing_status = (
+        _clean_text(payload.get("processing_status"))
+        or _clean_text(raw_metadata.get("processing_status"))
+        or orchestrator_status
+    )
+    duplicate_handling = _mapping(payload.get("duplicate_handling"))
+    raw_duplicate_handling = _mapping(raw_metadata.get("duplicate_handling"))
+    duplicate = (
+        processing_status == "duplicate"
+        or policy_guard.get("duplicate") is True
+        or duplicate_handling.get("duplicate") is True
+        or raw_duplicate_handling.get("duplicate") is True
+    )
+    duplicate_reason = (
+        _clean_text(duplicate_handling.get("reason"))
+        or _clean_text(raw_duplicate_handling.get("reason"))
+        or (_clean_text(policy_guard.get("reason")) if policy_guard.get("duplicate") is True else None)
+        if duplicate
+        else None
+    )
 
     response = {
         "ok": True,
@@ -928,7 +984,12 @@ def _success_response(
         "raw_meta_path": raw_record.get("raw_meta_path"),
         "outputs": outputs,
     }
-    response["conversation_response"] = _generate_conversation_response(
+    response["conversation_response"] = _dispatch_policy_guard_duplicate_notice(
+        envelope=envelope,
+        raw_metadata=raw_metadata,
+        policy_guard=policy_guard,
+        processing_status=processing_status,
+    ) or _generate_conversation_response(
         envelope=envelope,
         outcome=_result_with_outputs(
             result,
@@ -938,6 +999,182 @@ def _success_response(
         ),
     )
     return _with_conversation_response_output(response)
+
+
+def _dispatch_policy_guard_duplicate_notice(
+    *,
+    envelope: InboundMessageEnvelope,
+    raw_metadata: Mapping[str, Any],
+    policy_guard: Mapping[str, Any],
+    processing_status: str,
+) -> dict[str, Any] | None:
+    """Persist and dispatch the explicit duplicate reply for hard policy rejects."""
+
+    if not _should_dispatch_policy_guard_duplicate_notice(
+        processing_status=processing_status,
+        policy_guard=policy_guard,
+    ):
+        return None
+
+    response_context = {
+        "source_message_id": envelope.message_id,
+        "sender_phone": envelope.sender_phone,
+        "response_type": "duplicate_notice",
+        "governance_status": "duplicate",
+        "report_type": _clean_text(policy_guard.get("report_type"))
+        or _clean_text(raw_metadata.get("detected_report_type")),
+        "branch": _clean_text(raw_metadata.get("branch_hint")) or envelope.group_name,
+        "report_date": _clean_text(raw_metadata.get("report_date")),
+        "reason": _clean_text(policy_guard.get("reason")),
+        "review_queue_path": None,
+        "structured_output_path": None,
+        "should_reply": True,
+        "is_replay": envelope.replay.get("is_replay") is True,
+    }
+    payload = {
+        "source_message_id": envelope.message_id,
+        "sender_phone": envelope.sender_phone,
+        "response_type": "duplicate_notice",
+        "response_text": DUPLICATE_NOTICE_RESPONSE_TEXT,
+        "governance_status": "duplicate",
+        "report_type": response_context["report_type"],
+        "branch": response_context["branch"],
+        "report_date": response_context["report_date"],
+        "reason": response_context["reason"],
+        "generated_at": _utc_timestamp(),
+        "dispatch_status": "generated",
+        "provider_message_id": None,
+        "dispatch_error": None,
+        "http_status": None,
+        "dispatched_at": None,
+    }
+
+    try:
+        artifact = _persist_duplicate_notice_artifact(payload)
+        if envelope.replay.get("is_replay") is not True:
+            store_sender_interaction(
+                sender_phone=envelope.sender_phone,
+                response_context=response_context,
+                output_root=REPO_ROOT,
+            )
+        LOGGER.info(
+            "duplicate_notice_generated: response_id=%s source_message_id=%s sender_phone=%s governance_status=duplicate",
+            artifact["response_id"],
+            envelope.message_id,
+            envelope.sender_phone,
+        )
+        dispatch_payload = dict(artifact["payload"])
+        dispatch_payload["response_id"] = artifact["response_id"]
+        dispatch_payload["is_replay"] = envelope.replay.get("is_replay") is True
+        dispatch_result = _dispatch_outbound_response(dispatch_payload)
+    except Exception as exc:
+        LOGGER.exception(
+            "duplicate notice dispatch failed: message_id=%s sender_phone=%s error=%s",
+            envelope.message_id,
+            envelope.sender_phone,
+            exc,
+        )
+        return None
+
+    dispatch_status = _dispatch_status(dispatch_result)
+    generated_at = _clean_text(artifact["payload"].get("generated_at")) or _utc_timestamp()
+    record_conversation_reply_event(
+        report_date=generated_at[:10],
+        branch=_clean_text(response_context.get("branch")),
+        response_type="duplicate_notice",
+        dispatch_status=dispatch_status,
+        source_message_id=envelope.message_id,
+        governance_status="duplicate",
+        report_type=_clean_text(response_context.get("report_type")),
+        replay_suppressed=envelope.replay.get("is_replay") is True and dispatch_status == "suppressed",
+        reason=_clean_text(response_context.get("reason")),
+        conversation_date=_clean_text(response_context.get("report_date")),
+        output_root=REPO_ROOT,
+    )
+    return {
+        "response_id": artifact["response_id"],
+        "response_type": "duplicate_notice",
+        "dispatch_status": dispatch_status,
+        "json_path": _clean_text(dispatch_result.get("json_path")) or artifact["json_path"],
+        "text_path": _clean_text(dispatch_result.get("text_path")) or artifact["text_path"],
+    }
+
+
+def _should_dispatch_policy_guard_duplicate_notice(
+    *,
+    processing_status: str,
+    policy_guard: Mapping[str, Any],
+) -> bool:
+    """Return whether the explicit duplicate reply must be emitted."""
+
+    return (
+        processing_status == "duplicate"
+        and policy_guard.get("fallback_eligible") is True
+        and policy_guard.get("hard_reject") is True
+    )
+
+
+def _persist_duplicate_notice_artifact(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one persisted duplicate-notice artifact without clobbering sent replies."""
+
+    normalized_payload = dict(payload)
+    response_id = _response_artifact_id(normalized_payload)
+    existing_artifact = load_response_artifact(response_id, output_root=REPO_ROOT)
+    if existing_artifact is None:
+        return write_response_artifacts(normalized_payload, output_root=REPO_ROOT)
+
+    existing_payload = (
+        existing_artifact.get("payload")
+        if isinstance(existing_artifact.get("payload"), Mapping)
+        else {}
+    )
+    existing_dispatch_status = _clean_text(existing_payload.get("dispatch_status"))
+    existing_response_text = existing_payload.get("response_text")
+    if existing_dispatch_status in {"sent", "duplicate"} or existing_response_text == normalized_payload["response_text"]:
+        return existing_artifact
+
+    normalized_payload["generated_at"] = _clean_text(existing_payload.get("generated_at")) or normalized_payload["generated_at"]
+    return write_response_artifacts(
+        normalized_payload,
+        output_root=REPO_ROOT,
+        overwrite=True,
+    )
+
+
+def _response_artifact_id(payload: Mapping[str, Any]) -> str:
+    """Return the stable response artifact id used by the response store."""
+
+    stable_fields = {
+        "source_message_id": payload.get("source_message_id"),
+        "sender_phone": payload.get("sender_phone"),
+        "response_type": payload.get("response_type"),
+        "governance_status": payload.get("governance_status"),
+        "report_type": payload.get("report_type"),
+        "branch": payload.get("branch"),
+        "reason": payload.get("reason"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(stable_fields, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+    return digest[:24]
+
+
+def _read_raw_metadata(*, raw_meta_path: str | None) -> dict[str, Any]:
+    """Return the latest raw metadata persisted by the bridge or orchestrator."""
+
+    cleaned_path = _clean_text(raw_meta_path)
+    if cleaned_path is None:
+        return {}
+    return _read_json_file(Path(cleaned_path))
+
+
+def _dispatch_status(result: Mapping[str, Any]) -> str:
+    """Return one normalized dispatch status from an outbound reply result."""
+
+    status = _clean_text(result.get("dispatch_status")) or _clean_text(result.get("status"))
+    if status in {"generated", "suppressed", "sent", "failed", "skipped", "dry_run", "duplicate"}:
+        return status
+    return "generated"
 
 
 def _with_conversation_response_output(response: dict[str, Any]) -> dict[str, Any]:
@@ -962,12 +1199,15 @@ def _outputs_from_result(result: AgentResult) -> list[str]:
     """Infer structured output paths from the downstream result when available."""
 
     payload = result.payload if isinstance(result.payload, dict) else {}
+    duplicate_handling = payload.get("duplicate_handling")
+    if isinstance(duplicate_handling, Mapping) and duplicate_handling.get("write_suppressed") is True:
+        return []
     explicit_outputs = payload.get("outputs")
     if isinstance(explicit_outputs, list) and all(isinstance(path, str) for path in explicit_outputs):
         return list(explicit_outputs)
 
     status = payload.get("status")
-    if status == "invalid_input":
+    if status in {"invalid_input", "rejected", "duplicate", "conflict_blocked"}:
         return []
 
     branch = payload.get("branch")
@@ -1024,6 +1264,16 @@ def _route_from_result(result: AgentResult) -> str | None:
     if result.agent_name == "supervisor_control_agent":
         return "supervisor_control"
     return None
+
+
+def _bridge_duplicate_reason(reason: str) -> str:
+    """Return one stable archive reason for bridge-level duplicate suppression."""
+
+    mapping = {
+        "message_id": "duplicate_message_id",
+        "raw_sha256_and_received_at": "duplicate_raw_sha256",
+    }
+    return mapping.get(reason, reason)
 
 
 def _response_payload(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1546,6 +1796,14 @@ def _clean_text(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    """Return one mapping payload or an empty mapping."""
+
+    if isinstance(value, Mapping):
+        return value
+    return {}
 
 
 def _text_value(value: object) -> str | None:

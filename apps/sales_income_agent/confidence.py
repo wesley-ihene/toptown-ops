@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from apps.sales_income_agent.warnings import WarningEntry
+from apps.sales_income_agent.warnings import WarningEntry, warning_impacts_confidence
 
 
 def compute_confidence(
@@ -26,6 +26,8 @@ def compute_confidence(
         confidence -= 0.2
 
     for warning in warnings:
+        if not warning_impacts_confidence(warning):
+            continue
         if warning.severity == "error":
             confidence -= 0.25
         elif warning.severity == "warning":

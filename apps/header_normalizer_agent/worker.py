@@ -42,7 +42,7 @@ class HeaderNormalizationResult:
         return [candidate.normalized_line for candidate in self.candidates]
 
 
-def normalize_headers(text: str, *, max_lines: int = 8) -> HeaderNormalizationResult:
+def normalize_headers(text: str, *, max_lines: int = 10) -> HeaderNormalizationResult:
     """Return the first non-empty lines plus stable normalized variants."""
 
     candidates: list[HeaderCandidate] = []

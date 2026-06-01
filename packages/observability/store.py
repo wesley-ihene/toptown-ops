@@ -7,6 +7,7 @@ from collections.abc import Mapping as MappingABC
 from pathlib import Path
 from typing import Any, Mapping
 
+from packages.branch_registry import canonical_branch_slug_or_none
 from packages.feedback_store import build_action_feedback_state
 import packages.record_store.paths as record_paths
 from packages.record_store.naming import safe_segment
@@ -36,6 +37,7 @@ def record_processing_event(
 ) -> str:
     """Update daily observability metrics for one processing outcome."""
 
+    branch = _observability_branch(branch)
     summary = _load_summary(report_date, output_root=output_root)
     normalized_outcome = _normalized_processing_outcome(outcome)
     summary["summary"]["intake_volume"] += 1
@@ -128,6 +130,7 @@ def record_export_event(
 ) -> str:
     """Update daily observability metrics for one colony export outcome."""
 
+    branch = _observability_branch(branch)
     summary = _load_summary(report_date, output_root=output_root)
     exports = summary["exports"]
     if success:
@@ -179,13 +182,14 @@ def record_replay_event(
 ) -> str:
     """Append one replay result into the daily replay audit artifact."""
 
+    canonical_branch = _observability_branch(branch)
     payload = load_daily_artifact("replay_audit", report_date, output_root=output_root) or {}
     updated = append_replay_event(
         payload,
         report_date=report_date,
         mode=mode,
         source=source,
-        branch=branch,
+        branch=canonical_branch,
         validation_mode=validation_mode,
         result=result,
     )
@@ -193,7 +197,7 @@ def record_replay_event(
     _record_latency_artifact(
         report_date=report_date,
         event_type="replay",
-        branch=branch or "unknown",
+        branch=canonical_branch,
         report_type=mode,
         duration_ms=duration_ms,
         output_root=output_root,
@@ -210,6 +214,7 @@ def record_consistency_snapshot(
 ) -> str:
     """Merge one consistency snapshot into the daily artifact."""
 
+    branch = _observability_branch(branch)
     payload = load_daily_artifact("consistency", report_date, output_root=output_root) or {}
     updated = merge_consistency_snapshot(
         payload,
@@ -473,11 +478,12 @@ def record_conversation_reply_event(
 
     summary["conversation_replies_generated"] += 1
     normalized_dispatch_status = dispatch_status.strip() if isinstance(dispatch_status, str) else ""
-    suppressed = (
+    replay_flag = (
         bool(replay_suppressed)
         if replay_suppressed is not None
-        else normalized_dispatch_status.startswith("suppressed")
+        else normalized_dispatch_status == "suppressed_replay"
     )
+    suppressed = normalized_dispatch_status.startswith("suppressed") or replay_flag
 
     if normalized_dispatch_status == "sent":
         summary["conversation_replies_sent"] += 1
@@ -500,7 +506,7 @@ def record_conversation_reply_event(
                 "report_type": report_type.strip() if isinstance(report_type, str) and report_type.strip() else None,
                 "reason": reason.strip() if isinstance(reason, str) and reason.strip() else None,
                 "date": conversation_date.strip() if isinstance(conversation_date, str) and conversation_date.strip() else None,
-                "replay_suppressed": suppressed,
+                "replay_suppressed": replay_flag,
             }
         )
 
@@ -918,3 +924,9 @@ def _record_latency_artifact(
         finished_at_utc=finished_at_utc,
     )
     _write_daily_artifact("pipeline_latency", report_date, updated, output_root=output_root)
+
+
+def _observability_branch(branch: str | None) -> str:
+    """Return the canonical observability branch key or ``unknown``."""
+
+    return canonical_branch_slug_or_none(branch) or "unknown"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import packages.record_store.paths as record_paths
@@ -63,10 +64,16 @@ def test_live_bridge_dispatches_review_ack_without_bypassing_governance(
     assert response.status_code == 200
     assert body["orchestrator_status"] == "needs_review"
     assert body["conversation_response"]["response_type"] == "review_ack"
-    assert body["conversation_response"]["dispatch_status"] == "sent"
-    assert artifact_payload["dispatch_status"] == "sent"
-    assert artifact_payload["provider_message_id"] == "wamid.review-provider-1"
-    assert artifact_payload["dispatched_at"] is not None
+    if _taop_feedback_enabled():
+        assert body["conversation_response"]["dispatch_status"] == "sent"
+        assert artifact_payload["dispatch_status"] == "sent"
+        assert artifact_payload["provider_message_id"] == "wamid.review-provider-1"
+        assert artifact_payload["dispatched_at"] is not None
+    else:
+        assert body["conversation_response"]["dispatch_status"] == "suppressed"
+        assert artifact_payload["dispatch_status"] == "suppressed"
+        assert artifact_payload["provider_message_id"] is None
+        assert artifact_payload["dispatched_at"] is None
     assert not any("/structured/" in output for output in body["outputs"])
     assert outcome_payload["export_allowed"] is False
 
@@ -120,3 +127,7 @@ def _meta_payload(*, message_id: str) -> dict[str, object]:
             }
         ],
     }
+
+
+def _taop_feedback_enabled() -> bool:
+    return os.getenv("TAOP_FEEDBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}

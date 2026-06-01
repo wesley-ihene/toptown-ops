@@ -12,6 +12,12 @@ from packages.signal_contracts.work_item import WorkItem
 
 AGENT_NAME = "section_productivity_agent"
 SIGNAL_TYPE = "section_productivity_analytics"
+RUNTIME_STATUS = "MANUAL_ONLY"
+RUNTIME_OWNER = "packages.record_store.automation"
+RUNTIME_NOTE = (
+    "Script/operator entrypoint only; live automated rebuilds run through "
+    "packages.record_store.automation.run_post_write_automation."
+)
 
 
 @dataclass(slots=True)

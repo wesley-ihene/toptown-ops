@@ -10,7 +10,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
-from packages.branch_registry import CANONICAL_BRANCHES, canonical_branch_slug
+from packages.branch_registry import CANONICAL_BRANCHES, canonical_branch_slug, canonical_branch_slug_or_none
 from packages.common.paths import REPO_ROOT
 
 BRANCH_ANALYTICS_PRODUCTS: dict[str, str] = {
@@ -56,7 +56,7 @@ def canonical_branch_or_none(value: str | None) -> str | None:
     cleaned = value.strip()
     if not cleaned:
         return None
-    return canonical_branch_slug(cleaned)
+    return canonical_branch_slug_or_none(cleaned)
 
 
 def display_branch_name(branch: str) -> str:
@@ -88,6 +88,8 @@ def list_available_dates(
 
     branch_dates = _available_branch_dates(analytics_root(root))
     selected_branch = canonical_branch_or_none(branch)
+    if branch is not None and selected_branch is None:
+        return []
     if selected_branch is not None:
         return sorted(branch_dates.get(selected_branch, set()), reverse=True)
     all_dates: set[str] = set()
@@ -114,7 +116,15 @@ def load_branch_analytics(
 ) -> tuple[dict[str, Any] | None, AnalyticsNotFoundError | None]:
     """Load one branch-scoped analytics JSON file by logical product name."""
 
-    canonical_branch = canonical_branch_slug(branch)
+    canonical_branch = canonical_branch_or_none(branch)
+    if canonical_branch is None:
+        return None, AnalyticsNotFoundError(
+            product=product,
+            branch=None,
+            report_date=report_date,
+            expected_path=None,
+            message="The requested branch is not configured.",
+        )
     path = expected_analytics_path(
         product=product,
         branch=canonical_branch,
@@ -171,7 +181,10 @@ def expected_analytics_path(
     if product in BRANCH_ANALYTICS_PRODUCTS:
         if branch is None:
             raise ValueError(f"branch is required for analytics product `{product}`")
-        return base / BRANCH_ANALYTICS_PRODUCTS[product] / canonical_branch_slug(branch) / f"{report_date}.json"
+        canonical_branch = canonical_branch_or_none(branch)
+        if canonical_branch is None:
+            raise ValueError(f"unknown_branch_slug: {branch!r}")
+        return base / BRANCH_ANALYTICS_PRODUCTS[product] / canonical_branch / f"{report_date}.json"
     if product == COMPARISON_PRODUCT:
         return base / COMPARISON_PRODUCT / f"{report_date}.json"
     raise ValueError(f"unknown analytics product `{product}`")
@@ -199,8 +212,11 @@ def _available_branch_dates(root: Path) -> dict[str, set[str]]:
         for branch_dir in sorted(product_root.iterdir()):
             if not branch_dir.is_dir():
                 continue
+            canonical_branch = canonical_branch_slug_or_none(branch_dir.name)
+            if canonical_branch is None:
+                continue
             for payload_path in branch_dir.glob("*.json"):
-                branch_dates[branch_dir.name].add(payload_path.stem)
+                branch_dates[canonical_branch].add(payload_path.stem)
     return branch_dates
 
 

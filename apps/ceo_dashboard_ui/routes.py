@@ -224,15 +224,12 @@ def render_ceo_dashboard_response(
         <p>Normal TopTown Ops usage should stay on the operator dashboard and operator analytics API.</p>
       </article>
       <article class="panel">
-        <h2>OpenClaw Runtime</h2>
+        <h2>AI Infrastructure</h2>
         <table>
-          <tbody>
-            {_summary_row("Enabled", openclaw_runtime.get("enabled"))}
-            {_summary_row("Status", _openclaw_status_label(openclaw_runtime))}
-            {_summary_row("Gateway URL", openclaw_runtime.get("gateway_url"))}
-          </tbody>
+          <thead><tr><th>System</th><th>Status</th><th>Mode</th><th>Details</th></tr></thead>
+          <tbody>{_render_ai_infrastructure_rows(openclaw_runtime)}</tbody>
         </table>
-        <p>Config-only adapter visibility. No gateway connectivity check is performed from this compatibility view.</p>
+        <p>Read-only infrastructure visibility only. This compatibility view does not call the OpenClaw gateway or send advisory prompts.</p>
       </article>
     </section>
   </main>
@@ -321,16 +318,52 @@ def _summary_row(label: str, value: Any) -> str:
     return f"<tr><th>{escape(label)}</th><td>{rendered}</td></tr>"
 
 
-def _openclaw_status_label(payload: Mapping[str, Any]) -> str | None:
-    enabled = payload.get("enabled")
-    if enabled is True:
-        return "Configured"
-    if enabled is False:
-        return "Standby"
+def _render_ai_infrastructure_rows(openclaw_runtime: Mapping[str, Any]) -> str:
+    rows = [
+        ("TAOP", "Active", "Operational", "TopTown Ops upstream coordination layer."),
+        ("IOI Colony", "Available", "Downstream", "Downstream intelligence engine boundary remains external."),
+        (
+            "OpenClaw",
+            _openclaw_infrastructure_status(openclaw_runtime),
+            _openclaw_infrastructure_mode(openclaw_runtime),
+            _openclaw_infrastructure_detail(openclaw_runtime),
+        ),
+        ("Advisory Engine", "Disabled", "Disabled", "Prompt path is intentionally disabled from the CEO dashboard."),
+    ]
+    return "".join(
+        f"<tr><td>{escape(system)}</td><td>{escape(status)}</td><td>{escape(mode)}</td><td>{escape(detail)}</td></tr>"
+        for system, status, mode, detail in rows
+    )
+
+
+def _openclaw_infrastructure_status(payload: Mapping[str, Any]) -> str:
+    if payload.get("enabled") is False:
+        return "Available"
     status = payload.get("status")
     if isinstance(status, str) and status.strip():
-        return status.strip()
-    return None
+        return status.strip().replace("_", " ").title()
+    return "Unknown"
+
+
+def _openclaw_infrastructure_mode(payload: Mapping[str, Any]) -> str:
+    if payload.get("enabled") is False:
+        return "Standby"
+    if payload.get("enabled") is True:
+        return "Enabled"
+    return "Unknown"
+
+
+def _openclaw_infrastructure_detail(payload: Mapping[str, Any]) -> str:
+    gateway_url = payload.get("gateway_url")
+    reason = payload.get("reason")
+    parts = []
+    if gateway_url is not None:
+        parts.append(str(gateway_url))
+    if reason is not None:
+        parts.append(str(reason))
+    if parts:
+        return " | ".join(parts)
+    return "n/a"
 
 
 def _nested(mapping: Mapping[str, Any] | None, key: str, child: str) -> Any:

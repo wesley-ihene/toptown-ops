@@ -15,7 +15,7 @@ import apps.pricing_stock_release_agent.record_store as pricing_record_store
 import apps.sales_income_agent.record_store as sales_record_store
 import apps.supervisor_control_agent.record_store as supervisor_record_store
 from apps.supervisor_auth.worker import authorize_supervisor
-from packages.branch_registry import canonical_branch_slug
+from packages.branch_registry import canonical_branch_slug_or_none
 import packages.record_store.paths as record_paths
 from packages.record_store.naming import build_rejected_filename, safe_segment
 from packages.record_store.paths import get_rejected_path
@@ -530,7 +530,7 @@ def _branch_or_none(value: object) -> str | None:
     text = _text_or_none(value)
     if text is None:
         return None
-    return canonical_branch_slug(text)
+    return canonical_branch_slug_or_none(text)
 
 
 def _text_or_none(value: object) -> str | None:

@@ -8,12 +8,13 @@ layer and suppresses raw writes when `payload["replay"]["is_replay"]` is true.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Final, Literal
 
 from apps.branch_resolver_agent.worker import resolve_branch
@@ -23,6 +24,7 @@ from apps.fallback_extraction_agent.worker import (
 )
 from apps.header_normalizer_agent.worker import normalize_headers
 import apps.hr_agent.record_store as hr_record_store
+from apps.hr_agent.warnings import is_blocking_accountability_rule
 from apps.hr_agent.worker import process_work_item as process_hr_work_item
 from apps.mixed_content_detector_agent.worker import detect_mixed_content
 from apps.orchestrator_agent.policy_guard import (
@@ -57,7 +59,7 @@ from packages.normalization.engine import normalize_report
 from packages.report_acceptance import decide_acceptance
 from packages.report_policy import get_report_policy
 from packages.provenance_store import write_provenance_record
-from packages.report_registry import route_for_family
+from packages.report_registry import APPROVED_MIXED_SPLIT_TITLES, route_for_family
 from packages.review_queue import write_review_item
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
@@ -65,6 +67,12 @@ from packages.sop_validation.router import validate_report
 from packages.sop_validation.common import is_iso_date
 
 AGENT_NAME: Final[str] = "orchestrator_agent"
+RUNTIME_STATUS = "LIVE_RUNTIME"
+RUNTIME_OWNER = "orchestrator_agent"
+RUNTIME_NOTE = (
+    "Live runtime orchestrator. Legacy apps.orchestra compatibility code is "
+    "not the active orchestration owner."
+)
 RAW_MESSAGE_KIND: Final[str] = "raw_message"
 SIGNAL_TYPE: Final[str] = "routing"
 UNKNOWN_STORAGE_BUCKET: Final[str] = "unknown"
@@ -73,6 +81,21 @@ MIXED_SPLIT_CONFIDENCE_MIN: Final[float] = 0.85
 RAW_SHA256_DEDUP_WINDOW: Final[timedelta] = timedelta(hours=24)
 INTELLIGENCE_REPORT_FAMILY: Final[str] = "intelligence"
 INTELLIGENCE_SPECIALIST_REPORT_TYPES: Final[frozenset[str]] = frozenset({"supervisor_control"})
+MIXED_CHILD_REVIEW_WARNING_CODES: Final[frozenset[str]] = frozenset({"child_report_incomplete_or_truncated"})
+_TRUNCATED_SUPERVISOR_FIELD_ALIASES: Final[tuple[str, ...]] = (
+    "cash variance",
+    "staffing issues",
+    "stock issues affecting sales",
+    "pricing or system issues",
+    "exceptions escalated to ops manager",
+    "supervisor confirmation",
+    "supervisor confirmed",
+    "exception type",
+    "details",
+    "action taken",
+    "escalated by",
+    "time",
+)
 
 ClassificationLabel = str
 
@@ -332,21 +355,38 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
     resolved_branch_hint = routing_payload.get("branch_hint")
     specialist_report_type = routing_payload.get("specialist_report_type")
 
-    policy_decision = evaluate_pre_specialist_policy(
+    ingress_policy_decision = evaluate_pre_specialist_policy(
         existing_metadata=raw_audit.existing_metadata,
         report_family=classification,
         report_type=specialist_report_type if isinstance(specialist_report_type, str) else None,
         target_agent=target_agent if isinstance(target_agent, str) else None,
         route_status=route_status if isinstance(route_status, str) else None,
     )
+    duplicate_override = _duplicate_override_active(ingress_policy_decision)
+    if duplicate_override:
+        _archive_duplicate_for_disposal(
+            raw_audit,
+            source_message_id=_ingress_field(routed_work_item.payload, "message_id"),
+            sender_phone=_ingress_field(routed_work_item.payload, "sender_phone"),
+            branch=resolved_branch_hint or raw_audit.branch_hint,
+            report_type=specialist_report_type if isinstance(specialist_report_type, str) else classification,
+            report_date=_string_or_none(routing_payload.get("report_date")),
+            duplicate_reason="duplicate_message",
+            duplicate_basis=ingress_policy_decision.duplicate_basis,
+            original_or_duplicate_of=_string_or_none(raw_audit.existing_metadata.get("raw_meta_path")),
+        )
+        policy_decision = evaluate_pre_specialist_policy(
+            existing_metadata={},
+            report_family=classification,
+            report_type=specialist_report_type if isinstance(specialist_report_type, str) else None,
+            target_agent=target_agent if isinstance(target_agent, str) else None,
+            route_status=route_status if isinstance(route_status, str) else None,
+        )
+    else:
+        policy_decision = ingress_policy_decision
 
     if policy_decision.action == "reject":
-        if policy_decision.reason == "duplicate_message":
-            rejection_reason: RejectionReason = "duplicate_message"
-            route_reason = "duplicate_message_rejected"
-            warning_code = "duplicate_message"
-            warning_message = "This raw message was already processed and was blocked by the idempotency policy."
-        elif classification == "invalid_pricing_card_format":
+        if classification == "invalid_pricing_card_format":
             rejection_reason = "invalid_pricing_card_format"
             route_reason = "invalid_pricing_card_format"
             warning_code = "invalid_pricing_card_format"
@@ -358,45 +398,10 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             route_reason = str(routing_payload.get("review_reason") or "unknown_route")
             warning_code = "missing_fields"
             warning_message = "The raw message could not be routed to a supported specialist agent."
-        _update_raw_metadata(
-            raw_audit,
-            detected_report_type=classification,
-            routing_target=None,
-            processing_status="duplicate" if policy_decision.reason == "duplicate_message" else "rejected",
-            branch_hint=resolved_branch_hint,
-            routing_metadata=_routing_metadata_from_payload(routing_payload),
-            policy_decision=policy_decision,
-            governance_outcome=_governance_outcome_payload(
-                status="duplicate" if policy_decision.reason == "duplicate_message" else "rejected",
-                reasons=[_policy_reason_to_governance_reason(policy_decision.reason)],
-            ),
-        )
-        if policy_decision.reason == "duplicate_message":
-            _archive_duplicate_for_disposal(
-                raw_audit,
-                source_message_id=_ingress_field(routed_work_item.payload, "message_id"),
-                sender_phone=_ingress_field(routed_work_item.payload, "sender_phone"),
-                branch=resolved_branch_hint or raw_audit.branch_hint,
-                report_type=specialist_report_type if isinstance(specialist_report_type, str) else classification,
-                report_date=_string_or_none(routing_payload.get("report_date")),
-                duplicate_reason=rejection_reason,
-                duplicate_basis=policy_decision.duplicate_basis,
-                original_or_duplicate_of=_string_or_none(raw_audit.existing_metadata.get("raw_meta_path")),
-            )
-        else:
-            _write_rejected_record(
-                raw_audit,
-                rejection_reason=rejection_reason,
-                attempted_report_type=classification,
-                attempted_agent=None,
-                attempted_branch_hint=resolved_branch_hint,
-                exception_message=None,
-                policy_decision=policy_decision,
-            )
-        return _failure_result(
+        failure_result = _failure_result(
             routed_work_item,
             classification=classification,
-            status="duplicate" if policy_decision.reason == "duplicate_message" else "rejected",
+            status="rejected",
             route_reason=route_reason,
             warnings=[
                 _make_warning(
@@ -407,6 +412,58 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             ],
             policy_decision=policy_decision,
         )
+        if duplicate_override:
+            _annotate_duplicate_override_result(
+                failure_result,
+                raw_audit=raw_audit,
+                duplicate_policy_decision=ingress_policy_decision,
+            )
+        _update_raw_metadata(
+            raw_audit,
+            detected_report_type=classification,
+            routing_target=None,
+            processing_status="rejected",
+            branch_hint=resolved_branch_hint,
+            routing_metadata=_routing_metadata_from_payload(routing_payload),
+            policy_decision=policy_decision,
+            governance_outcome=_governance_outcome_payload(
+                status="rejected",
+                reasons=[_policy_reason_to_governance_reason(policy_decision.reason)],
+            ),
+            extra_metadata=_result_metadata_extension(failure_result),
+        )
+        if not duplicate_override:
+            _write_rejected_record(
+                raw_audit,
+                rejection_reason=rejection_reason,
+                attempted_report_type=classification,
+                attempted_agent=None,
+                attempted_branch_hint=resolved_branch_hint,
+                exception_message=None,
+                policy_decision=policy_decision,
+                extra_metadata={
+                    "accountability": _build_generic_accountability(
+                        payload={},
+                        validation_outcome=None,
+                        acceptance_outcome=None,
+                        governance_outcome={
+                            "status": "rejected",
+                            "reasons": [route_reason],
+                        },
+                        warnings=[
+                            _make_warning(
+                                code=warning_code,
+                                severity="warning",
+                                message=warning_message,
+                            )
+                        ],
+                        status="rejected",
+                        route_reason=route_reason,
+                        rejection_reason=rejection_reason,
+                    )
+                },
+            )
+        return failure_result
 
     strict_work_item = _with_candidate_mode(routed_work_item)
 
@@ -473,6 +530,12 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             specialist_status=specialist_status,
         )
         if fallback_result is not None:
+            if duplicate_override:
+                _annotate_duplicate_override_result(
+                    fallback_result,
+                    raw_audit=raw_audit,
+                    duplicate_policy_decision=ingress_policy_decision,
+                )
             return fallback_result
 
     if isinstance(specialist_report_type, str):
@@ -481,6 +544,13 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             candidate_result=result,
             specialist_report_type=specialist_report_type,
             raw_audit=raw_audit,
+            duplicate_override=duplicate_override,
+        )
+    if duplicate_override:
+        _annotate_duplicate_override_result(
+            result,
+            raw_audit=raw_audit,
+            duplicate_policy_decision=ingress_policy_decision,
         )
 
     governed_status = _result_status(result)
@@ -510,7 +580,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
         acceptance_outcome=_result_acceptance_outcome(result),
         downstream_references={"structured_records": _structured_output_paths_from_result(result)},
     )
-    if governed_status in {"rejected", "duplicate", "conflict_blocked", "invalid_input"}:
+    if not duplicate_override and governed_status in {"rejected", "duplicate", "conflict_blocked", "invalid_input"}:
         if governed_status == "duplicate":
             _archive_duplicate_for_disposal(
                 raw_audit,
@@ -551,6 +621,7 @@ def _process_specialist_fallback(
 ) -> AgentResult | None:
     """Attempt schema-bound fallback extraction after strict parsing fails."""
 
+    duplicate_override = _duplicate_override_active(policy_decision)
     fallback_result = process_fallback_extraction_work_item(routed_work_item)
     fallback_payload = fallback_result.payload if isinstance(fallback_result.payload, dict) else {}
     normalized_report = fallback_payload.get("normalized_report")
@@ -579,6 +650,18 @@ def _process_specialist_fallback(
             "parse_mode": "fallback",
         },
     )
+    fallback_warnings = _fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result)
+    fallback_accountability = _build_generic_accountability(
+        payload=normalized_report,
+        validation_outcome=validation_result.to_payload(),
+        acceptance_outcome=acceptance_result.to_payload(),
+        warnings=fallback_warnings,
+        status="rejected" if acceptance_result.decision == "reject" else None,
+    )
+    fallback_validation_payload = _validation_payload_with_accountability(
+        validation_result.to_payload(),
+        accountability=fallback_accountability,
+    )
 
     if acceptance_result.decision == "reject":
         if specialist_status != "invalid_input":
@@ -589,11 +672,13 @@ def _process_specialist_fallback(
             report_type=specialist_report_type,
             target_agent=target_agent,
         )
+        result_policy = policy_decision if duplicate_override else fallback_policy
         fallback_metadata = _fallback_metadata(
             fallback_payload=fallback_payload,
-            validation_result=validation_result,
+            validation_payload=fallback_validation_payload,
             acceptance_payload=acceptance_result.to_payload(),
             review_queue_path=None,
+            accountability=fallback_accountability,
         )
         _update_raw_metadata(
             raw_audit,
@@ -602,49 +687,56 @@ def _process_specialist_fallback(
             processing_status="rejected",
             branch_hint=resolved_branch_hint,
             routing_metadata=_routing_metadata_from_payload(routing_payload),
-            policy_decision=fallback_policy,
+            policy_decision=result_policy,
             governance_outcome=_governance_outcome_payload(status="rejected", reasons=["insufficient_structure"]),
             extra_metadata=fallback_metadata,
         )
-        _write_rejected_record(
-            raw_audit,
-            rejection_reason="fallback_validation_failed",
-            attempted_report_type=classification,
-            attempted_agent=target_agent,
-            attempted_branch_hint=resolved_branch_hint,
-            exception_message=None,
-            policy_decision=fallback_policy,
-            extra_metadata=fallback_metadata,
-        )
+        if not duplicate_override:
+            _write_rejected_record(
+                raw_audit,
+                rejection_reason="fallback_validation_failed",
+                attempted_report_type=classification,
+                attempted_agent=target_agent,
+                attempted_branch_hint=resolved_branch_hint,
+                exception_message=None,
+                policy_decision=fallback_policy,
+                extra_metadata=fallback_metadata,
+            )
         return _build_fallback_result(
             routed_work_item=routed_work_item,
             classification=classification,
             route_reason="fallback_validation_rejected",
             fallback_payload=fallback_payload,
-            validation_result=validation_result,
+            validation_payload=fallback_validation_payload,
             acceptance_payload=acceptance_result.to_payload(),
-            warnings=_fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result),
-            policy_decision=fallback_policy,
+            warnings=fallback_warnings,
+            policy_decision=result_policy,
             status="invalid_input",
             review_queue_path=None,
+            accountability=fallback_accountability,
         )
 
     review_queue_path: str | None = None
-    if acceptance_result.decision == "review":
+    if acceptance_result.decision == "review" and not duplicate_override:
         review_queue_path = write_review_item(
             routed_work_item,
             report_type=specialist_report_type,
             branch=_string_or_default(validation_result.normalized_payload.get("branch"), default="unknown"),
             report_date=_string_or_default(validation_result.normalized_payload.get("report_date"), default="unknown"),
             confidence=acceptance_result.confidence,
-            warnings=_fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result),
+            warnings=fallback_warnings,
             reason=acceptance_result.reason,
-            validation_outcome=validation_result.to_payload(),
+            validation_outcome=fallback_validation_payload,
             acceptance_outcome=acceptance_result.to_payload(),
             governance_outcome={
                 "status": "needs_review",
                 "export_allowed": False,
                 "reasons": [acceptance_result.reason],
+            },
+            candidate_payload={
+                **dict(normalized_report),
+                **({"accountability": fallback_accountability} if fallback_accountability is not None else {}),
+                **({"confidence": fallback_payload.get("confidence")} if isinstance(fallback_payload.get("confidence"), (int, float)) else {}),
             },
             parser_used="fallback_extraction_agent",
             parse_mode="fallback",
@@ -652,12 +744,13 @@ def _process_specialist_fallback(
 
     fallback_metadata = _fallback_metadata(
         fallback_payload=fallback_payload,
-        validation_result=validation_result,
+        validation_payload=fallback_validation_payload,
         acceptance_payload=acceptance_result.to_payload(),
         review_queue_path=review_queue_path,
+        accountability=fallback_accountability,
     )
     fallback_status = acceptance_result.governed_status(
-        warning_codes=[warning.get("code", "") for warning in _fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result)]
+        warning_codes=[warning.get("code", "") for warning in fallback_warnings]
     )
     _update_raw_metadata(
         raw_audit,
@@ -679,12 +772,13 @@ def _process_specialist_fallback(
         classification=classification,
         route_reason="fallback_review_required" if acceptance_result.decision == "review" else "fallback_accepted",
         fallback_payload=fallback_payload,
-        validation_result=validation_result,
+        validation_payload=fallback_validation_payload,
         acceptance_payload=acceptance_result.to_payload(),
-        warnings=_fallback_warnings(fallback_payload=fallback_payload, validation_result=validation_result),
+        warnings=fallback_warnings,
         policy_decision=policy_decision,
         status=fallback_status,
         review_queue_path=review_queue_path,
+        accountability=fallback_accountability,
     )
 
 
@@ -720,6 +814,7 @@ def _finalize_specialist_candidate(
     candidate_result: AgentResult,
     specialist_report_type: str,
     raw_audit: RawAuditRecord,
+    duplicate_override: bool = False,
 ) -> AgentResult:
     """Finalize one specialist result using strict or intelligence-only handling."""
 
@@ -730,12 +825,14 @@ def _finalize_specialist_candidate(
         return _finalize_intelligence_candidate(
             routed_work_item=routed_work_item,
             candidate_result=candidate_result,
+            duplicate_override=duplicate_override,
         )
     return _finalize_strict_candidate(
         routed_work_item=routed_work_item,
         candidate_result=candidate_result,
         specialist_report_type=specialist_report_type,
         raw_audit=raw_audit,
+        duplicate_override=duplicate_override,
     )
 
 
@@ -743,6 +840,7 @@ def _finalize_intelligence_candidate(
     *,
     routed_work_item: WorkItem,
     candidate_result: AgentResult,
+    duplicate_override: bool = False,
 ) -> AgentResult:
     """Persist intelligence candidates without shared strict validation or review output."""
 
@@ -756,6 +854,8 @@ def _finalize_intelligence_candidate(
             routed_work_item=routed_work_item,
         ),
     )
+    if duplicate_override:
+        return _finalize_duplicate_intelligence_result(finalized_result)
 
     write_result = _write_final_structured_result(finalized_result)
     if write_result is not None:
@@ -780,6 +880,7 @@ def _finalize_strict_candidate(
     candidate_result: AgentResult,
     specialist_report_type: str,
     raw_audit: RawAuditRecord,
+    duplicate_override: bool = False,
 ) -> AgentResult:
     """Apply shared validation, acceptance, governance, and final action centrally."""
 
@@ -810,27 +911,51 @@ def _finalize_strict_candidate(
             if isinstance(value, str) and value.strip():
                 finalized_payload[field_name] = value.strip()
 
+    candidate_metadata = dict(candidate_result.metadata) if isinstance(candidate_result.metadata, Mapping) else {}
+    _maybe_promote_attendance_auto_accept_candidate(
+        specialist_report_type=specialist_report_type,
+        finalized_payload=finalized_payload,
+        candidate_metadata=candidate_metadata,
+        acceptance_result=acceptance_result,
+    )
+    accountability = _extract_accountability(
+        payload=finalized_payload,
+        metadata=candidate_metadata,
+    )
+
     finalized_result = AgentResult(
         agent_name=candidate_result.agent_name,
         payload=finalized_payload,
         metadata=_strict_write_metadata(
-            candidate_result=candidate_result,
+            candidate_metadata=candidate_metadata,
             routed_work_item=routed_work_item,
             validation_result=validation_result,
             acceptance_result=acceptance_result,
+            accountability=accountability,
         ),
     )
+    if duplicate_override:
+        return _finalize_duplicate_strict_result(
+            finalized_result,
+            validation_result=validation_result,
+            acceptance_result=acceptance_result,
+        )
 
     write_result = _write_final_structured_result(finalized_result)
     if write_result is not None:
         _apply_final_governance(finalized_result, write_result)
+        _ensure_result_accountability(
+            result=finalized_result,
+            validation_outcome=validation_result.to_payload(),
+            acceptance_outcome=acceptance_result.to_payload(),
+        )
         review_queue_path = _maybe_write_strict_review_item(
             routed_work_item=routed_work_item,
             result=finalized_result,
             validation_result=validation_result,
             acceptance_result=acceptance_result,
             raw_audit=raw_audit,
-            candidate_payload=finalized_payload,
+            candidate_payload=finalized_result.payload if isinstance(finalized_result.payload, dict) else finalized_payload,
         )
         if review_queue_path is not None:
             finalized_result.metadata["review_queue_path"] = review_queue_path
@@ -847,49 +972,185 @@ def _finalize_strict_candidate(
         reasons=governance_reasons,
         export_allowed=False,
     )
+    _ensure_result_accountability(
+        result=finalized_result,
+        validation_outcome=validation_result.to_payload(),
+        acceptance_outcome=acceptance_result.to_payload(),
+    )
     review_queue_path = _maybe_write_strict_review_item(
         routed_work_item=routed_work_item,
         result=finalized_result,
         validation_result=validation_result,
         acceptance_result=acceptance_result,
         raw_audit=raw_audit,
-        candidate_payload=finalized_payload,
+        candidate_payload=finalized_result.payload if isinstance(finalized_result.payload, dict) else finalized_payload,
     )
     if review_queue_path is not None:
         finalized_result.metadata["review_queue_path"] = review_queue_path
     return finalized_result
 
 
+def _finalize_duplicate_intelligence_result(finalized_result: AgentResult) -> AgentResult:
+    """Finalize one duplicate intelligence candidate without writing any records."""
+
+    governance_status = _result_status(finalized_result)
+    governance_reasons = [] if governance_status in {"accepted", "accepted_with_warning"} else _governance_reasons_without_write(
+        finalized_result
+    )
+    finalized_result.payload["status"] = governance_status
+    finalized_result.payload["export_allowed"] = False
+    finalized_result.payload["governance"] = _governance_outcome_payload(
+        status=governance_status,
+        reasons=governance_reasons,
+        export_allowed=False,
+    )
+    return finalized_result
+
+
+def _finalize_duplicate_strict_result(
+    finalized_result: AgentResult,
+    *,
+    validation_result,
+    acceptance_result,
+) -> AgentResult:
+    """Finalize one duplicate strict candidate without writing or review enqueue."""
+
+    governance_status = acceptance_result.governed_status(
+        warning_codes=[warning.get("code", "") for warning in _result_warnings(finalized_result)]
+    )
+    governance_reasons = [acceptance_result.reason] if governance_status == "needs_review" else []
+    finalized_result.payload["status"] = governance_status
+    finalized_result.payload["export_allowed"] = False
+    finalized_result.payload["governance"] = _governance_outcome_payload(
+        status=governance_status,
+        reasons=governance_reasons,
+        export_allowed=False,
+    )
+    _ensure_result_accountability(
+        result=finalized_result,
+        validation_outcome=validation_result.to_payload(),
+        acceptance_outcome=acceptance_result.to_payload(),
+    )
+    return finalized_result
+
+
 def _strict_write_metadata(
     *,
-    candidate_result: AgentResult,
+    candidate_metadata: Mapping[str, Any] | None,
     routed_work_item: WorkItem,
     validation_result,
     acceptance_result,
+    accountability: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Return the central sidecar metadata for one strict candidate result."""
 
-    metadata = dict(candidate_result.metadata) if isinstance(candidate_result.metadata, dict) else {}
+    metadata = dict(candidate_metadata) if isinstance(candidate_metadata, Mapping) else {}
     existing_validation = metadata.get("validation")
     if isinstance(existing_validation, Mapping):
         metadata["candidate_validation"] = dict(existing_validation)
 
     routed_payload = routed_work_item.payload if isinstance(routed_work_item.payload, dict) else {}
-    validation_payload = validation_result.to_payload()
+    validation_payload = _validation_payload_with_accountability(
+        validation_result.to_payload(),
+        accountability=accountability,
+    )
     if isinstance(existing_validation, Mapping):
         candidate_details = existing_validation.get("details")
-        if isinstance(candidate_details, Mapping) and candidate_details.get("parser_failure") is True:
-            validation_payload["details"] = {
-                "parser_failure": True,
-                "candidate_final_status": candidate_details.get("final_status"),
-            }
+        if isinstance(candidate_details, Mapping):
+            merged_details = dict(_mapping(validation_payload.get("details")))
+            if candidate_details.get("parser_failure") is True:
+                merged_details["parser_failure"] = True
+                merged_details["candidate_final_status"] = candidate_details.get("final_status")
+            candidate_accountability = _mapping(candidate_details.get("accountability"))
+            if candidate_accountability:
+                merged_details["accountability"] = dict(candidate_accountability)
+            if merged_details:
+                validation_payload["details"] = merged_details
     metadata["validation"] = validation_payload
     metadata["acceptance"] = acceptance_result.to_payload()
     metadata["governance_context"] = {
         **_mapping(metadata.get("governance_context")),
         **_routing_governance_context(routed_payload),
     }
+    if accountability:
+        metadata["accountability"] = dict(accountability)
     return metadata
+
+
+def _maybe_promote_attendance_auto_accept_candidate(
+    *,
+    specialist_report_type: str,
+    finalized_payload: dict[str, Any],
+    candidate_metadata: dict[str, Any],
+    acceptance_result,
+) -> None:
+    """Promote one attendance candidate to accepted when review has no blocking issue."""
+
+    if specialist_report_type != "staff_attendance":
+        return
+    if getattr(acceptance_result, "decision", None) != "accept":
+        return
+    validation_error_code = _attendance_candidate_validation_error_code(
+        payload=finalized_payload,
+        metadata=candidate_metadata,
+    )
+    if is_blocking_accountability_rule(validation_error_code):
+        return
+
+    warning_codes = [
+        warning.get("code", "")
+        for warning in finalized_payload.get("warnings", [])
+        if isinstance(warning, Mapping) and isinstance(warning.get("code"), str)
+    ]
+    finalized_payload["status"] = acceptance_result.governed_status(warning_codes=warning_codes)
+    _clear_attendance_review_state(finalized_payload, candidate_metadata)
+
+
+def _attendance_candidate_validation_error_code(
+    *,
+    payload: Mapping[str, Any],
+    metadata: Mapping[str, Any] | None,
+) -> str | None:
+    """Return the most specific attendance validation error code on one candidate."""
+
+    direct_code = _string_or_none(payload.get("validation_error_code"))
+    if direct_code is not None:
+        return direct_code
+
+    accountability = _extract_accountability(payload=payload, metadata=metadata)
+    if isinstance(accountability, Mapping):
+        accountability_code = _string_or_none(accountability.get("validation_error_code")) or _string_or_none(
+            accountability.get("failing_rule")
+        )
+        if accountability_code is not None:
+            return accountability_code
+
+    validation = _mapping(_mapping(metadata).get("validation"))
+    details = _mapping(validation.get("details"))
+    return _string_or_none(details.get("validation_error_code"))
+
+
+def _clear_attendance_review_state(
+    payload: dict[str, Any],
+    metadata: dict[str, Any],
+) -> None:
+    """Remove non-blocking review-only attendance markers from finalized output."""
+
+    for field_name in ("accountability", "validation_error_code", "validation_error_message"):
+        payload.pop(field_name, None)
+
+    metadata.pop("accountability", None)
+    validation = _mapping(metadata.get("validation"))
+    if validation:
+        validation_payload = dict(validation)
+        details = dict(_mapping(validation_payload.get("details")))
+        for field_name in ("accountability", "validation_error_code", "validation_error_message"):
+            details.pop(field_name, None)
+        if details:
+            validation_payload["details"] = details
+        else:
+            validation_payload.pop("details", None)
+        metadata["validation"] = validation_payload
 
 
 def _intelligence_write_metadata(
@@ -963,6 +1224,7 @@ def _should_bypass_strict_validation(
 def _routing_governance_context(routed_payload: Mapping[str, Any]) -> dict[str, Any]:
     """Return governance context from the routed work item without losing raw links."""
 
+    routing = _mapping(routed_payload.get("routing"))
     governance_context = {
         "classified_report_family": _string_or_default(
             _mapping(routed_payload.get("classification")).get("report_family"),
@@ -971,8 +1233,12 @@ def _routing_governance_context(routed_payload: Mapping[str, Any]) -> dict[str, 
         "classified_report_type": _string_or_default(
             _mapping(routed_payload.get("classification")).get("report_type"),
             default="unknown",
-        )
+        ),
     }
+    for field_name in ("branch_hint", "report_date", "normalized_report_date", "raw_report_date"):
+        value = routing.get(field_name)
+        if isinstance(value, str) and value.strip():
+            governance_context[field_name] = value.strip()
     raw_record = routed_payload.get("raw_record")
     if isinstance(raw_record, Mapping):
         for field_name in ("raw_txt_path", "raw_meta_path", "raw_sha256"):
@@ -1017,6 +1283,24 @@ def _apply_final_governance(result: AgentResult, write_result: object) -> None:
     result.payload["status"] = governance.status
     result.payload["export_allowed"] = governance.export_allowed
     result.payload["governance"] = governance.to_payload()
+    if getattr(write_result, "persisted", True) is not True:
+        for field_name in (
+            "structured_output_path",
+            "output_path",
+            "output_paths",
+            "derived_output_paths",
+            "outputs",
+        ):
+            result.payload.pop(field_name, None)
+        return
+    written_path = getattr(write_result, "path", None)
+    if isinstance(written_path, Path):
+        output_path = _display_structured_path(written_path)
+        result.payload["structured_output_path"] = output_path
+        result.payload["output_path"] = output_path
+        result.payload["output_paths"] = [output_path]
+        result.payload["derived_output_paths"] = [output_path]
+        result.payload["outputs"] = [output_path]
 
 
 def _maybe_write_strict_review_item(
@@ -1041,6 +1325,15 @@ def _maybe_write_strict_review_item(
         acceptance_result=acceptance_result,
         candidate_payload=candidate_payload,
     )
+    accountability = _ensure_result_accountability(
+        result=result,
+        validation_outcome=validation_result.to_payload(),
+        acceptance_outcome=acceptance_result.to_payload(),
+    )
+    validation_payload = _validation_payload_with_accountability(
+        validation_result.to_payload(),
+        accountability=accountability,
+    )
     return write_review_item(
         routed_work_item,
         report_type=specialist_report_type_from_payload(payload),
@@ -1049,10 +1342,10 @@ def _maybe_write_strict_review_item(
         confidence=_result_confidence(result),
         warnings=_result_warnings(result),
         reason=review_reason,
-        validation_outcome=validation_result.to_payload(),
+        validation_outcome=validation_payload,
         acceptance_outcome=acceptance_result.to_payload(),
         governance_outcome=governance,
-        candidate_payload=dict(candidate_payload),
+        candidate_payload=dict(result.payload) if isinstance(result.payload, dict) else dict(candidate_payload),
         raw_paths={
             "raw_text_path": str(raw_audit.text_path),
             "raw_meta_path": str(raw_audit.meta_path),
@@ -1256,6 +1549,14 @@ def _process_mixed_work_item(
                     "metrics": {},
                     "validation": {},
                     "output_paths": [],
+                    "child_index": segment.segment_index + 1,
+                    "header_line": getattr(segment, "header_line", None),
+                    "response_report_type": _mixed_child_response_report_type(
+                        report_family=segment.detected_report_family,
+                        specialist_report_type=None,
+                        header_line=getattr(segment, "header_line", None),
+                    ),
+                    "response_status": "review",
                     "lineage": _build_mixed_child_lineage(
                         raw_audit=raw_audit,
                         segment_id=segment.segment_id,
@@ -1276,6 +1577,14 @@ def _process_mixed_work_item(
             specialist_report_type=route.specialist_type,
             child_count=len(split_result.segments),
         )
+        prechecked_summary = _maybe_prechecked_mixed_child_review_summary(
+            child_work_item=child_work_item,
+            segment=segment,
+            route=route,
+        )
+        if prechecked_summary is not None:
+            child_summaries.append(prechecked_summary)
+            continue
         strict_child_work_item = _with_candidate_mode(child_work_item)
         try:
             child_result = _dispatch_to_specialist(strict_child_work_item, target_agent=route.target_agent)
@@ -1306,6 +1615,17 @@ def _process_mixed_work_item(
                     "metrics": {},
                     "validation": {},
                     "output_paths": [],
+                    "child_index": segment.segment_index + 1,
+                    "header_line": getattr(segment, "header_line", None),
+                    "response_report_type": _mixed_child_response_report_type(
+                        report_family=segment.detected_report_family,
+                        specialist_report_type=route.specialist_type,
+                        header_line=getattr(segment, "header_line", None),
+                    ),
+                    "response_status": "review",
+                    "validation_error_code": "routing_failure",
+                    "validation_error_message": f"Mixed child routing failed for {segment.detected_report_family}: {exc}",
+                    "reason": f"Mixed child routing failed for {segment.detected_report_family}: {exc}",
                     "lineage": dict(child_work_item.payload.get("lineage", {})),
                     "segment_id": segment.segment_id,
                     "segment_range": {"start_line": segment.start_line, "end_line": segment.end_line},
@@ -1331,6 +1651,11 @@ def _process_mixed_work_item(
             for warning in child_warnings
             if _string_or_none(warning.get("severity")) == "error"
         ]
+        child_validation_error = _mixed_child_validation_error_fields(
+            payload=child_payload,
+            validation=_result_validation_outcome(child_result),
+            warnings=child_warnings,
+        )
         child_summaries.append(
             {
                 "agent_name": child_result.agent_name,
@@ -1346,6 +1671,19 @@ def _process_mixed_work_item(
                 "metrics": dict(_mapping(child_payload.get("metrics"))),
                 "validation": _result_validation_outcome(child_result),
                 "output_paths": child_output_paths,
+                "child_index": segment.segment_index + 1,
+                "header_line": getattr(segment, "header_line", None),
+                "response_report_type": _mixed_child_response_report_type(
+                    report_family=segment.detected_report_family,
+                    specialist_report_type=route.specialist_type,
+                    header_line=getattr(segment, "header_line", None),
+                ),
+                "response_status": _mixed_child_response_status(_result_status(child_result)),
+                "reason": _mixed_child_reason(
+                    result=child_result,
+                    specialist_report_type=route.specialist_type,
+                ),
+                **child_validation_error,
                 "lineage": dict(child_work_item.payload.get("lineage", {})),
                 "segment_id": segment.segment_id,
                 "segment_range": {"start_line": segment.start_line, "end_line": segment.end_line},
@@ -1378,18 +1716,29 @@ def _process_mixed_work_item(
     )
 
     accepted_parent_statuses = {"accepted", "accepted_with_warning"}
+    terminal_duplicate_parent_statuses = {"duplicate"}
     governance_reasons = [parent_reason] if parent_reason is not None else []
 
     _update_raw_metadata(
         raw_audit,
         detected_report_type="mixed",
         routing_target="fan_out",
-        processing_status="processed" if parent_status in accepted_parent_statuses else "rejected",
+        processing_status=(
+            "processed"
+            if parent_status in accepted_parent_statuses
+            else "duplicate"
+            if parent_status in terminal_duplicate_parent_statuses
+            else "rejected"
+        ),
         branch_hint=branch_hint,
         routing_metadata=_routing_metadata_from_payload(routing_payload),
         policy_decision=policy_decision,
         governance_outcome=_governance_outcome_payload(
-            status=parent_status if parent_status in accepted_parent_statuses else "needs_review",
+            status=(
+                parent_status
+                if parent_status in accepted_parent_statuses | terminal_duplicate_parent_statuses
+                else "needs_review"
+            ),
             reasons=governance_reasons,
             export_allowed=False,
         ),
@@ -1442,7 +1791,11 @@ def _process_mixed_work_item(
         },
         "items": [],
         "governance": _governance_outcome_payload(
-            status=parent_status if parent_status in accepted_parent_statuses else "needs_review",
+            status=(
+                parent_status
+                if parent_status in accepted_parent_statuses | terminal_duplicate_parent_statuses
+                else "needs_review"
+            ),
             reasons=governance_reasons,
             export_allowed=False,
         ),
@@ -1644,6 +1997,20 @@ def _write_rejected_record(
     }
     if extra_metadata:
         payload.update(extra_metadata)
+    if not isinstance(payload.get("accountability"), Mapping):
+        candidate_warnings = _mapping(payload.get("candidate_payload")).get("warnings")
+        payload["accountability"] = _build_generic_accountability(
+            payload=_mapping(payload.get("candidate_payload")),
+            validation_outcome=_mapping(payload.get("validation")),
+            acceptance_outcome=_mapping(payload.get("acceptance")),
+            governance_outcome={
+                "status": "rejected",
+                "reasons": [rejection_reason],
+            },
+            warnings=candidate_warnings if isinstance(candidate_warnings, list) else _provenance_warnings(payload if isinstance(payload, dict) else None),
+            status="rejected",
+            rejection_reason=rejection_reason,
+        )
     write_json_file(meta_path, payload)
     _write_outcome_provenance(
         outcome="rejected",
@@ -2239,6 +2606,23 @@ def _failure_result(
     target_agent = routing.get("target_agent")
     if not isinstance(target_agent, str):
         target_agent = route_for_family(classification).target_agent
+    branch_hint = _string_or_none(routing.get("branch_hint"))
+    resolved_report_date = _string_or_none(routing.get("normalized_report_date")) or _string_or_none(
+        routing.get("report_date")
+    )
+    raw_report_date = _string_or_none(routing.get("raw_report_date"))
+    accountability = _build_generic_accountability(
+        payload={},
+        validation_outcome=None,
+        acceptance_outcome=None,
+        governance_outcome={
+            "status": "duplicate" if status == "duplicate" else "rejected" if status in {"rejected", "invalid_input"} else status,
+            "reasons": [route_reason],
+        },
+        warnings=warnings,
+        status=status,
+        route_reason=route_reason,
+    )
 
     return AgentResult(
         agent_name=AGENT_NAME,
@@ -2247,11 +2631,31 @@ def _failure_result(
             "source_agent": AGENT_NAME,
             "source": source,
             "classification": {"report_type": classification},
+            "branch": branch_hint,
+            "report_date": resolved_report_date,
             "routing": _build_routing_payload(
                 classification=classification,
                 target_agent=target_agent,
                 status=status,
                 route_reason=route_reason,
+                branch_hint=branch_hint,
+                report_date=resolved_report_date,
+                normalized_report_date=resolved_report_date,
+                raw_report_date=raw_report_date,
+                confidence=routing.get("confidence") if isinstance(routing.get("confidence"), (int, float)) else None,
+                evidence=list(routing.get("evidence")) if isinstance(routing.get("evidence"), list) else None,
+                normalized_header_candidates=(
+                    list(routing.get("normalized_header_candidates"))
+                    if isinstance(routing.get("normalized_header_candidates"), list)
+                    else None
+                ),
+                review_reason=_string_or_none(routing.get("review_reason")),
+                specialist_report_type=_string_or_none(routing.get("specialist_report_type")),
+                split_strategy=_string_or_none(routing.get("split_strategy")),
+                child_report_types=list(routing.get("child_report_types"))
+                if isinstance(routing.get("child_report_types"), list)
+                else None,
+                child_count=routing.get("child_count") if isinstance(routing.get("child_count"), int) else None,
             ),
             "raw_message": safe_raw_message,
             "metadata": metadata,
@@ -2259,6 +2663,8 @@ def _failure_result(
             "metrics": {},
             "items": [],
             "warnings": warnings,
+            **_validation_error_fields(accountability),
+            **({"accountability": accountability} if accountability is not None else {}),
             "status": status,
             "export_allowed": False,
             "governance": {
@@ -2277,12 +2683,13 @@ def _build_fallback_result(
     classification: ClassificationLabel,
     route_reason: str,
     fallback_payload: dict[str, Any],
-    validation_result,
+    validation_payload: dict[str, Any],
     acceptance_payload: dict[str, Any],
     warnings: list[dict[str, str]],
     policy_decision: PolicyDecision,
     status: RouteStatus,
     review_queue_path: str | None,
+    accountability: Mapping[str, Any] | None,
 ) -> AgentResult:
     """Return an orchestrator result for fallback extraction outcomes."""
 
@@ -2294,17 +2701,39 @@ def _build_fallback_result(
         warnings=warnings,
         policy_decision=policy_decision,
     )
+    normalized_report = (
+        dict(fallback_payload.get("normalized_report", {}))
+        if isinstance(fallback_payload.get("normalized_report"), Mapping)
+        else {}
+    )
+    fallback_branch = _string_or_none(normalized_report.get("branch"))
+    fallback_report_date = _string_or_none(normalized_report.get("report_date"))
+    if fallback_branch is not None:
+        result.payload["branch"] = fallback_branch
+    if fallback_report_date is not None:
+        result.payload["report_date"] = fallback_report_date
+    fallback_routing = _mapping(result.payload.get("routing"))
+    if fallback_routing:
+        if fallback_branch is not None:
+            fallback_routing["branch_hint"] = fallback_branch
+        if fallback_report_date is not None:
+            fallback_routing["report_date"] = fallback_report_date
+            fallback_routing["normalized_report_date"] = fallback_report_date
+        result.payload["routing"] = dict(fallback_routing)
     result.payload["fallback"] = {
         "parse_mode": fallback_payload.get("parse_mode"),
         "confidence": fallback_payload.get("confidence"),
         "warnings": list(fallback_payload.get("warnings", [])) if isinstance(fallback_payload.get("warnings"), list) else [],
         "provenance": dict(fallback_payload.get("provenance", {})) if isinstance(fallback_payload.get("provenance"), Mapping) else {},
-        "normalized_report": dict(validation_result.normalized_payload),
-        "validation": validation_result.to_payload(),
+        "normalized_report": normalized_report,
+        "validation": validation_payload,
         "acceptance": acceptance_payload,
         "review_queue_path": review_queue_path,
     }
     result.payload["confidence"] = fallback_payload.get("confidence", 0.0)
+    if accountability is not None:
+        result.payload["accountability"] = dict(accountability)
+        result.payload.update(_validation_error_fields(accountability))
     return result
 
 
@@ -2361,9 +2790,10 @@ def _fallback_warnings(*, fallback_payload: dict[str, Any], validation_result) -
 def _fallback_metadata(
     *,
     fallback_payload: dict[str, Any],
-    validation_result,
+    validation_payload: dict[str, Any],
     acceptance_payload: dict[str, Any],
     review_queue_path: str | None,
+    accountability: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Return fallback metadata for raw and rejected audit records."""
 
@@ -2371,10 +2801,11 @@ def _fallback_metadata(
         "fallback_parse_mode": fallback_payload.get("parse_mode"),
         "fallback_confidence": fallback_payload.get("confidence"),
         "fallback_status": fallback_payload.get("status"),
-        "fallback_validation": validation_result.to_payload(),
+        "fallback_validation": validation_payload,
         "fallback_acceptance": acceptance_payload,
         "fallback_review_queue_path": review_queue_path,
         "fallback_provenance": dict(fallback_payload.get("provenance", {})) if isinstance(fallback_payload.get("provenance"), Mapping) else {},
+        **({"accountability": dict(accountability)} if accountability is not None else {}),
     }
 
 
@@ -2404,6 +2835,299 @@ def _result_confidence(result: AgentResult) -> float | None:
     if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
         return float(confidence)
     return None
+
+
+def _validation_payload_with_accountability(
+    validation_outcome: Mapping[str, Any] | None,
+    *,
+    accountability: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a validation payload enriched with accountability details."""
+
+    payload = dict(validation_outcome) if isinstance(validation_outcome, Mapping) else {"status": "not_run"}
+    details = dict(_mapping(payload.get("details")))
+    if accountability is not None:
+        details["accountability"] = dict(accountability)
+        details.update(_validation_error_fields(accountability))
+    if details:
+        payload["details"] = details
+    return payload
+
+
+def _extract_accountability(
+    *,
+    payload: Mapping[str, Any] | None,
+    metadata: Mapping[str, Any] | None = None,
+    validation_outcome: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return an existing accountability payload when one is already present."""
+
+    if isinstance(payload, Mapping):
+        accountability = payload.get("accountability")
+        if isinstance(accountability, Mapping):
+            return dict(accountability)
+
+    if isinstance(validation_outcome, Mapping):
+        validation_details = _mapping(validation_outcome.get("details"))
+        accountability = validation_details.get("accountability")
+        if isinstance(accountability, Mapping):
+            return dict(accountability)
+
+    if isinstance(metadata, Mapping):
+        accountability = metadata.get("accountability")
+        if isinstance(accountability, Mapping):
+            return dict(accountability)
+        validation = _mapping(metadata.get("validation"))
+        validation_details = _mapping(validation.get("details"))
+        accountability = validation_details.get("accountability")
+        if isinstance(accountability, Mapping):
+            return dict(accountability)
+
+    return None
+
+
+def _ensure_result_accountability(
+    *,
+    result: AgentResult,
+    validation_outcome: Mapping[str, Any] | None,
+    acceptance_outcome: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Attach accountability to a finalized result when review or rejection requires it."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    metadata = dict(result.metadata) if isinstance(result.metadata, dict) else {}
+    accountability = _extract_accountability(
+        payload=payload,
+        metadata=metadata,
+        validation_outcome=validation_outcome,
+    )
+    if accountability is None:
+        accountability = _build_generic_accountability(
+            payload=payload,
+            validation_outcome=validation_outcome,
+            acceptance_outcome=acceptance_outcome,
+            governance_outcome=_result_governance(result),
+            warnings=_result_warnings(result),
+            status=_result_status(result),
+        )
+    if accountability is None:
+        return None
+
+    payload["accountability"] = dict(accountability)
+    payload.update(_validation_error_fields(accountability))
+    base_validation = _mapping(metadata.get("validation")) or _mapping(validation_outcome)
+    metadata["validation"] = _validation_payload_with_accountability(
+        base_validation,
+        accountability=accountability,
+    )
+    metadata["accountability"] = dict(accountability)
+    result.metadata = metadata
+    return dict(accountability)
+
+
+def _build_generic_accountability(
+    *,
+    payload: Mapping[str, Any] | None,
+    validation_outcome: Mapping[str, Any] | None,
+    acceptance_outcome: Mapping[str, Any] | None,
+    governance_outcome: Mapping[str, Any] | None = None,
+    warnings: list[dict[str, str]] | None = None,
+    status: str | None = None,
+    route_reason: str | None = None,
+    rejection_reason: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a generic accountability block when a result is reviewed or rejected upstream."""
+
+    validation = _mapping(validation_outcome)
+    acceptance = _mapping(acceptance_outcome)
+    governance = _mapping(governance_outcome)
+    governance_reasons = [
+        reason
+        for reason in governance.get("reasons", [])
+        if isinstance(reason, str) and reason.strip()
+    ] if isinstance(governance.get("reasons"), list) else []
+    current_status = _string_or_none(status) or _string_or_none(governance.get("status"))
+    decision = _string_or_none(acceptance.get("decision"))
+
+    if (
+        current_status not in {"needs_review", "conflict_blocked", "rejected", "invalid_input", "duplicate"}
+        and decision not in {"review", "reject"}
+        and validation.get("accepted") is not False
+        and rejection_reason is None
+        and route_reason is None
+        and not governance_reasons
+    ):
+        return None
+
+    failing_layer = "orchestrator_routing"
+    failing_rule = route_reason or rejection_reason or current_status or "review_required"
+    reason_detail = _first_warning_message(warnings)
+
+    if current_status == "conflict_blocked" or "conflicting_record_same_scope" in governance_reasons:
+        failing_layer = "orchestrator_governance"
+        failing_rule = "conflicting_record_same_scope"
+        reason_detail = "A record already exists for this branch and report date."
+    else:
+        rejections = validation.get("rejections")
+        if validation.get("accepted") is False and isinstance(rejections, list) and rejections:
+            first_rejection = next((item for item in rejections if isinstance(item, Mapping)), None)
+            if first_rejection is not None:
+                failing_layer = "orchestrator_validation"
+                failing_rule = _string_or_none(first_rejection.get("code")) or "validation_failed"
+                reason_detail = _string_or_none(first_rejection.get("message")) or "Validation rejected the normalized report."
+        elif decision in {"review", "reject"}:
+            failing_layer = "orchestrator_acceptance"
+            failing_rule = _string_or_none(acceptance.get("reason")) or failing_rule
+            if reason_detail is None:
+                reason_detail = (
+                    f"Acceptance policy returned `{failing_rule}`."
+                    if failing_rule
+                    else "Acceptance policy required manual review."
+                )
+
+    if failing_rule == "branch_unresolved":
+        reason_detail = "Branch could not be resolved from the raw report before specialist routing."
+    elif failing_rule == "date_unresolved":
+        reason_detail = "Report date could not be resolved from the raw report before specialist routing."
+
+    if reason_detail is None:
+        if governance_reasons:
+            reason_detail = f"Governance returned {governance_reasons[0]}."
+        elif current_status is not None:
+            reason_detail = f"Upstream processing ended with status `{current_status}`."
+        else:
+            reason_detail = "Manual review is required."
+
+    return {
+        "failing_layer": failing_layer,
+        "failing_rule": failing_rule,
+        "validation_error_code": failing_rule,
+        "validation_error_message": reason_detail,
+        "normalized_values_attempted": _generic_normalization_attempts(validation),
+        "calculated_totals": _generic_calculated_totals(payload),
+        "declared_totals": _generic_declared_totals(payload),
+        "final_confidence_score": _generic_confidence(payload, acceptance),
+        "reason_detail": reason_detail,
+        "recommended_correction": _generic_recommended_correction(failing_rule, failing_layer),
+    }
+
+
+def _generic_normalization_attempts(validation_outcome: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return normalization attempts from a shared validation payload when present."""
+
+    attempts: list[dict[str, Any]] = []
+    normalization = validation_outcome.get("normalization")
+    if not isinstance(normalization, Mapping):
+        return attempts
+    for field_name, field_payload in normalization.items():
+        if not isinstance(field_payload, Mapping):
+            continue
+        raw_value = field_payload.get("raw") if "raw" in field_payload else field_payload.get("raw_value")
+        normalized_value = (
+            field_payload.get("normalized")
+            if "normalized" in field_payload
+            else field_payload.get("normalized_value")
+        )
+        if raw_value is None and normalized_value is None:
+            continue
+        attempts.append(
+            {
+                "field": str(field_name),
+                "layer": "orchestrator_validation",
+                "raw_value": raw_value,
+                "normalized_value": normalized_value,
+            }
+        )
+    return attempts
+
+
+def _generic_calculated_totals(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return total-like numeric metrics when the specialist payload exposes them."""
+
+    metrics = _mapping(_mapping(payload).get("metrics"))
+    totals: dict[str, Any] = {}
+    for field_name, value in metrics.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if field_name.startswith("total_") or field_name.endswith("_count") or field_name.endswith("_qty") or field_name.endswith("_amount"):
+                totals[str(field_name)] = value
+    return totals
+
+
+def _generic_declared_totals(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return declared totals when a specialist payload already exposes them."""
+
+    declared = _mapping(_mapping(payload).get("declared_totals"))
+    return dict(declared) if declared else {}
+
+
+def _generic_confidence(payload: Mapping[str, Any] | None, acceptance_outcome: Mapping[str, Any]) -> float:
+    """Return the best available confidence figure for accountability output."""
+
+    payload_confidence = _mapping(payload).get("confidence")
+    if isinstance(payload_confidence, (int, float)) and not isinstance(payload_confidence, bool):
+        return float(payload_confidence)
+    acceptance_confidence = acceptance_outcome.get("confidence")
+    if isinstance(acceptance_confidence, (int, float)) and not isinstance(acceptance_confidence, bool):
+        return float(acceptance_confidence)
+    return 0.0
+
+
+def _generic_recommended_correction(failing_rule: str | None, failing_layer: str) -> str:
+    """Return a pragmatic correction hint for generic orchestrator accountability."""
+
+    if failing_rule == "conflicting_record_same_scope":
+        return "Resolve the existing branch/date record conflict before resubmitting or approving the replacement."
+    if failing_rule == "branch_unresolved":
+        return "Add a recognizable branch header or branch line before resubmitting the report."
+    if failing_rule == "date_unresolved":
+        return "Add a recognizable report date before resubmitting the report."
+    if failing_rule in {"missing_raw_text", "invalid_raw_message"}:
+        return "Send one non-empty report message with clear branch, date, and body fields."
+    if failing_rule in {"mixed_report", "mixed_report_rejected", "mixed_report_split_not_safe"}:
+        return "Send each report type in its own WhatsApp message."
+    if failing_rule in {"parser_failure", "routing_failure", "fallback_validation_failed"}:
+        return "Resend the report in plain text with clearer field structure."
+    if failing_layer == "orchestrator_validation":
+        return "Correct the rejected fields named in validation and resend the report."
+    if failing_layer == "orchestrator_acceptance":
+        return "Correct the flagged fields so the report can clear manual review."
+    return "Correct the flagged fields and resend the report."
+
+
+def _first_warning_message(warnings: list[dict[str, str]] | None) -> str | None:
+    """Return the first warning message when present."""
+
+    if not isinstance(warnings, list):
+        return None
+    for warning in warnings:
+        if not isinstance(warning, Mapping):
+            continue
+        message = _string_or_none(warning.get("message"))
+        if message is not None:
+            return message
+    return None
+
+
+def _validation_error_fields(accountability: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return exact validation error fields from one accountability payload."""
+
+    if not isinstance(accountability, Mapping):
+        return {}
+
+    code = (
+        _string_or_none(accountability.get("validation_error_code"))
+        or _string_or_none(accountability.get("failing_rule"))
+    )
+    message = (
+        _string_or_none(accountability.get("validation_error_message"))
+        or _string_or_none(accountability.get("reason_detail"))
+    )
+    payload: dict[str, Any] = {}
+    if code is not None:
+        payload["validation_error_code"] = code
+    if message is not None:
+        payload["validation_error_message"] = message
+    return payload
 
 
 def _result_governance(result: AgentResult) -> dict[str, Any]:
@@ -2436,20 +3160,117 @@ def _result_acceptance_outcome(result: AgentResult) -> dict[str, Any]:
     return {"status": _result_status(result)}
 
 
+def _result_accountability(result: AgentResult) -> dict[str, Any] | None:
+    """Return one accountability payload for reviewed or rejected results."""
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    validation = _result_validation_outcome(result)
+    accountability = _extract_accountability(
+        payload=payload,
+        metadata=metadata,
+        validation_outcome=validation,
+    )
+    if accountability is not None:
+        return accountability
+    return _build_generic_accountability(
+        payload=payload,
+        validation_outcome=validation,
+        acceptance_outcome=_result_acceptance_outcome(result),
+        governance_outcome=_result_governance(result),
+        warnings=_result_warnings(result),
+        status=_result_status(result),
+    )
+
+
 def _result_metadata_extension(result: AgentResult) -> dict[str, Any] | None:
     """Return extra raw-metadata fields derived from the finalized result."""
 
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
     payload = result.payload if isinstance(result.payload, dict) else {}
+    accountability = _result_accountability(result)
     extra: dict[str, Any] = {
         "validation": _result_validation_outcome(result),
         "acceptance": _result_acceptance_outcome(result),
         "candidate_payload": dict(payload),
+        **({"accountability": dict(accountability)} if accountability is not None else {}),
     }
+    performance_alerts = payload.get("performance_alerts")
+    if isinstance(performance_alerts, list):
+        extra["performance_alerts"] = [
+            dict(alert)
+            for alert in performance_alerts
+            if isinstance(alert, Mapping)
+        ]
+    for field_name in ("alert_type", "alert_level", "alert_message", "alert_category"):
+        value = _string_or_none(payload.get(field_name))
+        if value is not None:
+            extra[field_name] = value
     review_queue_path = metadata.get("review_queue_path")
     if isinstance(review_queue_path, str) and review_queue_path.strip():
         extra["review_queue_path"] = review_queue_path.strip()
+    duplicate_handling = payload.get("duplicate_handling")
+    if isinstance(duplicate_handling, Mapping):
+        extra["duplicate_handling"] = dict(duplicate_handling)
     return extra
+
+
+def _duplicate_override_active(policy_decision: PolicyDecision | None) -> bool:
+    """Return whether duplicate intake should keep processing in no-write mode."""
+
+    return (
+        policy_decision is not None
+        and policy_decision.action == "reject"
+        and policy_decision.reason == "duplicate_message"
+    )
+
+
+def _annotate_duplicate_override_result(
+    result: AgentResult,
+    *,
+    raw_audit: RawAuditRecord,
+    duplicate_policy_decision: PolicyDecision,
+) -> None:
+    """Attach duplicate no-write audit context to one live result."""
+
+    duplicate_handling = _duplicate_handling_payload(
+        existing_metadata=raw_audit.existing_metadata,
+        current_status=_result_status(result),
+        current_governance=_result_governance(result),
+        duplicate_basis=duplicate_policy_decision.duplicate_basis,
+        duplicate_reason=duplicate_policy_decision.reason,
+    )
+    if isinstance(result.payload, dict):
+        result.payload["duplicate_handling"] = duplicate_handling
+    if isinstance(result.metadata, dict):
+        result.metadata["duplicate_handling"] = dict(duplicate_handling)
+
+
+def _duplicate_handling_payload(
+    *,
+    existing_metadata: Mapping[str, Any],
+    current_status: str,
+    current_governance: Mapping[str, Any],
+    duplicate_basis: str | None,
+    duplicate_reason: str,
+) -> dict[str, Any]:
+    """Return the stable duplicate no-write payload projected into results."""
+
+    previous_status = _string_or_none(existing_metadata.get("governance_status")) or _string_or_none(
+        existing_metadata.get("processing_status")
+    )
+    previous_reasons = existing_metadata.get("governance_reasons")
+    current_reasons = current_governance.get("reasons")
+    return {
+        "duplicate": True,
+        "write_suppressed": True,
+        "reason": duplicate_reason,
+        "duplicate_basis": duplicate_basis,
+        "previous_governance_status": previous_status,
+        "previous_governance_reasons": list(previous_reasons) if isinstance(previous_reasons, list) else [],
+        "current_governance_status": current_status,
+        "current_governance_reasons": list(current_reasons) if isinstance(current_reasons, list) else [],
+    }
 
 
 def _governance_outcome_payload(
@@ -2524,6 +3345,8 @@ def _can_safely_split_mixed_report(*, mixed_detection, split_result) -> bool:
         return False
     if any(not segment.raw_text.strip() for segment in split_result.segments):
         return False
+    if not _mixed_segments_have_required_scope(split_result.segments):
+        return False
 
     if _has_intelligence_segment(split_result.segments):
         transactional_segments = [
@@ -2539,6 +3362,40 @@ def _can_safely_split_mixed_report(*, mixed_detection, split_result) -> bool:
     if split_result.split_confidence < MIXED_SPLIT_CONFIDENCE_MIN:
         return False
     return all(segment.split_confidence >= MIXED_SPLIT_CONFIDENCE_MIN for segment in split_result.segments)
+
+
+def _mixed_segments_have_required_scope(segments: Sequence[object]) -> bool:
+    """Return whether each split child has an approved title and resolvable scope."""
+
+    return bool(segments) and all(_mixed_segment_has_required_scope(segment) for segment in segments)
+
+
+def _mixed_segment_has_required_scope(segment: object) -> bool:
+    """Return whether one split segment can stand alone with inherited scope."""
+
+    if not _mixed_segment_has_approved_title(segment):
+        return False
+    raw_text = getattr(segment, "raw_text", None)
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return False
+    header_result = normalize_headers(raw_text, max_lines=12)
+    branch_resolution = resolve_branch(header_result)
+    date_resolution = resolve_report_date(header_result)
+    return branch_resolution.branch_hint is not None and date_resolution.iso_date is not None
+
+
+def _mixed_segment_has_approved_title(segment: object) -> bool:
+    """Return whether one split segment starts with an approved report title."""
+
+    report_family = getattr(segment, "detected_report_family", None)
+    header_line = getattr(segment, "header_line", None)
+    if not isinstance(report_family, str) or not isinstance(header_line, str):
+        return False
+    approved_titles = APPROVED_MIXED_SPLIT_TITLES.get(report_family)
+    if not approved_titles:
+        return False
+    normalized_header = _normalize_mixed_child_text(header_line)
+    return normalized_header in {_normalize_mixed_child_text(title) for title in approved_titles}
 
 
 def _result_warnings(result: AgentResult) -> list[dict[str, Any]]:
@@ -2796,6 +3653,9 @@ def _structured_output_paths_from_result(result: AgentResult) -> list[str]:
     """Return canonical structured output paths for one child result."""
 
     payload = result.payload if isinstance(result.payload, dict) else {}
+    duplicate_handling = _mapping(payload.get("duplicate_handling"))
+    if duplicate_handling.get("write_suppressed") is True:
+        return []
     if payload.get("status") in {"invalid_input", "rejected", "duplicate", "conflict_blocked"}:
         return []
 
@@ -2912,6 +3772,223 @@ def _display_structured_path(path: Path) -> str:
     return str(path)
 
 
+def _maybe_prechecked_mixed_child_review_summary(
+    *,
+    child_work_item: WorkItem,
+    segment,
+    route,
+) -> dict[str, Any] | None:
+    """Return a review summary when a mixed child is visibly truncated before dispatch."""
+
+    review_reason = _prechecked_mixed_child_review_reason(segment=segment, specialist_report_type=route.specialist_type)
+    if review_reason is None:
+        return None
+
+    code, message = review_reason
+    warning_payload = _make_warning(code=code, severity="warning", message=message)
+    routing = _mapping(child_work_item.payload.get("routing"))
+    report_date = (
+        _string_or_none(routing.get("report_date"))
+        or _string_or_none(routing.get("normalized_report_date"))
+        or _string_or_none(routing.get("raw_report_date"))
+    )
+    branch = _string_or_none(routing.get("branch_hint"))
+    payload = {
+        "signal_type": route.specialist_type,
+        "branch": branch,
+        "report_date": report_date,
+        "status": "needs_review",
+        "warnings": [warning_payload],
+        "validation_error_code": code,
+        "validation_error_message": message,
+    }
+    validation = {
+        "stage": AGENT_NAME,
+        "status": "review",
+        "accepted": False,
+        "reason_codes": [code],
+        "rejections": [
+            {
+                "reason_code": code,
+                "reason_detail": message,
+            }
+        ],
+        "details": {
+            "validation_error_code": code,
+            "validation_error_message": message,
+        },
+    }
+    return {
+        "agent_name": route.target_agent,
+        "report_type": segment.detected_report_family,
+        "report_family": segment.detected_report_family,
+        "report_family_label": getattr(segment, "report_family_label", segment.detected_report_family),
+        "branch": branch,
+        "report_date": report_date,
+        "status": "needs_review",
+        "blocks_transactional_processing": getattr(segment, "blocks_transactional_processing", True),
+        "warnings": [warning_payload],
+        "errors": [],
+        "metrics": {},
+        "validation": validation,
+        "output_paths": [],
+        "child_index": segment.segment_index + 1,
+        "header_line": getattr(segment, "header_line", None),
+        "response_report_type": _mixed_child_response_report_type(
+            report_family=segment.detected_report_family,
+            specialist_report_type=route.specialist_type,
+            header_line=getattr(segment, "header_line", None),
+        ),
+        "response_status": "review",
+        "reason": message,
+        "validation_error_code": code,
+        "validation_error_message": message,
+        "lineage": dict(child_work_item.payload.get("lineage", {})),
+        "segment_id": segment.segment_id,
+        "segment_range": {"start_line": segment.start_line, "end_line": segment.end_line},
+        "split_confidence": segment.split_confidence,
+        "payload": payload,
+    }
+
+
+def _prechecked_mixed_child_review_reason(
+    *,
+    segment,
+    specialist_report_type: str | None,
+) -> tuple[str, str] | None:
+    """Return an explicit review code/message for one obviously incomplete child."""
+
+    if specialist_report_type != "supervisor_control":
+        return None
+    truncated_snippet = _truncated_supervisor_field_snippet(getattr(segment, "raw_text", ""))
+    if truncated_snippet is None:
+        return None
+    return (
+        "child_report_incomplete_or_truncated",
+        f'incomplete after "{truncated_snippet}"',
+    )
+
+
+def _truncated_supervisor_field_snippet(raw_text: object) -> str | None:
+    """Return the trailing truncated supervisor field snippet when one is obvious."""
+
+    if not isinstance(raw_text, str):
+        return None
+    lines = [line.strip() for line in raw_text.splitlines() if isinstance(line, str) and line.strip()]
+    for line in reversed(lines):
+        normalized_line = _normalize_mixed_child_text(line)
+        if normalized_line in {"supervisor control report", "supervisor control summary"}:
+            continue
+        if not (line.endswith("...") or line.endswith("\u2026")):
+            return None
+        prefix = _normalize_mixed_child_text(line.rstrip(".\u2026").rstrip(":"))
+        if not prefix:
+            return None
+        if any(alias.startswith(prefix) and alias != prefix for alias in _TRUNCATED_SUPERVISOR_FIELD_ALIASES):
+            return line.rstrip(".\u2026").rstrip() + "\u2026"
+        return None
+    return None
+
+
+def _normalize_mixed_child_text(value: object) -> str:
+    """Return a loose ASCII-safe normalization for mixed-child display keys."""
+
+    if not isinstance(value, str):
+        return ""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+
+def _mixed_child_response_report_type(
+    *,
+    report_family: str | None,
+    specialist_report_type: str | None,
+    header_line: str | None,
+) -> str:
+    """Return the response-facing report type for one mixed child summary."""
+
+    normalized_header = _normalize_mixed_child_text(header_line)
+    if report_family == "sales_income" or specialist_report_type == "sales":
+        return "day_end_sales"
+    if report_family == "supervisor_control" or specialist_report_type == "supervisor_control":
+        if "summary" in normalized_header:
+            return "supervisor_control_summary"
+        return "supervisor_control"
+    return report_family or specialist_report_type or "unknown"
+
+
+def _mixed_child_response_status(status: str | None) -> str | None:
+    """Return the response-facing child status token."""
+
+    if status == "needs_review":
+        return "review"
+    return status
+
+
+def _mixed_child_reason(
+    *,
+    result: AgentResult,
+    specialist_report_type: str | None,
+) -> str | None:
+    """Return a short accountability reason for one mixed child result."""
+
+    status = _result_status(result)
+    validation = _result_validation_outcome(result)
+    if specialist_report_type == "sales" and status in {"accepted", "accepted_with_warning"} and validation.get("accepted") is True:
+        return "totals_reconciled"
+
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    validation_error = _mixed_child_validation_error_fields(
+        payload=payload,
+        validation=validation,
+        warnings=_result_warnings(result),
+    )
+    return _string_or_none(validation_error.get("validation_error_message")) or _string_or_none(validation_error.get("validation_error_code"))
+
+
+def _mixed_child_validation_error_fields(
+    *,
+    payload: Mapping[str, Any],
+    validation: Mapping[str, Any],
+    warnings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the most specific validation error fields for one mixed child summary."""
+
+    code = _string_or_none(payload.get("validation_error_code"))
+    message = _string_or_none(payload.get("validation_error_message"))
+    details = _mapping(validation.get("details"))
+    if code is None:
+        code = _string_or_none(details.get("validation_error_code"))
+    if message is None:
+        message = _string_or_none(details.get("validation_error_message"))
+
+    rejections = validation.get("rejections")
+    if isinstance(rejections, list):
+        first_rejection = next((rejection for rejection in rejections if isinstance(rejection, Mapping)), None)
+        if first_rejection is not None:
+            if code is None:
+                code = _string_or_none(first_rejection.get("reason_code")) or _string_or_none(first_rejection.get("code"))
+            if message is None:
+                message = _string_or_none(first_rejection.get("reason_detail")) or _string_or_none(first_rejection.get("message"))
+
+    if code is None or message is None:
+        for warning in warnings:
+            warning_code = _string_or_none(warning.get("code"))
+            if warning_code not in MIXED_CHILD_REVIEW_WARNING_CODES and _string_or_none(warning.get("severity")) != "error":
+                continue
+            if code is None:
+                code = warning_code
+            if message is None:
+                message = _string_or_none(warning.get("message"))
+            break
+
+    validation_error: dict[str, Any] = {}
+    if code is not None:
+        validation_error["validation_error_code"] = code
+    if message is not None:
+        validation_error["validation_error_message"] = message
+    return validation_error
+
+
 def _summary_blocks_transactional_processing(summary: Mapping[str, Any]) -> bool:
     """Return whether one mixed child summary should block transactional acceptance."""
 
@@ -2930,6 +4007,68 @@ def _child_summary_has_warnings(summary: Mapping[str, Any]) -> bool:
     payload = _mapping(summary.get("payload"))
     warnings = payload.get("warnings")
     return isinstance(warnings, list) and any(isinstance(warning, Mapping) for warning in warnings)
+
+
+def _is_sales_supervisor_mixed_pair(child_summaries: Sequence[Mapping[str, Any]]) -> bool:
+    """Return whether the mixed child set is exactly one sales child and one supervisor child."""
+
+    if len(child_summaries) != 2:
+        return False
+    detected_families = {
+        _string_or_none(summary.get("report_family")) or _string_or_none(summary.get("report_type"))
+        for summary in child_summaries
+        if isinstance(summary, Mapping)
+    }
+    return detected_families == {"sales_income", "supervisor_control"}
+
+
+def _sales_supervisor_mixed_parent_decision(
+    child_summaries: Sequence[Mapping[str, Any]],
+    *,
+    success_statuses: set[str],
+    warning_statuses: set[str],
+) -> tuple[str, str | None] | None:
+    """Return the mixed parent decision for the exact sales + supervisor pair."""
+
+    if not _is_sales_supervisor_mixed_pair(child_summaries):
+        return None
+
+    sales_summary: Mapping[str, Any] | None = None
+    supervisor_summary: Mapping[str, Any] | None = None
+    for summary in child_summaries:
+        report_family = _string_or_none(summary.get("report_family")) or _string_or_none(
+            summary.get("report_type")
+        )
+        if report_family == "sales_income":
+            sales_summary = summary
+            continue
+        if report_family == "supervisor_control":
+            supervisor_summary = summary
+
+    if sales_summary is None or supervisor_summary is None:
+        return "needs_review", "mixed_child_requires_review"
+
+    sales_status = _string_or_none(sales_summary.get("status"))
+    supervisor_status = _string_or_none(supervisor_summary.get("status"))
+    if sales_status is None or supervisor_status is None:
+        return "needs_review", "mixed_child_requires_review"
+
+    sales_succeeded = sales_status in success_statuses
+    supervisor_succeeded = supervisor_status in success_statuses
+    if not sales_succeeded:
+        return "needs_review", "mixed_child_requires_review"
+    if not supervisor_succeeded:
+        return "accepted_with_warning", None
+
+    any_child_has_warning = (
+        sales_status in warning_statuses
+        or supervisor_status in warning_statuses
+        or _child_summary_has_warnings(sales_summary)
+        or _child_summary_has_warnings(supervisor_summary)
+    )
+    if any_child_has_warning:
+        return "accepted_with_warning", None
+    return "accepted", None
 
 
 def _mixed_parent_decision(
@@ -2951,6 +4090,9 @@ def _mixed_parent_decision(
     ]
     if not child_statuses or len(child_statuses) != len(child_summaries):
         return "needs_review", "mixed_child_requires_review"
+    duplicate_reason = _mixed_parent_duplicate_reason(child_summaries)
+    if duplicate_reason is not None:
+        return "duplicate", duplicate_reason
 
     success_statuses = {"accepted", "accepted_with_warning"}
     warning_statuses = {"accepted_with_warning"}
@@ -2973,22 +4115,70 @@ def _mixed_parent_decision(
     ]
     if len(transactional_statuses) != len(transactional_summaries):
         return "needs_review", "mixed_child_requires_review"
-    if any(status not in success_statuses for status in transactional_statuses):
+
+    intelligence_statuses = [
+        summary.get("status")
+        for summary in intelligence_summaries
+        if isinstance(summary.get("status"), str)
+    ]
+    if len(intelligence_statuses) != len(intelligence_summaries):
         return "needs_review", "mixed_child_requires_review"
 
-    intelligence_requires_attention = any(
-        (
-            summary.get("status") not in success_statuses
-            or _child_summary_has_warnings(summary)
-        )
-        for summary in intelligence_summaries
+    sales_supervisor_decision = _sales_supervisor_mixed_parent_decision(
+        child_summaries,
+        success_statuses=success_statuses,
+        warning_statuses=warning_statuses,
     )
+    if sales_supervisor_decision is not None:
+        return sales_supervisor_decision
 
-    if intelligence_requires_attention:
+    if any(status not in success_statuses for status in transactional_statuses):
+        return "needs_review", "mixed_child_requires_review"
+    if any(status not in success_statuses for status in intelligence_statuses):
+        return "needs_review", "mixed_child_requires_review"
+    if any(_child_summary_has_warnings(summary) for summary in intelligence_summaries):
         return "accepted_with_warning", "mixed_intelligence_warning"
     if any(status in warning_statuses for status in transactional_statuses):
         return "accepted_with_warning", None
     return "accepted", None
+
+
+def _mixed_parent_duplicate_reason(child_summaries: Sequence[Mapping[str, Any]]) -> str | None:
+    """Return one duplicate reason when every mixed child resolved as duplicate."""
+
+    if not child_summaries:
+        return None
+    if any(_string_or_none(summary.get("status")) != "duplicate" for summary in child_summaries):
+        return None
+    prioritized_reasons = (
+        "duplicate_raw_sha256",
+        "duplicate_message_id",
+        "duplicate_semantic",
+        "duplicate_message",
+    )
+    reasons = [_mixed_child_duplicate_reason(summary) for summary in child_summaries]
+    for candidate in prioritized_reasons:
+        if candidate in reasons:
+            return candidate
+    return next((reason for reason in reasons if reason is not None), "duplicate_raw_sha256")
+
+
+def _mixed_child_duplicate_reason(summary: Mapping[str, Any]) -> str | None:
+    """Return the duplicate governance reason carried by one mixed child summary."""
+
+    payload = _mapping(summary.get("payload"))
+    governance = _mapping(payload.get("governance"))
+    reasons = governance.get("reasons")
+    if isinstance(reasons, list):
+        for reason in reasons:
+            cleaned = _string_or_none(reason)
+            if cleaned is not None and cleaned.startswith("duplicate_"):
+                return cleaned
+    for field_name in ("validation_error_code", "reason"):
+        cleaned = _string_or_none(summary.get(field_name))
+        if cleaned is not None and cleaned.startswith("duplicate_"):
+            return cleaned
+    return None
 
 
 def _mixed_confidence(child_results: list[AgentResult]) -> float:

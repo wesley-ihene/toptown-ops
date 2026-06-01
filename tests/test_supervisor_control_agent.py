@@ -222,18 +222,18 @@ def test_checklist_style_supervisor_report_normalizes_fields_before_validation(
         "Exceptions: NO",
     ]
     assert [item["action_taken"] for item in result.payload["items"]] == [
-        "Cash_Variance",
-        "Staffing_Issues",
-        "Stock_Issues",
-        "Pricing_System_Issues",
-        "Exceptions",
+        "Verified",
+        "Verified",
+        "Verified",
+        "Verified",
+        "Verified",
     ]
     assert [item["supervisor_confirmed"] for item in result.payload["items"]] == [
-        "NO",
         "YES",
-        "NO",
         "YES",
-        "NO",
+        "YES",
+        "YES",
+        "YES",
     ]
 
 
@@ -268,10 +268,10 @@ def test_supervisor_control_summary_normalizes_to_canonical_report_shape(
         "Pricing_System_Issues: NO",
     ]
     assert [item["action_taken"] for item in result.payload["items"]] == [
-        "Cash_Variance",
-        "Staffing_Issues",
-        "Stock_Issues",
-        "Pricing_System_Issues",
+        "Verified",
+        "Verified",
+        "Verified",
+        "Verified",
     ]
     assert [item["exception_type"] for item in result.payload["items"]] == [
         "CASH_CONTROL",
@@ -279,12 +279,13 @@ def test_supervisor_control_summary_normalizes_to_canonical_report_shape(
         "STOCK_CONTROL",
         "PRICING_SYSTEM_CONTROL",
     ]
+    assert result.payload["supervisor_confirmation"] == "All material issues have been escalated."
     assert result.payload["provenance"]["notes"] == [
         "Supervisor: Privien (acting)",
-        "All material issues have been escalated.",
+        "Supervisor confirmation: All material issues have been escalated.",
     ]
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
-    assert warning_codes == {"control_gap_present", "escalation_required"}
+    assert warning_codes == set()
 
 
 def test_replay_marked_work_item_sets_source_to_replay(tmp_path: Path, monkeypatch) -> None:

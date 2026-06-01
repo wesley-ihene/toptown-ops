@@ -7,7 +7,11 @@ import hashlib
 import re
 from typing import Final
 
+from apps.branch_resolver_agent.worker import resolve_branch
+from apps.date_resolver_agent.worker import resolve_report_date
+from apps.header_normalizer_agent.worker import normalize_headers
 from apps.mixed_content_detector_agent.worker import BoundaryHint, MixedContentDetection
+from packages.report_registry import APPROVED_MIXED_SPLIT_TITLES
 
 _MIXED_SPLIT_CONFIDENCE_MIN: Final[float] = 0.85
 _SALES_SUPERVISOR_SEPARATOR_CONFIDENCE: Final[float] = 0.95
@@ -57,6 +61,9 @@ _SEGMENT_KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
         "action taken",
     ),
 }
+RUNTIME_STATUS = "LIVE_RUNTIME"
+RUNTIME_OWNER = "report_splitter_agent"
+RUNTIME_NOTE = "Live mixed-report splitter used by apps.orchestrator_agent.worker."
 
 
 @dataclass(slots=True)
@@ -68,6 +75,7 @@ class ReportSegment:
     detected_report_family: str
     report_family_label: str
     blocks_transactional_processing: bool
+    header_line: str
     raw_text: str
     start_line: int
     end_line: int
@@ -120,6 +128,7 @@ def split_report(text: str, detection: MixedContentDetection) -> ReportSplitResu
                 detected_report_family=hint.report_family,
                 report_family_label=_report_family_label(hint.report_family),
                 blocks_transactional_processing=_blocks_transactional_processing(hint.report_family),
+                header_line=hint.raw_line.strip(),
                 raw_text=segment_text,
                 start_line=start_line,
                 end_line=end_line,
@@ -185,18 +194,19 @@ def _resolved_split_confidence(
 ) -> float:
     """Return the final split confidence with a narrow sales/supervisor boost."""
 
+    if not _segments_have_required_scope(segments):
+        return min(detection.confidence, 0.4)
     if _should_force_sales_supervisor_separator_confidence(
         detection=detection,
         segments=segments,
         raw_lines=raw_lines,
     ):
         return _SALES_SUPERVISOR_SEPARATOR_CONFIDENCE
-    if not _eligible_for_sales_supervisor_boost(detection):
-        return detection.confidence
-    if len(segments) != 2:
-        return detection.confidence
-    if not all(_segment_has_valid_keywords(segment) for segment in segments):
-        return detection.confidence
+    if _eligible_for_sales_supervisor_boost(detection):
+        if len(segments) != 2:
+            return detection.confidence
+        if not all(_segment_has_valid_keywords(segment) for segment in segments):
+            return detection.confidence
     return max(detection.confidence, _MIXED_SPLIT_CONFIDENCE_MIN)
 
 
@@ -314,6 +324,33 @@ def _segment_has_valid_keywords(segment: ReportSegment) -> bool:
     """Return whether a segment contains enough family-specific keywords."""
 
     return len(_matched_segment_keywords(segment.detected_report_family, segment.raw_text)) >= 2
+
+
+def _segments_have_required_scope(segments: list[ReportSegment]) -> bool:
+    """Return whether each segment has an approved title plus inherited branch/date scope."""
+
+    return bool(segments) and all(_segment_has_required_scope(segment) for segment in segments)
+
+
+def _segment_has_required_scope(segment: ReportSegment) -> bool:
+    """Return whether one split segment has the minimum safe routing scope."""
+
+    if not _segment_has_approved_title(segment):
+        return False
+    header_result = normalize_headers(segment.raw_text, max_lines=12)
+    branch_resolution = resolve_branch(header_result)
+    date_resolution = resolve_report_date(header_result)
+    return branch_resolution.branch_hint is not None and date_resolution.iso_date is not None
+
+
+def _segment_has_approved_title(segment: ReportSegment) -> bool:
+    """Return whether one segment begins with an approved split title."""
+
+    approved_titles = APPROVED_MIXED_SPLIT_TITLES.get(segment.detected_report_family)
+    if not approved_titles:
+        return False
+    normalized_header = _normalize_text(segment.header_line)
+    return normalized_header in { _normalize_text(title) for title in approved_titles }
 
 
 def _matched_segment_keywords(report_family: str, text: str) -> list[str]:

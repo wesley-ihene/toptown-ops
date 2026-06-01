@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.paths import REPO_ROOT
+from packages.record_store.naming import safe_segment
 
 DEFAULT_KEEP_DAYS = 7
 LOGGER = logging.getLogger(__name__)
@@ -128,8 +129,12 @@ def _date_directories(duplicates_root: Path, *, date: str | None) -> list[Path]:
     if not duplicates_root.exists():
         return []
     if date is not None:
-        target = duplicates_root / date
-        return [target] if target.is_dir() else []
+        candidates: list[Path] = []
+        for segment in (date, safe_segment(date)):
+            target = duplicates_root / segment
+            if target.is_dir() and target not in candidates:
+                candidates.append(target)
+        return candidates
     return sorted(path for path in duplicates_root.iterdir() if path.is_dir())
 
 

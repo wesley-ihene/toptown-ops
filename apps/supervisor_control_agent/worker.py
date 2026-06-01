@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from apps.adaptive_sop_engine.worker import apply_adaptive_sop, sync_validation_metadata
 from apps.supervisor_control_agent.alerts import generate_alerts
 from apps.supervisor_control_agent.exceptions import derive_exceptions
 from apps.supervisor_control_agent.controls import derive_controls
@@ -61,6 +62,13 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                 work_item_payload=payload,
                 governance_context=governance_context,
             )
+            result.payload = apply_adaptive_sop(
+                report_type=SIGNAL_TYPE,
+                structured_payload=result.payload,
+                work_item_payload=payload,
+                enabled=False,
+            ).payload
+            result.metadata = sync_validation_metadata(result.metadata, result.payload)
             if not candidate_only:
                 write_result = write_structured_record(result.payload, metadata=result.metadata)
                 _apply_governance_result(result, write_result)
@@ -120,6 +128,13 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             ),
         )
         _emit_intelligence_extracted_log(result)
+        result.payload = apply_adaptive_sop(
+            report_type=SIGNAL_TYPE,
+            structured_payload=result.payload,
+            work_item_payload=payload,
+            enabled=not candidate_only,
+        ).payload
+        result.metadata = sync_validation_metadata(result.metadata, result.payload)
         if not candidate_only:
             write_result = write_structured_record(result.payload, metadata=result.metadata)
             _apply_governance_result(result, write_result)
@@ -140,6 +155,13 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             governance_context=governance_context,
             parser_failure=True,
         )
+        result.payload = apply_adaptive_sop(
+            report_type=SIGNAL_TYPE,
+            structured_payload=result.payload,
+            work_item_payload=payload,
+            enabled=not candidate_only,
+        ).payload
+        result.metadata = sync_validation_metadata(result.metadata, result.payload)
         if not candidate_only:
             write_result = write_structured_record(result.payload, metadata=result.metadata)
             _apply_governance_result(result, write_result)

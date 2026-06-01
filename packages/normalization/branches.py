@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 import unicodedata
+
+from packages.common.paths import REPO_ROOT
 
 from .types import AppliedRule, NormalizedValue
 
@@ -29,9 +32,11 @@ BRANCH_ALIASES: dict[str, str] = {
     "bena road branch": "bena_road",
     "goroka benaroad": "bena_road",
     "goroka benaroad branch": "bena_road",
+    "goroka bena road": "bena_road",
     "bena road goroka branch": "bena_road",
     "bena road goroka": "bena_road",
     "bena road-goroka branch": "bena_road",
+    "ttc bena road goroka": "bena_road",
     "ttc bena road branch": "bena_road",
     "ttc bena road goroka branch": "bena_road",
     "ttc bena road-goroka branch": "bena_road",
@@ -56,6 +61,9 @@ BRANCH_ALIASES: dict[str, str] = {
 }
 
 _NON_ALPHANUMERIC_PATTERN = re.compile(r"[^a-z0-9]+")
+_CANONICAL_BRANCH_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+_CONFIG_PATH = REPO_ROOT / "config" / "branches.yaml"
+UNKNOWN_BRANCH_BUCKET = "unknown"
 
 
 @dataclass(slots=True, frozen=True)
@@ -83,29 +91,31 @@ def resolve_branch_alias(value: str) -> BranchMatch | None:
     if not normalized:
         return None
 
-    if normalized in CANONICAL_BRANCHES:
+    allowed_slugs = configured_branch_slugs()
+
+    if normalized in allowed_slugs:
         return BranchMatch(
             slug=normalized,
-            display_name=CANONICAL_BRANCHES[normalized],
+            display_name=_display_name(normalized),
             matched_alias=normalized,
             confidence=1.0,
         )
 
     exact_slug = BRANCH_ALIASES.get(normalized)
-    if exact_slug is not None:
+    if exact_slug is not None and exact_slug in allowed_slugs:
         return BranchMatch(
             slug=exact_slug,
-            display_name=CANONICAL_BRANCHES.get(exact_slug, exact_slug.replace("_", " ").title()),
+            display_name=_display_name(exact_slug),
             matched_alias=normalized,
             confidence=1.0,
         )
 
-    token_match = _token_bag_match(normalized)
+    token_match = _token_bag_match(normalized, allowed_slugs=allowed_slugs)
     if token_match is not None:
         matched_alias, slug = token_match
         return BranchMatch(
             slug=slug,
-            display_name=CANONICAL_BRANCHES.get(slug, slug.replace("_", " ").title()),
+            display_name=_display_name(slug),
             matched_alias=matched_alias,
             confidence=0.9,
         )
@@ -113,14 +123,14 @@ def resolve_branch_alias(value: str) -> BranchMatch | None:
     partial_matches = [
         alias
         for alias in BRANCH_ALIASES
-        if alias in normalized or normalized in alias
+        if (alias in normalized or normalized in alias) and BRANCH_ALIASES.get(alias) in allowed_slugs
     ]
     if partial_matches:
         matched_alias = max(partial_matches, key=lambda alias: (len(alias.split()), len(alias)))
         slug = BRANCH_ALIASES[matched_alias]
         return BranchMatch(
             slug=slug,
-            display_name=CANONICAL_BRANCHES.get(slug, slug.replace("_", " ").title()),
+            display_name=_display_name(slug),
             matched_alias=matched_alias,
             confidence=0.85,
         )
@@ -159,13 +169,52 @@ def normalize_branch(raw_value: str) -> NormalizedValue:
 
 
 def canonical_branch_slug(value: str) -> str:
-    """Return a canonical branch slug with legacy normalized fallback."""
+    """Return one configured canonical branch slug or raise ``ValueError``."""
 
-    result = normalize_branch(value)
-    if result.normalized_value is not None:
+    slug = canonical_branch_slug_or_none(value)
+    if slug is None:
+        raise ValueError(f"unknown_branch_slug: {value!r}")
+    return slug
+
+
+def canonical_branch_slug_or_none(value: str | None) -> str | None:
+    """Return one configured canonical branch slug or ``None``."""
+
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+
+    result = normalize_branch(cleaned)
+    if result.normalized_value is not None and result.normalized_value in configured_branch_slugs():
         return result.normalized_value
-    normalized = normalize_branch_text(value)
-    return normalized.replace(" ", "_")
+
+    normalized_slug = normalize_branch_text(cleaned).replace(" ", "_")
+    if normalized_slug in configured_branch_slugs():
+        return normalized_slug
+    return None
+
+
+def is_canonical_branch_slug(value: str | None) -> bool:
+    """Return whether ``value`` is one configured canonical branch slug."""
+
+    if value is None:
+        return False
+    cleaned = value.strip()
+    if not cleaned or not _CANONICAL_BRANCH_SLUG_PATTERN.fullmatch(cleaned):
+        return False
+    return cleaned in configured_branch_slugs()
+
+
+@lru_cache(maxsize=1)
+def configured_branch_slugs() -> frozenset[str]:
+    """Return the configured canonical branch slugs from ``config/branches.yaml``."""
+
+    configured = _configured_branch_slugs_from_file()
+    if configured:
+        return configured
+    return frozenset(CANONICAL_BRANCHES)
 
 
 def _compatibility_fold(value: str) -> str:
@@ -175,7 +224,7 @@ def _compatibility_fold(value: str) -> str:
     return "".join(character for character in normalized if not unicodedata.combining(character))
 
 
-def _token_bag_match(normalized: str) -> tuple[str, str] | None:
+def _token_bag_match(normalized: str, *, allowed_slugs: frozenset[str]) -> tuple[str, str] | None:
     """Return one alias match when tokens match exactly despite ordering noise."""
 
     normalized_tokens = tuple(sorted(token for token in normalized.split() if token))
@@ -184,6 +233,8 @@ def _token_bag_match(normalized: str) -> tuple[str, str] | None:
 
     matches: list[str] = []
     for alias, slug in BRANCH_ALIASES.items():
+        if slug not in allowed_slugs:
+            continue
         alias_tokens = tuple(sorted(token for token in alias.split() if token))
         if alias_tokens == normalized_tokens:
             matches.append(alias)
@@ -192,3 +243,28 @@ def _token_bag_match(normalized: str) -> tuple[str, str] | None:
         return None
     matched_alias = matches[0]
     return matched_alias, BRANCH_ALIASES[matched_alias]
+
+
+def _configured_branch_slugs_from_file() -> frozenset[str]:
+    """Return configured branch slugs from the simple branch config when readable."""
+
+    try:
+        content = _CONFIG_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+
+    slugs: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- slug:"):
+            continue
+        slug = stripped.split(":", 1)[1].strip().strip("\"'")
+        if slug and _CANONICAL_BRANCH_SLUG_PATTERN.fullmatch(slug):
+            slugs.append(slug)
+    return frozenset(slugs)
+
+
+def _display_name(slug: str) -> str:
+    """Return one display name for a canonical branch slug."""
+
+    return CANONICAL_BRANCHES.get(slug, slug.replace("_", " ").title())

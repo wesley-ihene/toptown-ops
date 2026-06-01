@@ -245,7 +245,9 @@ def test_hr_agent_total_staff_mismatch_still_requires_review(tmp_path: Path, mon
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
 
     assert result.payload["status"] == "needs_review"
-    assert "data_mismatch" in warning_codes
+    assert "declared_total_staff_mismatch" in warning_codes
+    assert result.payload["validation_error_code"] == "declared_total_staff_mismatch"
+    assert result.payload["validation_error_message"] == "Normalized attendance rows total 3 but TOTAL_STAFF = 4."
     assert not (signals_root / "waigani" / "2026-04-07" / "staff_attendance_report__waigani__2026-04-07.json").exists()
 
 
@@ -274,6 +276,131 @@ def test_hr_agent_declared_attendance_summary_mismatch_requires_review(tmp_path:
 
     assert result.payload["status"] == "needs_review"
     assert "attendance_totals_mismatch" in warning_codes
+
+
+def test_hr_agent_accepts_declared_leave_summary_alias_and_preserves_notice_section(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    present_staff = [
+        "Anna Kora",
+        "Benson Tali",
+        "Clara Nima",
+        "David Aro",
+        "Elisa Tami",
+        "Felix Yau",
+        "Grace Nena",
+        "Henry Kale",
+        "Irene Pora",
+        "Jonas Wari",
+        "Kathy Leka",
+        "Lucas Tawa",
+        "Miriam Soke",
+        "Noah Pari",
+        "Olivia Sare",
+        "Paul Tima",
+        "Queenie Raka",
+        "Ruth Wapi",
+        "Samuel Tane",
+        "Tina Yaro",
+        "Ura Bina",
+        "Victor Tali",
+        "Wendy Kora",
+        "Xavier Tame",
+        "Yasmin Heni",
+    ]
+    report_lines = [
+        "Branch: TTC Bena Road - Goroka",
+        "Date: Friday 22/05/26",
+        *[f"{staff_name} - Present" for staff_name in present_staff],
+        "Jason Bill - Leave",
+        "Summary:",
+        "Total Current Staff = 26",
+        "Total Staff Present = 25",
+        "Total Staff Leave = 1",
+        "Total Staff Day Off = 0",
+        "Total Staff Late = 0",
+        "Total Staff Absent = 0",
+        "NOTICE:",
+        "One staff resignation notice recorded separately for follow-up.",
+    ]
+
+    result = process_work_item(_attendance_work_item(lines=report_lines))
+
+    warning_codes = {warning["code"] for warning in result.payload["warnings"]}
+    item_statuses = {item["staff_name"]: item["status"] for item in result.payload["items"]}
+
+    assert result.payload["status"] == "accepted"
+    assert "declared_summary_total_mismatch" not in warning_codes
+    assert result.payload["branch"] == "bena_road"
+    assert result.payload["report_date"] == "2026-05-22"
+    assert result.payload["metrics"]["present"] == 25
+    assert result.payload["metrics"]["leave"] == 1
+    assert result.payload["metrics"]["total_staff"] == 26
+    assert len(result.payload["items"]) == 26
+    assert item_statuses["Jason Bill"] == "leave"
+    assert any("resignation notice" in note.casefold() for note in result.payload["provenance"]["notes"])
+
+
+def test_hr_agent_accepts_weekday_prefixed_date_and_excludes_resigned_pending_staff_from_active_total(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    present_staff = [
+        "Marryane Sakias",
+        "Imelda Patrick",
+        "Merolyne Tobby",
+        "George Andau",
+        "Cloe Wofinga",
+        "Doil Wai-ah",
+        "Donock Levi",
+        "Joyice Andrew",
+        "Jackson Kuri",
+        "Jennifer Golomb",
+        "Sheeba I",
+        "Lieb Yawano",
+        "Anuty Mina",
+        "Joycelyn Alu",
+        "Sandra Daniel",
+        "Goinake Ihene",
+        "Rona Kila",
+    ]
+    report_lines = [
+        "ATTENDANCE REPORT",
+        "Branch :LAE _5th Street",
+        "Friday , 22/05/26.",
+        "",
+        *[f"{index}.{staff_name} = P" for index, staff_name in enumerate(present_staff, start=1)],
+        "18.Joyce Lovave = Resign /decision pending",
+        "",
+        "Summary:",
+        "Total Staffs present = 17",
+        "Resign = 1",
+        "Total Staffs = 17",
+        "",
+        "Thanks",
+    ]
+
+    result = process_work_item(_attendance_work_item(lines=report_lines))
+
+    warning_codes = {warning["code"] for warning in result.payload["warnings"]}
+    item_statuses = {item["staff_name"]: item["status"] for item in result.payload["items"]}
+
+    assert result.payload["status"] in {"accepted", "accepted_with_warning"}
+    assert "missing_report_date" not in warning_codes
+    assert result.payload["branch"] == "lae_5th_street"
+    assert result.payload["report_date"] == "2026-05-22"
+    assert result.payload["metrics"]["present"] == 17
+    assert result.payload["metrics"]["non_active"] == 1
+    assert result.payload["metrics"]["total_staff"] == 17
+    assert result.payload["metrics"]["total_staff_listed"] == 18
+    assert item_statuses["Joyce Lovave"] == "non_active"
+    assert result.payload.get("validation_error_code") is None
+    assert not any(item["staff_name"] == "Thanks" for item in result.payload["items"])
 
 
 def test_hr_agent_duplicate_staff_names_require_review(tmp_path: Path, monkeypatch) -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from packages.common.branch import canonical_branch_slug
+from packages.common.branch import canonical_branch_slug_or_none
 from packages.normalization.branches import normalize_branch
 from packages.normalization.dates import normalize_report_date as normalize_strict_report_date
 
@@ -14,9 +14,9 @@ def normalize_report_date(raw_value: str) -> str:
     return result.normalized_value or raw_value.strip()
 
 
-def resolve_branch(raw_value: str) -> tuple[str, str]:
+def resolve_branch(raw_value: str) -> tuple[str, str | None]:
     """Return the display branch and canonical branch slug."""
 
     branch = raw_value.strip()
     normalized = normalize_branch(branch)
-    return branch, normalized.normalized_value or canonical_branch_slug(branch)
+    return branch, normalized.normalized_value or canonical_branch_slug_or_none(branch)

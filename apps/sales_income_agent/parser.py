@@ -17,8 +17,10 @@ from apps.sales_income_agent.provenance import SalesProvenance
 from apps.sales_income_agent.warnings import WarningEntry, dedupe_warnings, make_warning
 from packages.normalization.engine import normalize_report
 from packages.signal_contracts.work_item import WorkItem
+from packages.validation.sales_reconciliation import TOLERANCE
 
 _KEY_VALUE_PATTERN = re.compile(r"^\s*([^:=]+)\s*[:=]\s*(.+?)\s*$")
+_MONEY_TOKEN_PATTERN = re.compile(r"(?<![#/])(?:[Kk]\s*)?-?\d(?:[\d, ]*\d)?(?:\.\d+)?")
 _OPERATOR_LINE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("cashier", re.compile(r"^\s*(cashier|served by)\s*(?:[:=\-]\s*|\s+)(.+?)\s*$", flags=re.IGNORECASE)),
     ("assistant", re.compile(r"^\s*(assistant|assistant cashier)\s*(?:[:=\-]\s*|\s+)(.+?)\s*$", flags=re.IGNORECASE)),
@@ -45,6 +47,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedSalesReport:
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     raw_text = _raw_text(payload)
     cleaned_lines = cleanup_text(raw_text)
+    embedded_adjustments = _collect_embedded_adjustments(cleaned_lines)
     blocks = detect_blocks("\n".join(cleaned_lines))
     parsed = ParsedSalesReport(blocks=blocks)
     _apply_branch_heading_fallback(parsed, cleaned_lines)
@@ -78,6 +81,10 @@ def parse_work_item(work_item: WorkItem) -> ParsedSalesReport:
                 parsed.figures.labor_hours = parse_hours(raw_value)
             elif field_name in {
                 "gross_sales",
+                "net_sales",
+                "item_returns",
+                "cash_over",
+                "cash_down",
                 "cash_sales",
                 "eftpos_sales",
                 "mobile_money_sales",
@@ -87,9 +94,24 @@ def parse_work_item(work_item: WorkItem) -> ParsedSalesReport:
             }:
                 amount = parse_money(raw_value)
                 if amount is not None:
-                    if field_name == "z_reading":
-                        if parsed.figures.gross_sales is None:
-                            parsed.figures.gross_sales = amount
+                    if field_name == "item_returns":
+                        _assign_additive_amount(
+                            parsed.figures,
+                            field_name="item_returns",
+                            amount=abs(amount),
+                            raw_key=raw_key,
+                        )
+                    elif field_name == "net_sales":
+                        parsed.figures.net_sales = amount
+                    elif field_name in {"cash_over", "cash_down"}:
+                        setattr(parsed.figures, field_name, abs(amount))
+                    elif field_name == "z_reading":
+                        _assign_additive_amount(
+                            parsed.figures,
+                            field_name="z_reading",
+                            amount=amount,
+                            raw_key=raw_key,
+                        )
                     else:
                         setattr(parsed.figures, field_name, amount)
             elif field_name == "cashier":
@@ -104,9 +126,23 @@ def parse_work_item(work_item: WorkItem) -> ParsedSalesReport:
                 parsed.provenance.supervisor_confirmation = raw_value
             elif field_name == "notes":
                 notes.append(raw_value)
+            elif field_name == "variance_reason":
+                _append_note(notes, f"Variance Reason: {raw_value}")
+            elif field_name == "return_type":
+                _append_note(notes, f"Return Type: {raw_value}")
+
+    if parsed.figures.item_returns is None and embedded_adjustments["item_returns"] is not None:
+        parsed.figures.item_returns = embedded_adjustments["item_returns"]
+    if parsed.figures.cash_over is None and embedded_adjustments["cash_over"] is not None:
+        parsed.figures.cash_over = embedded_adjustments["cash_over"]
+    if parsed.figures.cash_down is None and embedded_adjustments["cash_down"] is not None:
+        parsed.figures.cash_down = embedded_adjustments["cash_down"]
+    for note in embedded_adjustments["notes"]:
+        _append_note(notes, note)
 
     parsed.provenance.notes = notes
     _apply_routing_fallbacks(parsed, payload)
+    _reconcile_sales_amounts(parsed.figures)
 
     if not parsed.branch or not parsed.report_date:
         parsed.warnings.append(
@@ -114,14 +150,6 @@ def parse_work_item(work_item: WorkItem) -> ParsedSalesReport:
                 code="missing_fields",
                 severity="error",
                 message="Branch or report date could not be resolved from the sales report.",
-            )
-        )
-    if parsed.figures.gross_sales is None:
-        parsed.warnings.append(
-            make_warning(
-                code="missing_fields",
-                severity="error",
-                message="Gross sales could not be mapped from the sales report.",
             )
         )
 
@@ -201,6 +229,54 @@ def _assign_count(parsed: ParsedSalesReport, *, field_name: str, raw_value: str)
         setattr(parsed.figures, field_name, count)
 
 
+def _assign_additive_amount(figures: SalesFigures, *, field_name: str, amount: float, raw_key: str) -> None:
+    """Accumulate repeated till totals while letting explicit summary labels override."""
+
+    current = getattr(figures, field_name)
+    if current is None or _is_summary_amount_label(raw_key) or abs(current - amount) <= TOLERANCE:
+        setattr(figures, field_name, round(amount, 2))
+        return
+    setattr(figures, field_name, round(current + amount, 2))
+
+
+def _is_summary_amount_label(raw_key: str) -> bool:
+    normalized = " ".join(raw_key.casefold().replace("_", " ").replace("/", " ").replace("-", " ").split())
+    return "total" in normalized or "gross" in normalized
+
+
+def _reconcile_sales_amounts(figures: SalesFigures) -> None:
+    """Align gross, net, and returns without changing no-return report semantics."""
+
+    gross_sales = figures.gross_sales
+    net_sales = figures.net_sales
+    z_reading = figures.z_reading
+    item_returns = figures.item_returns
+
+    if z_reading is not None and gross_sales is None:
+        figures.gross_sales = z_reading
+        gross_sales = z_reading
+
+    if item_returns is None:
+        return
+
+    if z_reading is not None and gross_sales is not None and abs(z_reading - gross_sales - item_returns) <= TOLERANCE:
+        figures.net_sales = gross_sales
+        figures.gross_sales = z_reading
+        gross_sales = figures.gross_sales
+        net_sales = figures.net_sales
+
+    if gross_sales is None and z_reading is not None:
+        figures.gross_sales = z_reading
+        gross_sales = z_reading
+
+    if net_sales is None and gross_sales is not None:
+        figures.net_sales = round(gross_sales - item_returns, 2)
+        net_sales = figures.net_sales
+
+    if gross_sales is None and net_sales is not None:
+        figures.gross_sales = round(net_sales + item_returns, 2)
+
+
 def _apply_operator_provenance_line(parsed: ParsedSalesReport, line: str) -> bool:
     """Apply provenance fields from WhatsApp operator lines with flexible separators."""
 
@@ -221,3 +297,72 @@ def _clean_operator_value(raw_value: str) -> str | None:
 
     cleaned = " ".join(raw_value.strip().strip(" -:=|").split())
     return cleaned or None
+
+
+def _collect_embedded_adjustments(cleaned_lines: list[str]) -> dict[str, float | list[str] | None]:
+    """Extract adjustment amounts and notes from non-tabular supervisor summary lines."""
+
+    item_returns: float | None = None
+    cash_over: float | None = None
+    cash_down: float | None = None
+    notes: list[str] = []
+
+    for line in cleaned_lines:
+        normalized = " ".join(line.casefold().replace("_", " ").replace("/", " ").split())
+        if "item return" in normalized:
+            amounts = _extract_money_values(line)
+            if amounts:
+                item_returns = round(sum(abs(amount) for amount in amounts), 2)
+        if _mentions_cash_over(normalized):
+            amounts = _extract_money_values(line)
+            if amounts:
+                cash_over = round(sum(abs(amount) for amount in amounts), 2)
+        if _mentions_cash_down(normalized):
+            amounts = _extract_money_values(line)
+            if amounts:
+                cash_down = round(sum(abs(amount) for amount in amounts), 2)
+        if "declined card" in normalized and "return" in normalized:
+            _append_note(notes, f"Return Type: {line.strip()}")
+
+    return {
+        "item_returns": item_returns,
+        "cash_over": cash_over,
+        "cash_down": cash_down,
+        "notes": notes,
+    }
+
+
+def _extract_money_values(line: str) -> list[float]:
+    """Return all safely parseable money-like values from one free-form line."""
+
+    values: list[float] = []
+    for match in _MONEY_TOKEN_PATTERN.finditer(line):
+        amount = parse_money(match.group(0))
+        if amount is None:
+            continue
+        values.append(amount)
+    return values
+
+
+def _mentions_cash_over(normalized_line: str) -> bool:
+    return (
+        "cash over" in normalized_line
+        or "c over" in normalized_line
+        or ("cash variance" in normalized_line and "over" in normalized_line)
+    )
+
+
+def _mentions_cash_down(normalized_line: str) -> bool:
+    return (
+        "cash down" in normalized_line
+        or "c down" in normalized_line
+        or ("cash variance" in normalized_line and "down" in normalized_line)
+    )
+
+
+def _append_note(notes: list[str], note: str) -> None:
+    """Append a note only once while preserving existing structured notes."""
+
+    cleaned = " ".join(note.split())
+    if cleaned and cleaned not in notes:
+        notes.append(cleaned)

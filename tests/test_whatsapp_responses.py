@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 
 from packages.observability import load_daily_artifact
@@ -48,7 +49,10 @@ def test_webhook_generates_accepted_response_artifact(tmp_path: Path, monkeypatc
 
     assert response.status_code == 200
     assert artifact["response_type"] == "accepted_ack"
-    assert artifact["dispatch_status"] == "generated"
+    if _taop_feedback_enabled():
+        assert artifact["dispatch_status"] == "generated"
+    else:
+        assert artifact["dispatch_status"] == "suppressed"
     assert body["outputs"][-1] == artifact["json_path"]
     assert artifact_payload["source_message_id"] == "wamid.accepted-phase-c1"
     assert observability is not None
@@ -87,7 +91,10 @@ def test_webhook_generates_review_response_artifact(tmp_path: Path, monkeypatch)
 
     assert response.status_code == 200
     assert body["conversation_response"]["response_type"] == "review_ack"
-    assert artifact_payload["dispatch_status"] == "generated"
+    if _taop_feedback_enabled():
+        assert artifact_payload["dispatch_status"] == "generated"
+    else:
+        assert artifact_payload["dispatch_status"] == "suppressed"
 
 
 def test_webhook_generates_rejected_response_artifact(tmp_path: Path, monkeypatch) -> None:
@@ -146,7 +153,10 @@ def test_webhook_generates_duplicate_response_artifact(tmp_path: Path, monkeypat
     assert second.status_code == 200
     assert second_body["duplicate"] is True
     assert second_body["conversation_response"]["response_type"] == "duplicate_notice"
-    assert second_body["conversation_response"]["dispatch_status"] == "generated"
+    if _taop_feedback_enabled():
+        assert second_body["conversation_response"]["dispatch_status"] == "generated"
+    else:
+        assert second_body["conversation_response"]["dispatch_status"] == "suppressed"
 
 
 def test_webhook_generates_unknown_response_artifact(tmp_path: Path, monkeypatch) -> None:
@@ -306,13 +316,30 @@ def test_duplicate_response_protection_prevents_repeated_send_for_same_source_me
 
     assert first is not None
     assert second is not None
-    assert first["dispatch_status"] == "sent"
-    assert second["dispatch_status"] == "duplicate"
-    assert dispatch_calls == ["accepted_ack"]
+    if _taop_feedback_enabled():
+        assert first["dispatch_status"] == "sent"
+        assert second["dispatch_status"] == "duplicate"
+        assert dispatch_calls == ["accepted_ack"]
+    else:
+        assert first["dispatch_status"] == "suppressed"
+        assert second["dispatch_status"] == "suppressed"
+        assert dispatch_calls == []
     observability = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
     assert observability is not None
-    assert observability["summary"]["conversation_replies_generated"] == 1
-    assert observability["summary"]["conversation_replies_sent"] == 1
+    if _taop_feedback_enabled():
+        assert observability["summary"] == {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 1,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 0,
+        }
+    else:
+        assert observability["summary"] == {
+            "conversation_replies_generated": 2,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 2,
+        }
 
 
 def test_live_mode_writes_response_artifact_before_dispatch_and_updates_after_success(
@@ -345,10 +372,16 @@ def test_live_mode_writes_response_artifact_before_dispatch_and_updates_after_su
 
     assert result is not None
     artifact = _read_json(Path(result["json_path"]))
-    assert artifact["dispatch_status"] == "sent"
-    assert artifact["provider_message_id"] == "wamid.provider-1"
-    assert artifact["dispatch_error"] is None
-    assert artifact["http_status"] == 200
+    if _taop_feedback_enabled():
+        assert artifact["dispatch_status"] == "sent"
+        assert artifact["provider_message_id"] == "wamid.provider-1"
+        assert artifact["dispatch_error"] is None
+        assert artifact["http_status"] == 200
+    else:
+        assert artifact["dispatch_status"] == "suppressed"
+        assert artifact["provider_message_id"] is None
+        assert artifact["dispatch_error"] is None
+        assert artifact["http_status"] is None
 
 
 def test_live_mode_failed_dispatch_updates_response_artifact_without_breaking_flow(
@@ -374,11 +407,20 @@ def test_live_mode_failed_dispatch_updates_response_artifact_without_breaking_fl
     )
 
     assert result is not None
-    assert result["dispatch_status"] == "failed"
+    if _taop_feedback_enabled():
+        assert result["dispatch_status"] == "failed"
+    else:
+        assert result["dispatch_status"] == "suppressed"
     artifact = _read_json(Path(result["json_path"]))
-    assert artifact["dispatch_status"] == "failed"
+    if _taop_feedback_enabled():
+        assert artifact["dispatch_status"] == "failed"
+    else:
+        assert artifact["dispatch_status"] == "suppressed"
     assert artifact["provider_message_id"] is None
-    assert artifact["dispatch_error"] == "network exploded"
+    if _taop_feedback_enabled():
+        assert artifact["dispatch_error"] == "network exploded"
+    else:
+        assert artifact["dispatch_error"] is None
     assert artifact["http_status"] is None
 
 
@@ -414,12 +456,26 @@ def test_write_only_mode_generates_artifact_without_live_send(tmp_path: Path, mo
     )
 
     assert result is not None
-    assert result["dispatch_status"] == "generated"
+    if _taop_feedback_enabled():
+        assert result["dispatch_status"] == "generated"
+        expected_summary = {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 0,
+        }
+    else:
+        assert result["dispatch_status"] == "suppressed"
+        expected_summary = {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 1,
+        }
     assert dispatch_calls == 0
     observability = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
     assert observability is not None
-    assert observability["summary"]["conversation_replies_generated"] == 1
-    assert observability["summary"]["conversation_replies_sent"] == 0
+    assert observability["summary"] == expected_summary
 
 
 def _meta_payload(*, message_id: str) -> dict[str, object]:
@@ -489,3 +545,7 @@ def _accepted_outcome() -> AgentResult:
             "outputs": ["records/structured/sales_income/waigani/2026-04-07.json"],
         },
     )
+
+
+def _taop_feedback_enabled() -> bool:
+    return os.getenv("TAOP_FEEDBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}

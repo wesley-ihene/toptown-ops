@@ -24,8 +24,23 @@ FIELD_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     "supervisor_confirmation": ("supervisor confirmation", "supervisor", "confirmed by"),
     "notes": ("notes", "comment", "remark"),
     "gross_sales": ("gross sales", "sales", "total sales"),
+    "net_sales": ("net sales",),
     "cash_sales": ("cash sales", "cash", "t/cash", "total cash"),
     "eftpos_sales": ("eftpos sales", "eftpos", "card sales", "t/card", "total card"),
+    "item_returns": (
+        "item returns",
+        "item return",
+        "returns",
+        "return",
+        "refund",
+        "refunds",
+        "total item returns",
+        "item returns total",
+    ),
+    "cash_over": ("cash over", "c/over", "cash_over", "over", "cash variance over"),
+    "cash_down": ("cash down", "c/down", "cash_down", "down", "cash variance down"),
+    "variance_reason": ("variance reason", "cash variance reason", "reason", "return reason"),
+    "return_type": ("return type", "adjustment type"),
     "mobile_money_sales": ("mobile money", "mobile sales"),
     "till_total": ("till total", "till", "cash in till"),
     "deposit_total": ("deposit total", "banking", "deposit"),
@@ -33,7 +48,7 @@ FIELD_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     "traffic": ("traffic", "foot traffic", "store traffic", "main door"),
     "served": ("served", "customers served", "guest/customer serve"),
     "labor_hours": ("labor hours", "labour hours", "hours worked"),
-    "z_reading": ("z/reading", "z reading"),
+    "z_reading": ("z/reading", "z reading", "gross z total", "total z reading"),
 }
 
 def canonical_section_name(value: str) -> str | None:

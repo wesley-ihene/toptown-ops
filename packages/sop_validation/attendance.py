@@ -20,6 +20,7 @@ from .rejection_codes import INVALID_COUNT_MISMATCH, INVALID_STATUS
 
 _ALLOWED_STATUSES = {
     "present",
+    "present_half",
     "absent",
     "off",
     "leave",
@@ -28,12 +29,14 @@ _ALLOWED_STATUSES = {
     "awn",
     "awon",
     "lay_off",
+    "non_active",
     "transfer",
     "late",
     "nil",
 }
 _STATUS_BUCKETS = {
     "present": "present",
+    "present_half": "present_half",
     "absent": "absent",
     "off": "off",
     "leave": "leave",
@@ -43,6 +46,7 @@ _STATUS_BUCKETS = {
     "awon": "absent",
     "late": "absent",
     "lay_off": "off",
+    "non_active": "non_active",
     "transfer": "off",
     "nil": "off",
 }
@@ -64,8 +68,10 @@ def validate_attendance(payload: Mapping[str, Any]) -> ValidationResult:
     absent_count = add_non_negative_number(rejections, value=metrics.get("absent_count"), field="metrics.absent_count")
     off_count = add_non_negative_number(rejections, value=metrics.get("off_count"), field="metrics.off_count")
     leave_count = add_non_negative_number(rejections, value=metrics.get("leave_count"), field="metrics.leave_count")
+    total_staff = add_non_negative_number(rejections, value=metrics.get("total_staff"), field="metrics.total_staff")
+    non_active_count = add_non_negative_number(rejections, value=metrics.get("non_active"), field="metrics.non_active")
 
-    counted_statuses = {"present": 0, "absent": 0, "off": 0, "leave": 0}
+    counted_statuses = {"present": 0, "present_half": 0, "absent": 0, "off": 0, "leave": 0, "non_active": 0}
     for index, item in enumerate(items):
         rejections.extend(require_fields(item, ("staff_name", "status"), item_prefix=f"items[{index}]"))
         status_value = item.get("status")
@@ -105,5 +111,24 @@ def validate_attendance(payload: Mapping[str, Any]) -> ValidationResult:
                     field=f"metrics.{field_name}",
                 )
             )
+
+    derived_total_staff = len(items) - counted_statuses["non_active"] if items else 0
+    if total_staff is not None and int(total_staff) != derived_total_staff:
+        rejections.append(
+            make_rejection(
+                code=INVALID_COUNT_MISMATCH,
+                message="The metric `total_staff` must match the active staff headcount derived from item statuses.",
+                field="metrics.total_staff",
+            )
+        )
+
+    if non_active_count is not None and int(non_active_count) != counted_statuses["non_active"]:
+        rejections.append(
+            make_rejection(
+                code=INVALID_COUNT_MISMATCH,
+                message="The metric `non_active` must match the item status counts.",
+                field="metrics.non_active",
+            )
+        )
 
     return build_result("attendance", rejections)

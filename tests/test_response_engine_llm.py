@@ -57,8 +57,12 @@ def test_review_llm_rewrite_preserves_reason(tmp_path: Path, monkeypatch) -> Non
     _patch_environment(monkeypatch, tmp_path)
     monkeypatch.setenv("CONVERSATION_LLM_ENABLED", "true")
     monkeypatch.setenv("CONVERSATION_LLM_MODE", "rewrite_only")
+    calls = 0
 
     def rewrite(base_text, context):
+        del base_text
+        nonlocal calls
+        calls += 1
         context["_llm_adapter_status"] = "success"
         return (
             "🟡 DAILY BALE SUMMARY received for Bena Road, 05/04/26.\n"
@@ -81,15 +85,22 @@ def test_review_llm_rewrite_preserves_reason(tmp_path: Path, monkeypatch) -> Non
         }
     )
 
-    assert "Reason: confidence needs operator review." in rendered["response_text"]
+    assert calls == 0
+    assert "⚠️ TAOP REVIEW REQUIRED" in rendered["response_text"]
+    assert "Confidence between review and accept thresholds." in rendered["response_text"]
+    assert "Reason: confidence needs operator review." not in rendered["response_text"]
 
 
-def test_rejected_llm_rewrite_preserves_instruction(tmp_path: Path, monkeypatch) -> None:
+def test_rejected_llm_rewrite_skips_when_structured_feedback_exists(tmp_path: Path, monkeypatch) -> None:
     _patch_environment(monkeypatch, tmp_path)
     monkeypatch.setenv("CONVERSATION_LLM_ENABLED", "true")
     monkeypatch.setenv("CONVERSATION_LLM_MODE", "rewrite_only")
 
+    calls = 0
+
     def rewrite(base_text, context):
+        nonlocal calls
+        calls += 1
         context["_llm_adapter_status"] = "success"
         return (
             "❌ ATTENDANCE REPORT could not be processed.\n"
@@ -111,7 +122,10 @@ def test_rejected_llm_rewrite_preserves_instruction(tmp_path: Path, monkeypatch)
         }
     )
 
-    assert rendered["response_text"].endswith("Please resend using the correct format.")
+    assert calls == 0
+    assert rendered["response_text"].endswith(
+        "Recheck required fields and totals, then resend using the exact SOP format for Staff Attendance Report."
+    )
 
 
 def test_llm_failure_falls_back_to_base_text(tmp_path: Path, monkeypatch) -> None:
@@ -251,7 +265,7 @@ def test_short_text_skips_llm(tmp_path: Path, monkeypatch) -> None:
     )
     observability = load_daily_artifact("conversation_llm", "2026-04-23", output_root=tmp_path)
 
-    assert rendered["response_text"] == "ℹ️ This report was already received earlier.\nNo new processing was applied."
+    assert rendered["response_text"] == "ℹ️ This report was already received and processed earlier.\nNo new processing was applied."
     assert calls == 0
     assert observability is not None
     assert observability["summary"]["conversation_llm_skipped"] == 1
@@ -318,7 +332,8 @@ def test_known_review_reason_skips_llm_and_preserves_resolved_observability_meta
     observability = load_daily_artifact("conversation_llm", "2026-04-07", output_root=tmp_path)
 
     assert calls == 0
-    assert "TAOP detected multiple report sections in one message." in rendered["response_text"]
+    assert "Mixed content could not be safely split." in rendered["response_text"]
+    assert "Send one report family per WhatsApp message and resend." in rendered["response_text"]
     assert observability is not None
     assert observability["summary"]["conversation_llm_skipped"] == 1
     assert observability["events"] == [

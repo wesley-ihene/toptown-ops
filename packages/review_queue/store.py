@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from packages.branch_registry import canonical_branch_slug_or_none
 from packages.provenance_store import write_provenance_record
 from packages.record_store.naming import safe_segment
 from packages.record_store.paths import get_review_path
@@ -41,15 +42,16 @@ def write_review_item(
 
     payload = work_item.payload if isinstance(work_item.payload, dict) else {}
     source_message_hash = _string_or_none(payload.get("message_hash")) or _utc_stamp()
+    canonical_branch = _review_branch(branch)
     review_path = get_review_path(
         report_date,
-        branch,
+        canonical_branch,
         report_type,
         output_root=output_root,
     ) / f"{safe_segment(source_message_hash)}.json"
     review_payload = {
         "report_type": report_type,
-        "branch": branch,
+        "branch": canonical_branch,
         "date": report_date,
         "queue_type": queue_type or "standard_review",
         "linked_action_id": _string_or_none(linked_action_id),
@@ -76,7 +78,7 @@ def write_review_item(
     write_provenance_record(
         outcome="review",
         report_type=report_type,
-        branch=branch,
+        branch=canonical_branch,
         report_date=report_date,
         raw_message_hash=source_message_hash,
         parser_used=parser_used,
@@ -117,7 +119,7 @@ def write_action_follow_up_item(
     """Persist one review item linked to an autonomous action without side effects."""
 
     action_id = _required_text(action_payload.get("action_id"), field_name="action_id")
-    branch = _required_text(action_payload.get("branch"), field_name="branch")
+    branch = _review_branch(_required_text(action_payload.get("branch"), field_name="branch"))
     report_date = _required_text(action_payload.get("report_date"), field_name="report_date")
     signal_type = _required_text(action_payload.get("signal_type"), field_name="signal_type")
     review_path = get_review_path(
@@ -219,3 +221,9 @@ def _utc_stamp() -> str:
     """Return a stable UTC stamp for fallback filenames."""
 
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _review_branch(branch: str) -> str:
+    """Return one canonical review-queue branch segment or ``unknown``."""
+
+    return canonical_branch_slug_or_none(branch) or "unknown"

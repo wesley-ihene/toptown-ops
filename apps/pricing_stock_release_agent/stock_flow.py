@@ -28,15 +28,20 @@ def interpret_stock_flow(parsed: ParsedBaleSummary) -> StockFlowInterpretation:
         if parsed.declared_bales_processed is not None
         else item_count
     )
-    bales_released = (
-        parsed.declared_bales_released if parsed.declared_bales_released is not None else 0
-    )
     bales_pending_approval = (
         parsed.declared_bales_pending_approval
         if parsed.declared_bales_pending_approval is not None
         else 0
     )
-    total_qty = sum(float(item.qty) for item in parsed.items)
+    if parsed.declared_bales_released is not None:
+        bales_released = parsed.declared_bales_released
+    elif parsed.declared_bales_pending_approval is not None and bales_processed >= bales_pending_approval:
+        bales_released = max(bales_processed - bales_pending_approval, 0)
+    elif item_count > 0 and parsed.declared_bales_pending_approval is None:
+        bales_released = bales_processed
+    else:
+        bales_released = 0
+    total_qty = sum((float(item.qty) for item in parsed.items), 0.0)
 
     warnings: list[WarningEntry] = []
     if (
@@ -71,7 +76,7 @@ def interpret_stock_flow(parsed: ParsedBaleSummary) -> StockFlowInterpretation:
         )
 
     normalized_total_qty: int | float
-    if total_qty.is_integer():
+    if float(total_qty).is_integer():
         normalized_total_qty = int(total_qty)
     else:
         normalized_total_qty = round(total_qty, 2)

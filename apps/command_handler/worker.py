@@ -106,6 +106,7 @@ _STATUS_LABELS = {
     "correction_repeat_fix_request": "rejected",
     "review_ack": "in review",
     "rejected_fix_request": "rejected",
+    "duplicate_ack": "duplicate",
     "duplicate_notice": "duplicate",
     "unknown_message_guidance": "unsupported",
 }

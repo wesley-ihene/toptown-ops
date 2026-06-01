@@ -104,7 +104,7 @@ def test_response_artifacts_persist_structured_feedback(tmp_path: Path) -> None:
             "report_date": "2026-04-25",
             "reason": "confidence_between_review_and_accept_thresholds",
             "generated_at": "2026-04-25T12:00:00Z",
-            "response_text": "📊 TAOP BALE SUMMARY REVIEW – LAE 5TH STREET",
+            "response_text": "📊 TAOP BALE SUMMARY REVIEW REQUIRED – LAE 5TH STREET",
             "dispatch_status": "written_only",
             "feedback": {
                 "report_type": "bale_summary",
@@ -115,9 +115,15 @@ def test_response_artifacts_persist_structured_feedback(tmp_path: Path) -> None:
                 "confidence": 0.76,
                 "auto_accept_threshold": 0.88,
                 "review_threshold": 0.58,
-                "validation_results": [{"status": "pass", "label": "Total Qty matches item sum", "details": "486 pcs"}],
-                "issues_detected": [{"code": "qty_format_inconsistent", "title": "Quantity format inconsistent", "details": ["Use numbers only."]}],
-                "action_required": "Please resend using the standard bale summary format.",
+                "validation_results": [],
+                "issues_detected": [
+                    {
+                        "code": "confidence_between_review_and_accept_thresholds",
+                        "title": "Governance reason",
+                        "details": ["Confidence is below the auto-accept threshold and needs review."],
+                    }
+                ],
+                "action_required": "Follow the specialist-agent warnings and governance review outcome before resending.",
                 "normalized_summary": {"items": 2, "total_qty": 486, "total_amount": 2335.0},
             },
         },

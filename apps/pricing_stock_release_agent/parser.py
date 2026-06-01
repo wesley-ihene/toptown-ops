@@ -21,22 +21,57 @@ _KEY_VALUE_PATTERN = re.compile(r"^\s*([^:=]+)\s*[:=]\s*(.+?)\s*$")
 _BALE_HEADER_PATTERN = re.compile(r"^\s*#?\s*(\d+)\s*(?:\.\s*|\s+)(.+?)\s*$")
 _QTY_LINE_PATTERN = re.compile(r"^\(?\s*qty\s*:\s*([^)]+?)\s*\)?$", flags=re.IGNORECASE)
 _AMOUNT_LINE_PATTERN = re.compile(r"^\s*(?:amt|amount)\s*:\s*(.+?)\s*$", flags=re.IGNORECASE)
+_TOTAL_SECTION_HEADER_PATTERN = re.compile(r"^\s*total\s*:?\s*$", flags=re.IGNORECASE)
 _ITEM_DETAIL_FIELD_PATTERN = re.compile(
     r"^[^A-Za-z]*(?P<key>qty|quantity|amt|amount|value)\b[^0-9A-Za-z]*(?P<value>.+?)\s*[\W_]*$",
     flags=re.IGNORECASE,
 )
 _MONEY_FRAGMENT_PATTERN = re.compile(
-    r"(?P<amount>(?:PGK\s*|K\s*)?\d[\d, ]*\.\s*\d+|(?:PGK\s*|K\s*)\d[\d, ]*)",
+    r"(?P<amount>(?:PGK\s*|K\s*)?\d[\d,'’ ]*\.\s*\d+|(?:PGK\s*|K\s*)\d[\d,'’ ]*)",
     flags=re.IGNORECASE,
 )
+_APOSTROPHE_MISSING_DECIMAL_MONEY_PATTERN = re.compile(
+    r"^(?P<currency>PGK|K)?(?P<int_groups>\d+(?:['’]\d{3})+)(?P<cents>\d{2})$",
+    flags=re.IGNORECASE,
+)
+_CURRENCY_SPACE_BEFORE_DIGIT_PATTERN = re.compile(r"\b(?P<currency>PGK|K)\s+(?=\d)", flags=re.IGNORECASE)
+_SPACED_COMMA_NUMBER_PATTERN = re.compile(r"(?<=\d),\s+(?=\d)")
+_SAFE_FORMAT_CLEANUP_PATTERN = re.compile(
+    r"(?:['’]|\b(?:PGK|K)\s+(?=\d)|(?<=\d),\s+(?=\d)|(?<=\d)\s*(?:pcs?|pce)\b)",
+    flags=re.IGNORECASE,
+)
+_COUNT_TOKEN_PATTERN = (
+    r"(?:\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b"
+    r"(?:\s*\(\s*0*\d+\s*\))?|\(\s*0*\d+\s*\)|0*\d+)"
+)
 _WORD_NUMBER_PATTERN = re.compile(
-    r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
+    r"\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
     flags=re.IGNORECASE,
 )
 _PAREN_NUMBER_PATTERN = re.compile(r"\(\s*0*(\d+)\s*\)")
 _COUNT_UNIT_SUFFIX_PATTERN = re.compile(r"(?<=\d)\s*(?:pcs?|pce)\b", flags=re.IGNORECASE)
+_INLINE_COUNT_FRAGMENT_PATTERN = re.compile(r"(?<!\d)(\d+)(?!\d)")
+_RELEASED_COUNT_PATTERN = re.compile(
+    rf"(?P<count>{_COUNT_TOKEN_PATTERN})\s*bales?\s*released\b",
+    flags=re.IGNORECASE,
+)
+_PENDING_APPROVAL_COUNT_PATTERN = re.compile(
+    rf"(?P<count>{_COUNT_TOKEN_PATTERN})\s*bales?\s*(?:waiting\s*for\s*approval|pending\s*approval)\b",
+    flags=re.IGNORECASE,
+)
+_PROCESSED_COUNT_PATTERNS = (
+    re.compile(
+        rf"(?P<count>{_COUNT_TOKEN_PATTERN})\s*bales?\s*processed\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:total\s*bales?(?:\s*on\s*rail)?|total\s*bales?\s*break\s*today)\D*(?P<count>{_COUNT_TOKEN_PATTERN})",
+        flags=re.IGNORECASE,
+    ),
+)
 
 _WORD_NUMBERS: dict[str, int] = {
+    "zero": 0,
     "one": 1,
     "two": 2,
     "three": 3,
@@ -70,6 +105,8 @@ class ParsedBaleSummary:
     report_date: str | None = None
     prepared_by: str | None = None
     role: str | None = None
+    checked_by: str | None = None
+    checked_role: str | None = None
     items: list[ParsedBaleItem] = field(default_factory=list)
     declared_bales_processed: int | None = None
     declared_bales_released: int | None = None
@@ -97,6 +134,8 @@ def parse_work_item(work_item: WorkItem) -> ParsedBaleSummary:
             field_name, value = metadata
             if field_name == "prepared_by_role":
                 parsed.prepared_by, parsed.role = value
+            elif field_name == "checked_by_role":
+                parsed.checked_by, parsed.checked_role = value
             else:
                 setattr(parsed, field_name, value)
             line_index += 1
@@ -106,6 +145,13 @@ def parse_work_item(work_item: WorkItem) -> ParsedBaleSummary:
         if standalone_report_date is not None and parsed.report_date is None:
             parsed.report_date = standalone_report_date
             line_index += 1
+            continue
+
+        total_fields, consumed_total_lines = _parse_total_section(lines, line_index)
+        if total_fields is not None:
+            for field_name, value in total_fields.items():
+                setattr(parsed, field_name, value)
+            line_index += consumed_total_lines
             continue
 
         summary_count = _parse_summary_count_line(line)
@@ -123,23 +169,52 @@ def parse_work_item(work_item: WorkItem) -> ParsedBaleSummary:
 
         line_index += 1
 
-    if parsed.declared_total_amount is None and parsed.items:
-        parsed.declared_total_amount = round(sum(item.amount for item in parsed.items), 2)
-
-    if not parsed.branch or not parsed.report_date or not parsed.prepared_by or not parsed.role:
+    if parsed.items and (parsed.declared_total_qty is None or parsed.declared_total_amount is None):
+        inferred_total_qty = _calculated_total_qty(parsed.items)
+        inferred_total_amount = round(sum(item.amount for item in parsed.items), 2)
+        if parsed.declared_total_qty is None:
+            parsed.declared_total_qty = inferred_total_qty
+        if parsed.declared_total_amount is None:
+            parsed.declared_total_amount = inferred_total_amount
         parsed.warnings.append(
             make_warning(
-                code="missing_fields",
-                severity="error",
-                message="Branch, date, prepared_by, or role could not be fully extracted.",
+                code="totals_inferred",
+                severity="warning",
+                message="One or more declared totals was missing and was safely inferred from the extracted bale rows.",
             )
         )
-    if not parsed.items:
+
+    if parsed.items and _has_safe_format_cleanup(raw_text):
+        parsed.warnings.append(
+            make_warning(
+                code="format_cleanup",
+                severity="warning",
+                message="One or more bale rows required safe currency or quantity format cleanup before parsing.",
+            )
+        )
+
+    if (
+        not parsed.branch
+        or not parsed.report_date
+        or not parsed.items
+        or parsed.declared_total_qty is None
+        or parsed.declared_total_amount is None
+    ):
         parsed.warnings.append(
             make_warning(
                 code="missing_fields",
                 severity="error",
-                message="No bale blocks were extracted from the bale summary text.",
+                message="Branch, date, bale items, total quantity, or total amount could not be fully extracted.",
+            )
+        )
+    if parsed.branch and parsed.report_date and parsed.items and (
+        parsed.prepared_by is None or parsed.checked_by is None
+    ):
+        parsed.warnings.append(
+            make_warning(
+                code="missing_provenance",
+                severity="warning",
+                message="Prepared By or Checked By could not be fully extracted from the bale summary.",
             )
         )
 
@@ -187,7 +262,9 @@ def _parse_metadata_line(line: str) -> tuple[str, Any] | None:
     if field_name == "report_date":
         return "report_date", _normalize_report_date(raw_value)
     if field_name == "prepared_by":
-        return "prepared_by_role", _split_prepared_by(raw_value)
+        return "prepared_by_role", _split_person_role(raw_value)
+    if field_name == "checked_by":
+        return "checked_by_role", _split_person_role(raw_value)
     if _normalize_key(raw_key) in {"total bales on rail", "total bales", "bales processed"}:
         count = _parse_count_phrase(raw_value)
         return ("declared_bales_processed", count) if count is not None else None
@@ -210,6 +287,20 @@ def _parse_summary_count_line(line: str) -> tuple[str, int] | None:
 
     if _MONEY_FRAGMENT_PATTERN.search(line) is not None:
         return None
+    if _QTY_LINE_PATTERN.match(line) is not None or _AMOUNT_LINE_PATTERN.match(line) is not None:
+        return None
+
+    pending_approval = _extract_count_from_pattern(line, _PENDING_APPROVAL_COUNT_PATTERN)
+    if pending_approval is not None:
+        return "declared_bales_pending_approval", pending_approval
+
+    released = _extract_count_from_pattern(line, _RELEASED_COUNT_PATTERN)
+    if released is not None:
+        return "declared_bales_released", released
+
+    processed = _extract_count_from_patterns(line, _PROCESSED_COUNT_PATTERNS)
+    if processed is not None:
+        return "declared_bales_processed", processed
 
     count = _parse_count_phrase(line)
     if count is None:
@@ -221,6 +312,8 @@ def _parse_summary_count_line(line: str) -> tuple[str, int] | None:
     if "waiting for approval" in normalized_line or "pending approval" in normalized_line:
         return "declared_bales_pending_approval", count
     if normalized_line == _normalize_key(_strip_count_markers(line)):
+        return None
+    if "bale" not in normalized_line:
         return None
     return "declared_bales_processed", count
 
@@ -277,8 +370,43 @@ def _parse_bale_block(lines: list[str], start_index: int) -> tuple[ParsedBaleIte
     )
 
 
-def _split_prepared_by(raw_value: str) -> tuple[str | None, str | None]:
-    """Split a prepared-by field into name and role conservatively."""
+def _parse_total_section(lines: list[str], start_index: int) -> tuple[dict[str, Any] | None, int]:
+    """Parse a `TOTAL:` block with separate quantity and amount lines."""
+
+    if start_index >= len(lines):
+        return None, 1
+    if _TOTAL_SECTION_HEADER_PATTERN.match(lines[start_index]) is None:
+        return None, 1
+
+    total_fields: dict[str, Any] = {}
+    consumed_lines = 1
+    for offset in range(1, 5):
+        detail_index = start_index + offset
+        if detail_index >= len(lines):
+            break
+
+        detail_line = lines[detail_index]
+        detail_field = _parse_item_detail_line(detail_line)
+        if detail_field is not None:
+            field_name, value = detail_field
+            if field_name == "qty":
+                total_fields["declared_total_qty"] = value
+            elif field_name == "amount":
+                total_fields["declared_total_amount"] = value
+            consumed_lines = offset + 1
+            continue
+
+        if _is_total_section_boundary(detail_line):
+            break
+        if total_fields:
+            break
+        return None, 1
+
+    return (total_fields or None), consumed_lines
+
+
+def _split_person_role(raw_value: str) -> tuple[str | None, str | None]:
+    """Split one provenance field into name and role conservatively."""
 
     value = raw_value.strip()
     match = re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", value)
@@ -311,16 +439,48 @@ def _parse_count_phrase(raw_value: str) -> int | None:
         return count_from_word
 
     number = _parse_number(candidate)
-    return int(number) if number is not None else None
+    if number is not None:
+        return int(number)
+
+    inline_number = _INLINE_COUNT_FRAGMENT_PATTERN.search(candidate)
+    if inline_number is not None:
+        return int(inline_number.group(1))
+    return None
 
 
 def _parse_amount(raw_value: str) -> float | None:
     """Parse amount fields such as `K240` or `$240`."""
 
-    normalized = normalize_money(raw_value)
+    if not raw_value:
+        return None
+
+    cleaned = _normalize_money_input(raw_value)
+    normalized = normalize_money(cleaned)
     if not normalized.succeeded or normalized.normalized_value is None:
         return None
     return float(normalized.normalized_value)
+
+
+def _normalize_money_input(raw_value: str) -> str:
+    """Normalize supported non-standard money layouts before money parsing."""
+
+    normalized = raw_value.replace("’", "'").strip()
+    normalized = _CURRENCY_SPACE_BEFORE_DIGIT_PATTERN.sub(lambda match: match.group("currency"), normalized)
+    normalized = _SPACED_COMMA_NUMBER_PATTERN.sub(",", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    compact = re.sub(r"\s+", "", normalized)
+    match = _APOSTROPHE_MISSING_DECIMAL_MONEY_PATTERN.fullmatch(compact)
+    if match is not None and "." not in compact:
+        whole = match.group("int_groups").replace("'", "")
+        cents = match.group("cents")
+        currency = (match.group("currency") or "").upper()
+        if currency == "PGK":
+            return f"PGK {whole}.{cents}"
+        if currency:
+            return f"{currency}{whole}.{cents}"
+        return f"{whole}.{cents}"
+    return normalized.replace("'", "")
 
 
 def _normalize_report_date(raw_value: str) -> str:
@@ -348,6 +508,21 @@ def _parse_number(raw_value: str) -> Decimal | None:
         return Decimal(normalized.normalized_value)
     except Exception:
         return None
+
+
+def _calculated_total_qty(items: list[ParsedBaleItem]) -> int | float:
+    """Return the numeric total quantity from extracted bale items."""
+
+    total_qty = sum((float(item.qty) for item in items), 0.0)
+    if total_qty.is_integer():
+        return int(total_qty)
+    return round(total_qty, 2)
+
+
+def _has_safe_format_cleanup(raw_text: str) -> bool:
+    """Return whether the source text required safe currency or qty cleanup."""
+
+    return _SAFE_FORMAT_CLEANUP_PATTERN.search(raw_text) is not None
 
 
 def _strip_count_markers(raw_value: str) -> str:
@@ -436,6 +611,8 @@ def _is_block_boundary(line: str) -> bool:
     normalized = _normalize_key(line)
     if _BALE_HEADER_PATTERN.match(line) is not None:
         return True
+    if _TOTAL_SECTION_HEADER_PATTERN.match(line) is not None:
+        return True
     if _parse_metadata_line(line) is not None:
         return True
     if _parse_summary_count_line(line) is not None:
@@ -443,3 +620,38 @@ def _is_block_boundary(line: str) -> bool:
     if normalized.startswith(("total ", "prepared by", "note", "thanks", "day")):
         return True
     return False
+
+
+def _is_total_section_boundary(line: str) -> bool:
+    """Return True when a `TOTAL:` block should stop consuming lines."""
+
+    normalized = _normalize_key(line)
+    if _BALE_HEADER_PATTERN.match(line) is not None:
+        return True
+    if _TOTAL_SECTION_HEADER_PATTERN.match(line) is not None:
+        return True
+    metadata = _parse_metadata_line(line)
+    if metadata is not None:
+        return metadata[0] not in {"declared_total_qty", "declared_total_amount"}
+    if _parse_summary_count_line(line) is not None:
+        return True
+    return normalized.startswith(("prepared by", "note", "thanks", "day"))
+
+
+def _extract_count_from_pattern(line: str, pattern: re.Pattern[str]) -> int | None:
+    """Return one parsed count from a regex group named `count`."""
+
+    match = pattern.search(line)
+    if match is None:
+        return None
+    return _parse_count_phrase(match.group("count"))
+
+
+def _extract_count_from_patterns(line: str, patterns: tuple[re.Pattern[str], ...]) -> int | None:
+    """Return the first parsed count matched by any supported summary pattern."""
+
+    for pattern in patterns:
+        count = _extract_count_from_pattern(line, pattern)
+        if count is not None:
+            return count
+    return None

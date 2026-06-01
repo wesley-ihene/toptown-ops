@@ -223,6 +223,104 @@ def test_governance_accepts_supervisor_control_as_intelligence(tmp_path: Path, m
     assert manifest["results"][0]["source_path"] == "records/intelligence/supervisor_control/2026-04-07/waigani.json"
 
 
+def test_governance_allows_bale_replacement_same_scope_with_audit_history(tmp_path: Path, monkeypatch) -> None:
+    _patch_record_paths(tmp_path, monkeypatch)
+    colony_root = tmp_path / "ioi-colony"
+    colony_root.mkdir()
+
+    initial = write_governed_structured(
+        "pricing_stock_release",
+        "waigani",
+        "2026-04-07",
+        _pricing_payload(status="accepted", report_date="2026-04-07", total_qty=100, total_amount=500.0),
+        metadata={
+            "validation": {"accepted": True, "status": "accepted"},
+            "governance_context": {"message_id": "wamid.bale-1", "raw_sha256": "raw-bale-1"},
+        },
+        root=tmp_path,
+        colony_root=colony_root,
+    )
+    replacement = write_governed_structured(
+        "pricing_stock_release",
+        "waigani",
+        "2026-04-07",
+        _pricing_payload(status="accepted", report_date="2026-04-07", total_qty=120, total_amount=720.0),
+        metadata={
+            "validation": {"accepted": True, "status": "accepted"},
+            "governance_context": {
+                "message_id": "wamid.bale-2",
+                "raw_sha256": "raw-bale-2",
+                "correction_intent_detected": True,
+                "allow_same_scope_supersede": True,
+                "replacement_reason": "correction_replacement_report",
+            },
+        },
+        root=tmp_path,
+        colony_root=colony_root,
+    )
+
+    active_payload = json.loads(replacement.path.read_text(encoding="utf-8"))
+    audit_payload = json.loads(Path(str(active_payload["supersedes_record_path"])).read_text(encoding="utf-8"))
+
+    assert initial.persisted is True
+    assert replacement.persisted is True
+    assert replacement.governance.status == "accepted"
+    assert active_payload["metrics"]["total_qty"] == 120
+    assert active_payload["replacement_source_message_id"] == "wamid.bale-2"
+    assert audit_payload["metrics"]["total_qty"] == 100
+    assert audit_payload["superseded"] is True
+
+
+def test_governance_does_not_persist_non_exportable_bale_replacement(tmp_path: Path, monkeypatch) -> None:
+    _patch_record_paths(tmp_path, monkeypatch)
+    colony_root = tmp_path / "ioi-colony"
+    colony_root.mkdir()
+
+    initial = write_governed_structured(
+        "pricing_stock_release",
+        "waigani",
+        "2026-04-08",
+        _pricing_payload(status="accepted", report_date="2026-04-08", total_qty=100, total_amount=500.0),
+        metadata={
+            "validation": {"accepted": True, "status": "accepted"},
+            "governance_context": {"message_id": "wamid.bale-3", "raw_sha256": "raw-bale-3"},
+        },
+        root=tmp_path,
+        colony_root=colony_root,
+    )
+    blocked = write_governed_structured(
+        "pricing_stock_release",
+        "waigani",
+        "2026-04-08",
+        _pricing_payload(
+            status="needs_review",
+            report_date="2026-04-08",
+            total_qty=120,
+            total_amount=720.0,
+            warnings=[{"code": "data_mismatch", "severity": "warning", "message": "totals mismatch"}],
+        ),
+        metadata={
+            "validation": {"accepted": True, "status": "accepted"},
+            "governance_context": {
+                "message_id": "wamid.bale-4",
+                "raw_sha256": "raw-bale-4",
+                "correction_intent_detected": True,
+                "allow_same_scope_supersede": True,
+                "replacement_reason": "correction_replacement_report",
+            },
+        },
+        root=tmp_path,
+        colony_root=colony_root,
+    )
+
+    active_payload = json.loads(initial.path.read_text(encoding="utf-8"))
+
+    assert blocked.persisted is False
+    assert blocked.governance.status == "needs_review"
+    assert active_payload["metrics"]["total_qty"] == 100
+    assert "supersedes_record_path" not in active_payload
+
+
 def test_invalid_pricing_card_message_is_rejected_with_explicit_reason(tmp_path: Path, monkeypatch) -> None:
     _patch_record_paths(tmp_path, monkeypatch)
 
@@ -286,6 +384,43 @@ def _sales_payload(*, status: str, gross_sales: float, warnings: list[dict[str, 
         },
         "items": [],
         "provenance": {"cashier": "Alice"},
+        "warnings": warnings or [],
+        "status": status,
+    }
+
+
+def _pricing_payload(
+    *,
+    status: str,
+    report_date: str,
+    total_qty: int,
+    total_amount: float,
+    warnings: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "signal_type": "pricing_stock_release",
+        "source_agent": "pricing_stock_release_agent",
+        "branch": "waigani",
+        "report_date": report_date,
+        "confidence": 0.95,
+        "metrics": {
+            "bales_processed": 1,
+            "bales_released": 1,
+            "bales_pending_approval": 0,
+            "total_qty": total_qty,
+            "total_amount": total_amount,
+            "release_ratio": 1.0,
+        },
+        "items": [
+            {
+                "bale_id": "1",
+                "item_name": "OSH",
+                "qty": total_qty,
+                "amount": total_amount,
+                "price_per_piece": round(total_amount / total_qty, 2),
+            }
+        ],
+        "provenance": {"prepared_by": "Maria", "checked_by": "Peter"},
         "warnings": warnings or [],
         "status": status,
     }

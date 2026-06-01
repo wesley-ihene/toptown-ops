@@ -39,15 +39,19 @@ def test_sales_income_valid_optional_warnings_write_structured_as_accepted_with_
 
     assert result.payload["status"] == "accepted_with_warning"
     warning_codes = {warning["code"] for warning in result.payload["warnings"]}
-    assert "low_conversion" in warning_codes
     assert "cash_variance_present" in warning_codes
     assert "till_mismatch" in warning_codes
+    assert result.payload["alert_type"] == "low_conversion_rate"
+    assert result.payload["alert_level"] == "warning"
+    assert result.payload["alert_category"] == "performance_alert"
+    assert result.payload["alert_message"] == "Conversion rate is low at 20.00%."
     assert structured_path.exists()
 
     payload = json.loads(structured_path.read_text(encoding="utf-8"))
     assert payload["status"] == "accepted_with_warning"
     assert payload["branch"] == "waigani"
     assert payload["report_date"] == "2026-04-07"
+    assert payload["performance_alerts"][0]["alert_type"] == "low_conversion_rate"
 
 
 def test_sales_income_core_consistency_issue_stays_needs_review(
@@ -79,6 +83,48 @@ def test_sales_income_core_consistency_issue_stays_needs_review(
     assert "invalid_totals" in warning_codes
     assert "data_mismatch" in warning_codes
     assert structured_path.exists()
+
+
+def test_sales_income_cash_over_reconciliation_stays_accepted_with_warning_and_emits_diagnostics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        _sales_work_item(
+            [
+                "DAY-END SALES REPORT",
+                "Branch: Waigani Branch",
+                "Date: 07/04/2026",
+                "T/Cash: 100",
+                "T/Card: 50",
+                "C/over: 10",
+                "Variance Reason: Till float correction",
+                "Supervisor Confirmation: YES",
+                "Total Sales: 160",
+                "Z/Reading: 140",
+                "Traffic: 10",
+                "Served: 8",
+            ]
+        )
+    )
+
+    structured_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-07.json"
+
+    assert result.payload["status"] == "accepted_with_warning"
+    warning_codes = {warning["code"] for warning in result.payload["warnings"]}
+    assert "invalid_totals" not in warning_codes
+    assert "cash_over_present" in warning_codes
+    assert result.payload["reconciliation"]["expected_z_reading"] == 140.0
+    assert result.payload["reconciliation"]["expected_total_sales"] == 160.0
+    assert result.payload["reconciliation"]["cash_over"] == 10.0
+    assert result.payload["reconciliation"]["unexplained_variance"] == 0.0
+    assert structured_path.exists()
+
+    payload = json.loads(structured_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "accepted_with_warning"
+    assert payload["reconciliation"]["variance_explained"] is True
 
 
 def test_sales_income_normalizes_live_whatsapp_date_and_label_variants(
@@ -221,6 +267,78 @@ def test_sales_income_extracts_operator_provenance_from_live_whatsapp_shapes(
     assert payload["provenance"]["cashier"] == "Maria Sine"
     assert payload["provenance"]["assistant"] == "John Kalo"
     assert payload["provenance"]["balanced_by"] == "Mary Pita"
+
+
+def test_sales_income_bena_road_balanced_report_still_accepted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        _sales_work_item(
+            [
+                "DAY-END SALES REPORT",
+                "Branch: Bena Road Branch",
+                "Date: 28/04/2026",
+                "Gross Sales: 1200",
+                "Cash Sales: 700",
+                "Eftpos Sales: 500",
+                "Traffic: 20",
+                "Served: 12",
+                "Notes: Balanced and checked",
+            ]
+        )
+    )
+
+    structured_path = tmp_path / "records" / "structured" / "sales_income" / "bena_road" / "2026-04-28.json"
+
+    assert result.payload["status"] == "accepted"
+    assert result.payload["branch"] == "bena_road"
+    assert result.payload["report_date"] == "2026-04-28"
+    assert structured_path.exists()
+
+
+def test_sales_income_waigani_returns_preserve_gross_and_net_sales(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        _sales_work_item(
+            [
+                "DAY-END SALES REPORT",
+                "Branch: Waigani Branch",
+                "Date: 20/05/2026",
+                "Till 1:",
+                "Z/Reading = K3,766.20",
+                "Item returns = K25.00",
+                "Till 2:",
+                "Z/Reading = K2,755.00",
+                "Item returns = K21.00",
+                "Gross Z total: K6,521.20",
+                "Item returns total: K46.00",
+                "Cash Sales: K4,868.20",
+                "Card Sales: K1,607.00",
+                "Net Sales: K6,475.20",
+                "Total Sales: K6,475.20",
+                "Traffic: 120",
+                "Served: 98",
+                "Return Type: Cash refund",
+                "Supervisor Confirmation: YES",
+            ]
+        )
+    )
+
+    assert result.payload["status"] == "accepted_with_warning"
+    assert result.payload["metrics"]["gross_sales"] == 6521.20
+    assert result.payload["metrics"]["net_sales"] == 6475.20
+    assert result.payload["metrics"]["item_returns"] == 46.00
+    assert result.payload["metrics"]["item_returns_total"] == 46.00
+    assert result.payload["metrics"]["total_returns"] == 46.00
+    assert result.payload["metrics"]["total_sales"] == 6475.20
+    assert result.payload["metrics"]["z_reading"] == 6521.20
 
 
 def _patch_output_paths(tmp_path: Path, monkeypatch) -> None:

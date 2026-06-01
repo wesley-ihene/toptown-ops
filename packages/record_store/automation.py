@@ -59,6 +59,12 @@ WHATSAPP_RESPONSE_MODE_ENV_VAR = "TOPTOWN_WHATSAPP_RESPONSE_MODE"
 WHATSAPP_OUTBOUND_MODE_ENV_VAR = "WHATSAPP_OUTBOUND_MODE"
 DUPLICATE_KEEP_DAYS = 7
 LOGGER = logging.getLogger(__name__)
+RUNTIME_STATUS = "LIVE_RUNTIME"
+RUNTIME_OWNER = "packages.record_store.automation"
+RUNTIME_NOTE = (
+    "Live owner of automated analytics rebuilds and WhatsApp response "
+    "orchestration."
+)
 
 
 def run_post_write_automation(
@@ -437,8 +443,14 @@ def generate_whatsapp_conversation_reply(
 ) -> dict[str, Any] | None:
     """Generate, persist, and optionally dispatch one Phase C1 WhatsApp reply."""
 
+    resolved_mode = _conversation_response_mode(mode)
+    duplicate_handling = _duplicate_handling_from_outcome(outcome)
     stored_context = None
-    if not replay:
+    if not replay and _duplicate_response_reuse_allowed(
+        duplicate_handling=duplicate_handling,
+        replay=replay,
+        mode=resolved_mode,
+    ):
         stored_context = load_sender_context(sender_phone, output_root=source_root)
     response_context = route_conversation_response(
         outcome,
@@ -447,6 +459,9 @@ def generate_whatsapp_conversation_reply(
         conversation_context=stored_context,
     )
     response_context = _with_mixed_children_feedback(response_context=response_context, outcome=outcome)
+    if duplicate_handling:
+        response_context["duplicate_handling"] = duplicate_handling
+        _log_duplicate_decision_override(duplicate_handling=duplicate_handling, response_context=response_context)
     if not replay:
         store_sender_interaction(
             sender_phone=sender_phone,
@@ -457,7 +472,7 @@ def generate_whatsapp_conversation_reply(
         response_context=response_context,
         replay=replay,
         source_root=source_root,
-        mode=mode,
+        mode=resolved_mode,
         dispatcher=dispatcher,
     )
 
@@ -493,6 +508,61 @@ def _with_mixed_children_feedback(
     return updated_response_context
 
 
+def _duplicate_handling_from_outcome(outcome: Mapping[str, Any] | Any) -> dict[str, Any]:
+    """Return duplicate no-write context when one outcome carries it."""
+
+    payload = outcome.payload if hasattr(outcome, "payload") and isinstance(getattr(outcome, "payload"), Mapping) else outcome
+    if not isinstance(payload, Mapping):
+        return {}
+    duplicate_handling = payload.get("duplicate_handling")
+    if not isinstance(duplicate_handling, Mapping):
+        return {}
+    return dict(duplicate_handling)
+
+
+def _duplicate_response_reuse_allowed(
+    *,
+    duplicate_handling: Mapping[str, Any] | object,
+    replay: bool,
+    mode: str,
+) -> bool:
+    """Return whether duplicate response flows may reuse prior context or artifacts."""
+
+    if not isinstance(duplicate_handling, Mapping):
+        return True
+    if duplicate_handling.get("write_suppressed") is not True or duplicate_handling.get("duplicate") is not True:
+        return True
+    if replay:
+        return True
+    return mode in {"write_only", "disabled", "off"}
+
+
+def _log_duplicate_decision_override(
+    *,
+    duplicate_handling: Mapping[str, Any],
+    response_context: Mapping[str, Any],
+) -> None:
+    """Emit one audit log when duplicate handling surfaces a different live decision."""
+
+    previous_status = _string_or_none(duplicate_handling.get("previous_governance_status"))
+    current_status = _string_or_none(response_context.get("governance_status")) or _string_or_none(
+        duplicate_handling.get("current_governance_status")
+    )
+    if previous_status is None or current_status is None or previous_status == current_status:
+        return
+    _log_event(
+        "info",
+        "duplicate_decision_override_applied",
+        source_message_id=_string_or_none(response_context.get("source_message_id")),
+        sender_phone=_string_or_none(response_context.get("sender_phone")),
+        previous_decision=previous_status,
+        new_decision=current_status,
+        duplicate_reason=_string_or_none(duplicate_handling.get("reason")),
+        duplicate_basis=_string_or_none(duplicate_handling.get("duplicate_basis")),
+        response_type=_string_or_none(response_context.get("response_type")),
+    )
+
+
 def dispatch_whatsapp_response(
     *,
     response_context: Mapping[str, Any],
@@ -504,9 +574,19 @@ def dispatch_whatsapp_response(
     """Render, persist, and optionally dispatch one normalized WhatsApp response."""
 
     source_repo_root = Path(source_root) if source_root is not None else REPO_ROOT
-    rendered = render_whatsapp_response(response_context)
+
+    taop_feedback_enabled = os.getenv("TAOP_FEEDBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+
+    if taop_feedback_enabled:
+        rendered = render_whatsapp_response(response_context)
+    else:
+        rendered = {
+            "should_send": False,
+            "response_text": "[TAOP DISABLED - AGENT OUTPUT ONLY]",
+        }
+
     response_type = _string_or_none(response_context.get("response_type"))
-    if response_context.get("should_reply") is not True or rendered.get("should_send") is not True or response_type is None:
+    if response_context.get("should_reply") is not True or response_type is None:
         return {
             "response_id": None,
             "response_type": response_type,
@@ -524,8 +604,13 @@ def dispatch_whatsapp_response(
     dispatch_payload["response_id"] = _response_id(dispatch_payload)
     resolved_mode = _conversation_response_mode(mode)
     is_replay = bool(replay) if replay is not None else bool(response_context.get("is_replay") is True)
+    duplicate_handling = response_context.get("duplicate_handling")
     existing_artifact = _existing_response_artifact(dispatch_payload, output_root=source_repo_root)
-    if existing_artifact is not None:
+    if existing_artifact is not None and _duplicate_response_reuse_allowed(
+        duplicate_handling=duplicate_handling,
+        replay=is_replay,
+        mode=resolved_mode,
+    ):
         existing_status = _artifact_dispatch_status(existing_artifact)
         if existing_status in {"sent", "duplicate"}:
             return {
@@ -557,10 +642,10 @@ def dispatch_whatsapp_response(
         output_root=source_repo_root,
         overwrite=existing_artifact is not None,
     )
-    if response_type == "duplicate_notice":
+    if response_type in {"duplicate_notice", "duplicate_ack"}:
         _log_event(
             "info",
-            "duplicate_notice_generated",
+            "duplicate_notice_generated" if response_type == "duplicate_notice" else "duplicate_ack_generated",
             response_id=artifact["response_id"],
             source_message_id=source_message_id,
             sender_phone=sender_phone,
@@ -576,6 +661,8 @@ def dispatch_whatsapp_response(
     artifact_updated = False
 
     if is_replay and not _replay_responses_enabled():
+        dispatch_status = "suppressed"
+    elif rendered.get("should_send") is not True:
         dispatch_status = "suppressed"
     elif resolved_mode in {"disabled", "off"}:
         dispatch_status = "suppressed"
@@ -645,7 +732,7 @@ def dispatch_whatsapp_response(
         source_message_id=source_message_id,
         governance_status=_string_or_none(response_context.get("governance_status")),
         report_type=_string_or_none(response_context.get("report_type")),
-        replay_suppressed=is_replay and dispatch_status == "suppressed",
+        replay_suppressed=True if is_replay and dispatch_status == "suppressed" else None,
         reason=_string_or_none(response_context.get("reason")),
         conversation_date=_string_or_none(response_context.get("report_date")),
         outcome=_string_or_none(response_context.get("observability_outcome")),
@@ -705,7 +792,7 @@ def _duplicate_archive_date(path: Path, payload: Mapping[str, Any]) -> str:
             and candidate[8:10].isdigit()
         ):
             return candidate
-    parent_name = path.parent.name
+    parent_name = path.parent.name.replace("_", "-")
     if (
         len(parent_name) == 10
         and parent_name[4] == "-"

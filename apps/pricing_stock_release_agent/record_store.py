@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from packages.common.branch import canonical_branch_slug
+from packages.common.branch import canonical_branch_slug_or_none
 from packages.common.date import normalize_report_date
 from packages.record_store.writer import write_governed_structured
 
@@ -34,22 +34,23 @@ def write_structured_record(
     branch_slug = _canonical_branch_slug(branch)
     normalized_date = _normalize_report_date(report_date)
     persisted_payload = dict(payload)
-    persisted_payload["branch_slug"] = branch_slug
+    if branch_slug is not None:
+        persisted_payload["branch_slug"] = branch_slug
     persisted_payload["report_date"] = normalized_date
 
     return write_governed_structured(
         signal_type=SIGNAL_TYPE,
-        branch=branch_slug,
+        branch=branch_slug or branch.strip(),
         date=normalized_date,
         payload=persisted_payload,
-        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
+        metadata=metadata if isinstance(metadata, dict) else dict(metadata) if isinstance(metadata, Mapping) else None,
     )
 
 
-def _canonical_branch_slug(branch: str) -> str:
+def _canonical_branch_slug(branch: str) -> str | None:
     """Return the canonical branch slug used for structured record paths."""
 
-    return canonical_branch_slug(branch)
+    return canonical_branch_slug_or_none(branch)
 
 
 def _normalize_report_date(report_date: str) -> str:

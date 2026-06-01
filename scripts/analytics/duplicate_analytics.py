@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from packages.common.branch import canonical_branch_slug
+from packages.common.branch import canonical_branch_slug_or_none
 from packages.common.paths import REPO_ROOT
 from packages.record_store.naming import safe_segment
 
@@ -182,6 +182,10 @@ def _load_duplicate_records_for_date(*, source_root: Path, report_date: str) -> 
 
     archive_dir = source_root / "records" / "duplicates" / "whatsapp" / report_date
     if not archive_dir.exists():
+        legacy_archive_dir = source_root / "records" / "duplicates" / "whatsapp" / safe_segment(report_date)
+        if legacy_archive_dir.exists():
+            archive_dir = legacy_archive_dir
+    if not archive_dir.exists():
         return []
 
     records: list[dict[str, Any]] = []
@@ -217,7 +221,8 @@ def _normalize_branch(value: object) -> str:
     cleaned = _string_or_none(value)
     if cleaned is None:
         return "unknown"
-    return safe_segment(canonical_branch_slug(cleaned))
+    canonical = canonical_branch_slug_or_none(cleaned)
+    return safe_segment(canonical) if canonical is not None else "unknown"
 
 
 def _normalize_key(value: object) -> str:

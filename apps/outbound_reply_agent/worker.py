@@ -181,7 +181,7 @@ def dispatch_outbound_reply(
 def _normalized_payload(payload: Mapping[str, Any]) -> tuple[dict[str, str], str | None]:
     sender_phone = _required_text(payload.get("sender_phone"))
     response_text = _required_text(payload.get("response_text"))
-    response_type = _required_text(payload.get("response_type"))
+    response_type = _required_text(payload.get("response_type")) or _response_type_from_processing_status(payload)
     source_message_id = _required_text(payload.get("source_message_id"))
     response_id = _required_text(payload.get("response_id"))
     if None in {sender_phone, response_text, response_type, source_message_id, response_id}:
@@ -196,6 +196,21 @@ def _normalized_payload(payload: Mapping[str, Any]) -> tuple[dict[str, str], str
         },
         None,
     )
+
+
+def _response_type_from_processing_status(payload: Mapping[str, Any]) -> str | None:
+    """Derive one outbound ack type from the current processing status when needed."""
+
+    processing_status = _required_text(payload.get("processing_status")) or _required_text(payload.get("status"))
+    if processing_status == "accepted":
+        return "success_ack"
+    if processing_status == "accepted_with_warning":
+        return "warning_ack"
+    if processing_status == "needs_review":
+        return "review_ack"
+    if processing_status == "duplicate":
+        return "duplicate_ack"
+    return None
 
 
 def _artifact_dispatched_at(artifact: Mapping[str, Any]) -> str | None:

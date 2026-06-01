@@ -31,6 +31,7 @@ _REPORT_ALIASES = {
     "staff performance report": "staff_performance",
     "supervisor control": "supervisor_control",
     "supervisor control report": "supervisor_control",
+    "supervisor control summary": "supervisor_control",
 }
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 
 import packages.record_store.paths as record_paths
@@ -559,14 +560,24 @@ def test_conversation_reply_generated_metric_is_recorded_for_successful_path(
     payload = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
 
     assert result is not None
-    assert result["dispatch_status"] == "generated"
+    if _taop_feedback_enabled():
+        assert result["dispatch_status"] == "generated"
+        expected_summary = {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 0,
+        }
+    else:
+        assert result["dispatch_status"] == "suppressed"
+        expected_summary = {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 1,
+        }
     assert payload is not None
-    assert payload["summary"] == {
-        "conversation_replies_generated": 1,
-        "conversation_replies_sent": 0,
-        "conversation_replies_failed": 0,
-        "conversation_replies_suppressed": 0,
-    }
+    assert payload["summary"] == expected_summary
     assert payload["events"][0]["response_type"] == "accepted_ack"
     assert payload["events"][0]["replay_suppressed"] is False
 
@@ -590,11 +601,27 @@ def test_conversation_reply_sent_metric_is_recorded_for_live_dispatch(
     payload = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
 
     assert result is not None
-    assert result["dispatch_status"] == "sent"
+    if _taop_feedback_enabled():
+        assert result["dispatch_status"] == "sent"
+        expected_summary = {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 1,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 0,
+        }
+        expected_event_status = "sent"
+    else:
+        assert result["dispatch_status"] == "suppressed"
+        expected_summary = {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 1,
+        }
+        expected_event_status = "suppressed"
     assert payload is not None
-    assert payload["summary"]["conversation_replies_generated"] == 1
-    assert payload["summary"]["conversation_replies_sent"] == 1
-    assert payload["events"][0]["dispatch_status"] == "sent"
+    assert payload["summary"] == expected_summary
+    assert payload["events"][0]["dispatch_status"] == expected_event_status
 
 
 def test_conversation_reply_failed_metric_is_recorded_for_dispatch_failure(
@@ -619,11 +646,27 @@ def test_conversation_reply_failed_metric_is_recorded_for_dispatch_failure(
     payload = load_daily_artifact("conversation_replies", _today_utc(), output_root=tmp_path)
 
     assert result is not None
-    assert result["dispatch_status"] == "failed"
+    if _taop_feedback_enabled():
+        assert result["dispatch_status"] == "failed"
+        expected_summary = {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 1,
+            "conversation_replies_suppressed": 0,
+        }
+        expected_event_status = "failed"
+    else:
+        assert result["dispatch_status"] == "suppressed"
+        expected_summary = {
+            "conversation_replies_generated": 1,
+            "conversation_replies_sent": 0,
+            "conversation_replies_failed": 0,
+            "conversation_replies_suppressed": 1,
+        }
+        expected_event_status = "suppressed"
     assert payload is not None
-    assert payload["summary"]["conversation_replies_generated"] == 1
-    assert payload["summary"]["conversation_replies_failed"] == 1
-    assert payload["events"][0]["dispatch_status"] == "failed"
+    assert payload["summary"] == expected_summary
+    assert payload["events"][0]["dispatch_status"] == expected_event_status
 
 
 def test_conversation_reply_suppressed_metric_is_recorded_for_replay_suppression(
@@ -687,3 +730,7 @@ def _accepted_outcome() -> AgentResult:
             "outputs": ["records/structured/sales_income/waigani/2026-04-07.json"],
         },
     )
+
+
+def _taop_feedback_enabled() -> bool:
+    return os.getenv("TAOP_FEEDBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}

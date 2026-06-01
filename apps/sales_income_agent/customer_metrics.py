@@ -1,10 +1,14 @@
-"""Customer metric derivation and validation for sales reports."""
+"""Customer metric derivation and data-quality validation for sales reports."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from apps.sales_income_agent.warnings import WarningEntry, make_warning
+from apps.sales_income_agent.warnings import (
+    MISSING_CUSTOMER_DATA_WARNING_CODE,
+    WarningEntry,
+    make_warning,
+)
 
 LOW_CONVERSION_THRESHOLD = 0.35
 
@@ -13,9 +17,9 @@ LOW_CONVERSION_THRESHOLD = 0.35
 class CustomerMetrics:
     """Derived customer metrics and validations."""
 
-    traffic: int = 0
-    served: int = 0
-    conversion_rate: float = 0.0
+    traffic: int | None = None
+    served: int | None = None
+    conversion_rate: float | None = None
     warnings: list[WarningEntry] = field(default_factory=list)
 
 
@@ -24,41 +28,59 @@ def evaluate_customer_metrics(
     traffic: int | None,
     served: int | None,
 ) -> CustomerMetrics:
-    """Return customer metrics and warnings from traffic/served fields."""
+    """Return customer metrics and data-quality warnings from traffic/served fields."""
 
-    normalized_traffic = traffic or 0
-    normalized_served = served or 0
     warnings: list[WarningEntry] = []
 
-    if normalized_traffic > 0 and normalized_served > normalized_traffic:
+    if traffic is None or served is None:
+        warnings.append(
+            make_warning(
+                code=MISSING_CUSTOMER_DATA_WARNING_CODE,
+                severity="warning",
+                message=_missing_customer_data_message(traffic=traffic, served=served),
+            )
+        )
+    elif served > traffic:
         warnings.append(
             make_warning(
                 code="data_mismatch",
                 severity="warning",
                 message=(
-                    f"Served count {normalized_served} exceeds traffic count "
-                    f"{normalized_traffic}."
+                    f"Served count {served} exceeds traffic count "
+                    f"{traffic}."
                 ),
             )
         )
 
-    conversion_rate = 0.0
-    if normalized_traffic > 0:
-        conversion_rate = round(normalized_served / normalized_traffic, 4)
-        if conversion_rate < LOW_CONVERSION_THRESHOLD:
-            warnings.append(
-                make_warning(
-                    code="low_conversion",
-                    severity="warning",
-                    message=(
-                        f"Conversion rate {conversion_rate:.2%} is below the review threshold."
-                    ),
-                )
-            )
+    conversion_rate = _conversion_rate(traffic=traffic, served=served)
 
     return CustomerMetrics(
-        traffic=normalized_traffic,
-        served=normalized_served,
+        traffic=traffic,
+        served=served,
         conversion_rate=conversion_rate,
         warnings=warnings,
     )
+
+
+def _conversion_rate(*, traffic: int | None, served: int | None) -> float | None:
+    """Return one customer conversion rate or ``None`` when inputs are incomplete."""
+
+    if traffic is None or served is None:
+        return None
+    if traffic == 0:
+        return 0.0
+    return round(served / traffic, 4)
+
+
+def _missing_customer_data_message(*, traffic: int | None, served: int | None) -> str:
+    """Describe which customer-count inputs are missing."""
+
+    missing_fields = []
+    if traffic is None:
+        missing_fields.append("traffic")
+    if served is None:
+        missing_fields.append("served")
+
+    if len(missing_fields) == 2:
+        return "Traffic and served counts are missing, so conversion could not be evaluated."
+    return f"{missing_fields[0].capitalize()} count is missing, so conversion could not be evaluated."

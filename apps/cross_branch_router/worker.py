@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from apps.analytics_query_engine.worker import execute_cross_branch_query
-from packages.branch_registry import canonical_branch_slug
+from packages.branch_registry import canonical_branch_slug_or_none
 from packages.common.analytics_loader import display_branch_name
 
 _QUERY_PATTERN = re.compile(
@@ -56,7 +56,9 @@ def parse_cross_branch_query(
     if query_type is None:
         return None
 
-    branch = canonical_branch_slug(match.group(2))
+    branch = canonical_branch_slug_or_none(match.group(2))
+    if branch is None:
+        return None
     report_date = _clean_text(match.group(3))
     return {
         "is_command": True,

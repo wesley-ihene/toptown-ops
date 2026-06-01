@@ -9,12 +9,10 @@ import re
 from typing import Any
 import unicodedata
 
-from apps.pricing_stock_release_agent.parser import ParsedBaleSummary, parse_work_item
 from packages.normalization.branches import CANONICAL_BRANCHES, normalize_branch
-from packages.normalization.currency import normalize_money
 from packages.normalization.dates import normalize_report_date
 from packages.report_policy import get_report_policy
-from packages.signal_contracts.work_item import WorkItem
+from packages.validation import normalize_diagnostics
 
 _REPORT_LABELS = {
     "sales": "Day-End Sales Report",
@@ -29,7 +27,9 @@ _REPORT_LABELS = {
     "bale_summary": "Daily Bale Summary",
     "pricing_stock_release": "Daily Bale Summary",
     "supervisor_control": "Supervisor Control Report",
+    "supervisor_control_summary": "Supervisor Control Summary",
     "store_monitoring": "Store Monitoring Report",
+    "mixed": "Mixed Report",
 }
 _DUPLICATE_REPORT_LABELS = {
     "sales": "Day-End Sales Report",
@@ -47,20 +47,6 @@ _DUPLICATE_REPORT_LABELS = {
 }
 _BRANCH_LINE_PATTERN = re.compile(r"^\s*branch\s*[:=-]\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
 _DATE_LINE_PATTERN = re.compile(r"^\s*date\s*[:=-]\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
-_DAY_FIELD_PATTERN = re.compile(r"^\s*day\s*[:=-]\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
-_TOTAL_QTY_LINE_PATTERN = re.compile(
-    r"^\s*total\s+(?:qty|quantity)\s*[:=-]\s*(.+?)\s*$",
-    flags=re.IGNORECASE | re.MULTILINE,
-)
-_TOTAL_AMOUNT_LINE_PATTERN = re.compile(
-    r"^\s*total\s+amount\s*[:=-]\s*(.+?)\s*$",
-    flags=re.IGNORECASE | re.MULTILINE,
-)
-_CURRENCY_FRAGMENT_PATTERN = re.compile(
-    r"(?P<fragment>(?:PGK\s*|K\s*)\d[\d,\s]*\.\d+|(?:PGK\s*|K\s*)\d[\d,\s]*)",
-    flags=re.IGNORECASE,
-)
-_QTY_WITH_UNIT_PATTERN = re.compile(r"\b(?P<qty>\d+)\s*(?P<unit>pcs?|pce)\b", flags=re.IGNORECASE)
 _DETERMINISTIC_REVIEW_REASONS = frozenset(
     {
         "mixed_child_requires_review",
@@ -79,20 +65,22 @@ def build_report_feedback(response_context: Mapping[str, Any]) -> dict[str, Any]
     if response_type is None:
         return None
 
-    if response_type == "duplicate_notice":
+    if response_type in {"duplicate_notice", "duplicate_ack"}:
         return build_duplicate_feedback(response_context)
 
     report_type = _canonical_report_type(_reported_type(response_context))
-    if report_type == "bale_summary":
+    if response_type in {"accepted_ack", "correction_accepted_ack"}:
+        mixed_partial_feedback = _mixed_partial_success_feedback(response_context)
+        if mixed_partial_feedback is not None:
+            return {
+                "response_text": mixed_partial_feedback,
+            }
+    if report_type == "bale_summary" and response_type in {"accepted_ack", "correction_accepted_ack"}:
         return build_bale_summary_feedback(response_context)
     if response_type in {"review_ack", "correction_review_ack"}:
-        review_reason = _resolved_review_reason(response_context)
-        if review_reason in _DETERMINISTIC_REVIEW_REASONS:
-            response_context_with_reason = dict(response_context)
-            response_context_with_reason["reason"] = review_reason
-            return {
-                "response_text": build_review_feedback(response_context_with_reason),
-            }
+        return _generic_review_feedback_payload(response_context)
+    if response_type in {"rejected_fix_request", "correction_repeat_fix_request"}:
+        return _generic_rejection_feedback_payload(response_context)
     return None
 
 
@@ -100,6 +88,13 @@ def build_review_feedback(response_context: Mapping[str, Any]) -> str:
     """Render deterministic TAOP review feedback when bale-specific details are unavailable."""
 
     feedback_context = _mapping(response_context.get("feedback_context"))
+    diagnostics = _feedback_diagnostics(feedback_context)
+    if diagnostics is not None:
+        return _render_diagnostic_feedback(
+            heading="⚠️ TAOP REVIEW REQUIRED",
+            response_context=response_context,
+            diagnostics=diagnostics,
+        )
     human_tolerance = _human_tolerance(feedback_context)
     report_type = _reported_type(response_context)
     report_label = _REPORT_LABELS.get(report_type or "", "Report")
@@ -126,6 +121,13 @@ def build_review_feedback(response_context: Mapping[str, Any]) -> str:
     )
     if mixed_child_feedback is not None:
         return mixed_child_feedback
+    mixed_child_accountability = _mixed_child_accountability_feedback(
+        response_context=response_context,
+        feedback_context=feedback_context,
+        response_reason=review_reason,
+    )
+    if mixed_child_accountability is not None:
+        return mixed_child_accountability
     issues = _generic_review_issues(
         response_reason=review_reason,
         feedback_context=feedback_context,
@@ -234,6 +236,254 @@ def _mixed_child_review_feedback(
     return "\n".join(lines)
 
 
+def _mixed_child_accountability_feedback(
+    *,
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+    response_reason: str | None,
+) -> str | None:
+    """Render child-by-child accountability when a mixed review has explicit child detail."""
+
+    if response_reason != "mixed_child_requires_review":
+        return None
+
+    child_entries = [
+        entry
+        for child in _mapping_list(feedback_context.get("mixed_children"))
+        if (entry := _mixed_child_accountability_entry(child)) is not None
+    ]
+    if len(child_entries) < 2:
+        return None
+
+    reviewed_entries = [
+        entry
+        for entry in child_entries
+        if entry["status"] not in {"accepted", "accepted_with_warning", "ready"}
+    ]
+    if not reviewed_entries:
+        return None
+    if any(
+        entry["validation_error_code"] is None and entry["validation_error_message"] is None
+        for entry in reviewed_entries
+    ):
+        return None
+
+    branch = _normalized_branch_from_any(
+        response_context.get("branch"),
+        feedback_context.get("branch"),
+        *(entry["branch"] for entry in child_entries),
+        _branch_from_text(_raw_text(feedback_context)),
+    )
+    report_date = _normalized_report_date_from_any(
+        response_context.get("report_date"),
+        feedback_context.get("report_date"),
+        *(entry["report_date"] for entry in child_entries),
+        _report_date_from_text(_raw_text(feedback_context)),
+    )
+
+    lines = [
+        "⚠️ TAOP REVIEW REQUIRED",
+        "Report: Mixed Split Report",
+    ]
+    if branch is not None:
+        lines.append(f"Branch: {_upper_branch(branch)}")
+    if report_date is not None:
+        lines.append(f"Date: {_display_report_date(report_date)}")
+
+    lines.extend(["", "CHILD RESULTS"])
+    for entry in child_entries:
+        lines.append(f"child_{entry['child_index']}")
+        lines.append(f"child_index: {entry['child_index']}")
+        lines.append(f"report_type: {entry['report_type']}")
+        lines.append(f"status: {entry['status']}")
+        if entry["reason"] is not None:
+            lines.append(f"reason: {entry['reason']}")
+        if entry["validation_error_code"] is not None:
+            lines.append(f"validation_error_code: {entry['validation_error_code']}")
+        if entry["validation_error_message"] is not None:
+            lines.append(f"validation_error_message: {entry['validation_error_message']}")
+        lines.append("")
+
+    if lines[-1] == "":
+        lines.pop()
+
+    lines.extend(
+        [
+            "",
+            "ACTION",
+            _mixed_child_accountability_action(reviewed_entries),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _mixed_partial_success_feedback(response_context: Mapping[str, Any]) -> str | None:
+    """Render one accepted reply when a mixed split processed one or more child reports."""
+
+    feedback_context = _mapping(response_context.get("feedback_context"))
+    child_entries = [
+        entry
+        for child in _mapping_list(feedback_context.get("mixed_children"))
+        if (entry := _mixed_child_accountability_entry(child)) is not None
+    ]
+    if len(child_entries) < 2:
+        return None
+
+    accepted_statuses = {"accepted", "accepted_with_warning", "ready"}
+    processed_entries = [entry for entry in child_entries if entry["status"] in accepted_statuses]
+    reviewed_entries = [entry for entry in child_entries if entry["status"] not in accepted_statuses]
+    if not processed_entries:
+        return None
+
+    branch = _normalized_branch_from_any(
+        response_context.get("branch"),
+        feedback_context.get("branch"),
+        *(entry["branch"] for entry in child_entries),
+        _branch_from_text(_raw_text(feedback_context)),
+    )
+    report_date = _normalized_report_date_from_any(
+        response_context.get("report_date"),
+        feedback_context.get("report_date"),
+        *(entry["report_date"] for entry in child_entries),
+        _report_date_from_text(_raw_text(feedback_context)),
+    )
+
+    lines = ["✅ Mixed split reports received."]
+    if branch is not None or report_date is not None:
+        scope_parts: list[str] = []
+        if branch is not None:
+            scope_parts.append(_upper_branch(branch))
+        if report_date is not None:
+            scope_parts.append(_display_report_date(report_date) or report_date)
+        if scope_parts:
+            lines[0] = f"✅ Mixed split reports received for {', '.join(scope_parts)}."
+
+    lines.append(f"Processed: {_mixed_entry_report_labels(processed_entries)}.")
+    if not reviewed_entries:
+        return "\n".join(lines)
+
+    lines.append(f"Needs review: {_mixed_entry_report_labels(reviewed_entries)}.")
+    partial_issue = _mixed_partial_success_issue(reviewed_entries)
+    if partial_issue is not None:
+        lines.append(f"Issue: {partial_issue}")
+    lines.append(f"Action: {_mixed_partial_success_action(reviewed_entries)}")
+    return "\n".join(lines)
+
+
+def _mixed_child_accountability_entry(child: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return one normalized child-accountability entry when detail is available."""
+
+    raw_child_index = child.get("child_index")
+    if isinstance(raw_child_index, int) and raw_child_index > 0:
+        child_index = raw_child_index
+    else:
+        lineage = _mapping(child.get("lineage"))
+        lineage_child_index = child.get("lineage_child_index")
+        if not isinstance(lineage_child_index, int):
+            lineage_child_index = lineage.get("child_index")
+        child_index = lineage_child_index + 1 if isinstance(lineage_child_index, int) and lineage_child_index >= 0 else None
+
+    report_type = _text(child.get("response_report_type")) or _mixed_child_accountability_report_type(child)
+    status = _text(child.get("response_status")) or _mixed_child_accountability_status(child)
+    if child_index is None or report_type is None or status is None:
+        return None
+
+    reason = _text(child.get("reason"))
+    validation_error_code = _text(child.get("validation_error_code"))
+    validation_error_message = _text(child.get("validation_error_message"))
+    if validation_error_code is None or validation_error_message is None:
+        validation = _mapping(child.get("validation"))
+        details = _mapping(validation.get("details"))
+        validation_error_code = validation_error_code or _text(details.get("validation_error_code"))
+        validation_error_message = validation_error_message or _text(details.get("validation_error_message"))
+        rejections = validation.get("rejections")
+        if isinstance(rejections, list):
+            first_rejection = next((item for item in rejections if isinstance(item, Mapping)), None)
+            if first_rejection is not None:
+                validation_error_code = validation_error_code or _text(first_rejection.get("reason_code")) or _text(first_rejection.get("code"))
+                validation_error_message = validation_error_message or _text(first_rejection.get("reason_detail")) or _text(first_rejection.get("message"))
+
+    if reason is None and status in {"accepted", "accepted_with_warning"} and report_type == "day_end_sales":
+        reason = "totals_reconciled"
+    if status not in {"accepted", "accepted_with_warning", "ready"} and validation_error_message is not None:
+        reason = None
+    return {
+        "child_index": child_index,
+        "report_type": report_type,
+        "status": status,
+        "reason": reason,
+        "validation_error_code": validation_error_code,
+        "validation_error_message": validation_error_message,
+        "branch": _text(child.get("branch")),
+        "report_date": _text(child.get("report_date")),
+    }
+
+
+def _mixed_child_accountability_report_type(child: Mapping[str, Any]) -> str | None:
+    """Return the response-facing report type for one mixed child."""
+
+    report_type = _text(child.get("report_type")) or _text(child.get("report_family"))
+    if report_type in {"sales_income", "sales", "day_end_sales"}:
+        return "day_end_sales"
+    if report_type == "supervisor_control":
+        header_line = _text(child.get("header_line"))
+        normalized_header = unicodedata.normalize("NFKC", header_line).casefold() if header_line is not None else None
+        if normalized_header is not None and "summary" in normalized_header:
+            return "supervisor_control_summary"
+        return "supervisor_control"
+    return report_type
+
+
+def _mixed_child_accountability_status(child: Mapping[str, Any]) -> str | None:
+    """Return the response-facing status for one mixed child."""
+
+    status = _text(child.get("status"))
+    if status == "needs_review":
+        return "review"
+    return status
+
+
+def _mixed_child_accountability_action(reviewed_entries: list[dict[str, Any]]) -> str:
+    """Return the specific resend action for the reviewed child set."""
+
+    if len(reviewed_entries) == 1:
+        entry = reviewed_entries[0]
+        report_label = _REPORT_LABELS.get(entry["report_type"], "split report")
+        return f"Resend only child_{entry['child_index']} as a complete {report_label}."
+    return "Resend each reviewed split child as a complete single report."
+
+
+def _mixed_partial_success_action(reviewed_entries: list[dict[str, Any]]) -> str:
+    """Return the resend action for a partially processed mixed split."""
+
+    if len(reviewed_entries) == 1:
+        report_label = _REPORT_LABELS.get(reviewed_entries[0]["report_type"], "split report")
+        return f"Resend only the {report_label} as one complete report."
+    return "Resend each reviewed split report as a separate complete report."
+
+
+def _mixed_partial_success_issue(reviewed_entries: list[dict[str, Any]]) -> str | None:
+    """Return one concise surfaced issue for the reviewed split child set when available."""
+
+    if len(reviewed_entries) != 1:
+        return None
+    reviewed_entry = reviewed_entries[0]
+    return reviewed_entry["validation_error_message"] or reviewed_entry["reason"]
+
+
+def _mixed_entry_report_labels(entries: list[dict[str, Any]]) -> str:
+    """Return one human-readable report label list for mixed-child feedback."""
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        label = _REPORT_LABELS.get(entry["report_type"], "Report")
+        if label not in seen:
+            labels.append(label)
+            seen.add(label)
+    return ", ".join(labels) if labels else "Report"
+
+
 def build_rejection_feedback(response_context: Mapping[str, Any]) -> str:
     """Render deterministic TAOP rejection feedback for unsupported or malformed inputs."""
 
@@ -243,6 +493,13 @@ def build_rejection_feedback(response_context: Mapping[str, Any]) -> str:
         return _unsupported_report_feedback()
 
     feedback_context = _mapping(response_context.get("feedback_context"))
+    diagnostics = _feedback_diagnostics(feedback_context)
+    if diagnostics is not None:
+        return _render_diagnostic_feedback(
+            heading="❌ TAOP REPORT REJECTED",
+            response_context=response_context,
+            diagnostics=diagnostics,
+        )
     report_label = _REPORT_LABELS.get(report_type or "", "Report")
     branch = _normalized_branch_from_any(
         response_context.get("branch"),
@@ -255,9 +512,11 @@ def build_rejection_feedback(response_context: Mapping[str, Any]) -> str:
         _report_date_from_text(_raw_text(feedback_context)),
     )
     surfaced_reason = _generic_rejection_reason(_text(response_context.get("reason")))
-    action_line = f"Resend using the exact SOP format for {report_label}."
-    if response_type == "correction_repeat_fix_request":
-        action_line = f"Resend with the missing corrections applied using the exact SOP format for {report_label}."
+    action_line = _generic_rejection_action(
+        response_reason=_text(response_context.get("reason")),
+        report_label=report_label,
+        response_type=response_type,
+    )
 
     lines = [
         "❌ TAOP REPORT REJECTED",
@@ -281,8 +540,217 @@ def build_rejection_feedback(response_context: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _feedback_diagnostics(feedback_context: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return one normalized diagnostics payload when the response context carries it."""
+
+    diagnostics = normalize_diagnostics(_mapping(feedback_context).get("diagnostics"))
+    if diagnostics:
+        return diagnostics
+    return None
+
+
+def _render_diagnostic_feedback(
+    *,
+    heading: str,
+    response_context: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+) -> str:
+    """Render a concise diagnostics-led review or rejection message."""
+
+    feedback_context = _mapping(response_context.get("feedback_context"))
+    human_tolerance = _human_tolerance(feedback_context)
+    response_report_type = _canonical_report_type(_reported_type(response_context))
+    diagnostic_report_type = _duplicate_report_type(diagnostics.get("report_type"))
+    if response_report_type in {None, "mixed", "routing", "report"} and diagnostic_report_type is not None:
+        report_type = diagnostic_report_type
+    else:
+        report_type = response_report_type or diagnostic_report_type
+    report_label = _REPORT_LABELS.get(report_type or "", "Report")
+    branch = _normalized_branch_from_any(
+        response_context.get("branch"),
+        diagnostics.get("branch"),
+    )
+    report_date = _normalized_report_date_from_any(
+        response_context.get("report_date"),
+        diagnostics.get("date"),
+    )
+    lines = [
+        heading,
+        f"Report: {report_label}",
+    ]
+    if branch is not None:
+        lines.append(f"Branch: {_upper_branch(branch)}")
+    if report_date is not None:
+        lines.append(f"Date: {_display_report_date(report_date)}")
+
+    normalized_lines = _normalized_by_taop_lines(human_tolerance)
+    if normalized_lines:
+        lines.extend(["", "NORMALIZED BY TAOP", *normalized_lines])
+
+    lines.extend(
+        [
+            "",
+            "VALIDATION",
+            *_render_diagnostic_checks(diagnostics, report_label=report_label),
+            "",
+            "FAILED CHECKS",
+            *_render_failed_rules(diagnostics),
+            "",
+            "ACTION REQUIRED",
+            _diagnostic_resend_action(
+                diagnostics,
+                report_label=report_label,
+                response_type=_text(response_context.get("response_type")),
+                response_reason=_text(response_context.get("reason")),
+            ),
+            "",
+            "CONFIDENCE",
+            _diagnostic_confidence_line(diagnostics),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_diagnostic_checks(
+    diagnostics: Mapping[str, Any],
+    *,
+    report_label: str,
+) -> list[str]:
+    """Render validation status lines from one diagnostics payload."""
+
+    rendered: list[str] = []
+    failed_rule_fields = {
+        _text(rule.get("field"))
+        for rule in diagnostics.get("failed_rules", [])
+        if isinstance(rule, Mapping)
+    }
+    for check in diagnostics.get("checks", []):
+        if not isinstance(check, Mapping):
+            continue
+        name = _text(check.get("name"))
+        passed = check.get("passed")
+        if name is None or not isinstance(passed, bool):
+            continue
+        prefix = "✔" if passed else "❌"
+        detail = _text(check.get("detail"))
+        result = _text(check.get("result"))
+        parser = _text(check.get("parser"))
+        if name == "report_type_detected":
+            rendered.append(
+                f"{prefix} Report type {'detected' if passed else 'not detected'}: {detail or report_label}"
+            )
+        elif name == "branch_resolved":
+            if not passed and "Branch" not in failed_rule_fields:
+                rendered.append("ℹ Branch resolution not surfaced in reply metadata")
+            else:
+                rendered.append(
+                    f"{prefix} Branch {'resolved' if passed else 'unresolved'}"
+                    + (f": {_upper_branch(detail)}" if detail is not None else "")
+                )
+        elif name == "date_resolved":
+            if not passed and "Date" not in failed_rule_fields:
+                rendered.append("ℹ Date resolution not surfaced in reply metadata")
+            else:
+                rendered.append(
+                    f"{prefix} Date {'resolved' if passed else 'unresolved'}"
+                    + (f": {_display_report_date(detail)}" if detail is not None else "")
+                )
+        elif name == "mixed_content":
+            if passed:
+                suffix = {
+                    "single": "single report detected",
+                    "split": "split completed safely",
+                }.get(result or "", detail or "single report detected")
+                rendered.append(f"{prefix} Mixed content check: {suffix}")
+            else:
+                rendered.append(f"{prefix} Mixed content split failed: {detail or 'unsafe fan-out'}")
+        elif name == "specialist_parser_stage":
+            if result == "not_run":
+                rendered.append(f"{prefix} Specialist parser not run: {detail or 'blocked upstream'}")
+            elif passed:
+                parser_label = parser or "specialist parser"
+                rendered.append(f"{prefix} Specialist parser passed: {parser_label}")
+            else:
+                parser_label = parser or "specialist parser"
+                rendered.append(f"{prefix} Specialist parser failed: {parser_label}")
+        else:
+            rendered.append(f"{prefix} {detail or name.replace('_', ' ')}")
+    return rendered or ["ℹ Validation detail was not available."]
+
+
+def _render_failed_rules(diagnostics: Mapping[str, Any]) -> list[str]:
+    """Render numbered failed rules from one diagnostics payload."""
+
+    rendered: list[str] = []
+    rules = diagnostics.get("failed_rules")
+    if not isinstance(rules, list) or not rules:
+        return ["1. TAOP could not isolate an exact failed rule from the current payload."]
+
+    unique_rules = _dedupe_rendered_failed_rules(rules)
+    for index, rule in enumerate(unique_rules, start=1):
+        if not isinstance(rule, Mapping):
+            continue
+        reason = _text(rule.get("reason")) or "Validation failed."
+        rendered.append(f"{index}. {reason}")
+        expected = _text(rule.get("expected"))
+        received = _text(rule.get("received"))
+        if expected is not None:
+            rendered.append(f"- Expected: {expected}")
+        if received is not None:
+            rendered.append(f"- Received: {received}")
+    return rendered or ["1. TAOP could not isolate an exact failed rule from the current payload."]
+
+
+def _dedupe_rendered_failed_rules(rules: list[Any]) -> list[Mapping[str, Any]]:
+    """Remove duplicate failed-rule blocks before rendering reply text."""
+
+    unique: dict[tuple[str, str, str, str], Mapping[str, Any]] = {}
+    for rule in rules:
+        if not isinstance(rule, Mapping):
+            continue
+        key = (
+            _text(rule.get("code")) or "",
+            _text(rule.get("reason")) or "",
+            _text(rule.get("expected")) or "",
+            _text(rule.get("received")) or "",
+        )
+        if key not in unique:
+            unique[key] = rule
+    return list(unique.values())
+
+
+def _diagnostic_resend_action(
+    diagnostics: Mapping[str, Any],
+    *,
+    report_label: str,
+    response_type: str | None = None,
+    response_reason: str | None = None,
+) -> str:
+    """Return the operator resend instruction from diagnostics or a safe fallback."""
+
+    if response_type == "correction_repeat_fix_request":
+        return _generic_rejection_action(
+            response_reason=response_reason,
+            report_label=report_label,
+            response_type=response_type,
+        )
+    resend_action = _text(diagnostics.get("resend_action"))
+    if resend_action is not None:
+        return resend_action
+    return f"Correct only the failed checks above and resend the {report_label}."
+
+
+def _diagnostic_confidence_line(diagnostics: Mapping[str, Any]) -> str:
+    """Return the confidence line for the diagnostic feedback footer."""
+
+    confidence = diagnostics.get("confidence")
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        return f"Score: {float(confidence):.2f}"
+    return "Score: not available"
+
+
 def build_bale_summary_feedback(response_context: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return deterministic TAOP feedback for bale-summary replies."""
+    """Return display-only TAOP feedback for bale-summary replies."""
 
     response_type = _text(response_context.get("response_type"))
     if response_type not in {
@@ -296,64 +764,44 @@ def build_bale_summary_feedback(response_context: Mapping[str, Any]) -> dict[str
         return None
 
     feedback_context = _mapping(response_context.get("feedback_context"))
-    raw_text = _raw_text(feedback_context)
-    parsed = _parse_bale_summary(raw_text) if raw_text is not None else None
-    metrics = _mapping(feedback_context.get("metrics"))
-    items = _mapping_list(feedback_context.get("items"))
-    if not metrics and not items and parsed is None:
+    acceptance = _resolved_bale_acceptance(response_context, feedback_context)
+    metrics = _resolved_bale_metrics(response_context, feedback_context)
+    items = _resolved_bale_items(response_context, feedback_context)
+    warnings = _resolved_bale_warnings(response_context, feedback_context)
+    final_status = _resolved_feedback_status(response_context, feedback_context, acceptance)
+    if final_status is None and not metrics and not items and not warnings:
         return None
 
-    branch = _resolved_branch(response_context, feedback_context, parsed)
-    report_date = _resolved_report_date(response_context, feedback_context, parsed)
+    branch = _resolved_branch(response_context, feedback_context)
+    report_date = _resolved_report_date(response_context, feedback_context)
     branch_display = _upper_branch(branch)
     date_display = _display_report_date(report_date)
-    decision = _decision_for_response_type(response_type)
+    decision = _bale_feedback_decision(final_status)
     confidence = _first_float(
+        acceptance.get("confidence"),
+        response_context.get("confidence"),
         feedback_context.get("confidence"),
-        _mapping(feedback_context.get("acceptance")).get("confidence"),
     )
-    thresholds = _thresholds_for_report(_canonical_report_type(_reported_type(response_context)) or "bale_summary", feedback_context)
+    thresholds = _acceptance_thresholds(acceptance)
 
-    calculated_total_qty = _calculated_total_qty(metrics, items)
-    calculated_total_amount = _calculated_total_amount(metrics, items)
-    declared_total_qty = _declared_total_qty(raw_text, parsed)
-    declared_total_amount = _declared_total_amount(raw_text, parsed)
-    validation_results = _bale_validation_results(
-        decision=decision,
-        branch=branch,
-        structured_output_path=_text(feedback_context.get("structured_output_path"))
-        or _text(response_context.get("structured_output_path")),
-        declared_total_qty=declared_total_qty,
-        calculated_total_qty=calculated_total_qty,
-        declared_total_amount=declared_total_amount,
-        calculated_total_amount=calculated_total_amount,
+    all_issues = _bale_issues_from_context(
+        warnings=warnings,
+        response_reason=_resolved_bale_reason(response_context, feedback_context, acceptance),
+        final_status=final_status,
     )
-    issues_detected = _bale_issues(
-        raw_text=raw_text,
-        branch=branch,
-        feedback_context=feedback_context,
-        confidence=confidence,
-        thresholds=thresholds,
-        decision=decision,
-        validation_results=validation_results,
-        response_reason=_text(response_context.get("reason")),
-    )
-    action_required = _action_required(
-        decision=decision,
-        issues_detected=issues_detected,
-        validation_results=validation_results,
-    )
+    blocking_issues, warning_issues = _split_display_issues(all_issues)
+    issues_detected = warning_issues if _bale_display_status(final_status) == "accepted_with_warning" else all_issues
+    action_required = _bale_action_required(final_status=final_status)
     normalized_summary = {
-        "items": _item_count(items, parsed),
-        "total_qty": calculated_total_qty,
-        "total_amount": calculated_total_amount,
+        "items": len(items),
+        "total_qty": _float_or_none(metrics.get("total_qty")),
+        "total_amount": _float_or_none(metrics.get("total_amount")),
     }
 
     response_text = _render_bale_summary_feedback_text(
-        response_type=response_type,
+        final_status=final_status,
         branch_display=branch_display,
         date_display=date_display,
-        validation_results=validation_results,
         issues_detected=issues_detected,
         action_required=action_required,
         normalized_summary=normalized_summary,
@@ -366,12 +814,14 @@ def build_bale_summary_feedback(response_context: Mapping[str, Any]) -> dict[str
         "branch": branch,
         "report_date": report_date,
         "decision": decision,
-        "status": _text(response_context.get("governance_status")) or _text(feedback_context.get("status")),
+        "status": final_status,
         "confidence": confidence,
         "auto_accept_threshold": thresholds.get("auto_accept_min"),
         "review_threshold": thresholds.get("review_min"),
-        "validation_results": validation_results,
+        "validation_results": [],
         "issues_detected": issues_detected,
+        "blocking_issues_detected": blocking_issues,
+        "warning_issues_detected": warning_issues,
         "action_required": action_required,
         "normalized_summary": normalized_summary,
         "response_text": response_text,
@@ -382,7 +832,7 @@ def build_duplicate_feedback(response_context: Mapping[str, Any]) -> dict[str, A
     """Return a more specific duplicate notice when scope can be inferred safely."""
 
     response_type = _text(response_context.get("response_type"))
-    if response_type != "duplicate_notice":
+    if response_type not in {"duplicate_notice", "duplicate_ack"}:
         return None
 
     feedback_context = _mapping(response_context.get("feedback_context"))
@@ -410,33 +860,260 @@ def build_duplicate_feedback(response_context: Mapping[str, Any]) -> dict[str, A
     )
 
     report_label = _duplicate_report_label(report_type)
-    lines = ["ℹ️ TAOP DUPLICATE REPORT DETECTED", f"Report: {report_label}"]
-    if branch is not None:
-        lines.append(f"Branch: {_upper_branch(branch)}")
-    if report_date is not None:
-        lines.append(f"Date: {_display_report_date(report_date)}")
-    lines.extend(
-        [
-            "",
-            "This report was already received and processed earlier.",
-            "No new processing was applied.",
-        ]
-    )
+    if response_type == "duplicate_ack":
+        lines = ["⚠️ DUPLICATE REPORT DETECTED"]
+        if branch is not None:
+            lines.append(f"Branch: {_upper_branch(branch)}")
+        if report_date is not None:
+            lines.append(f"Date: {_display_report_date(report_date)}")
+        lines.append(f"Type: {report_label}")
+        lines.append("This report was already received. No new record was created.")
+        action_required = "No new record was created."
+    else:
+        lines = ["ℹ️ TAOP DUPLICATE REPORT DETECTED", f"Report: {report_label}"]
+        if branch is not None:
+            lines.append(f"Branch: {_upper_branch(branch)}")
+        if report_date is not None:
+            lines.append(f"Date: {_display_report_date(report_date)}")
+        lines.extend(
+            [
+                "",
+                "This report was already received and processed earlier.",
+                "No new processing was applied.",
+            ]
+        )
+        action_required = "No new processing was applied."
     return {
         "report_type": report_type,
         "branch": branch,
         "report_date": report_date,
+        "route": _feedback_route(response_context=response_context, feedback_context=feedback_context),
         "decision": "duplicate",
         "status": "duplicate",
+        "reason_codes": _feedback_reason_codes(response_context=response_context, feedback_context=feedback_context),
         "confidence": None,
         "auto_accept_threshold": None,
         "review_threshold": None,
         "validation_results": [],
         "issues_detected": [],
-        "action_required": "No new processing was applied.",
+        "action_required": action_required,
         "normalized_summary": None,
         "response_text": "\n".join(lines),
     }
+
+
+def _generic_review_feedback_payload(response_context: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return structured review feedback for non-bale responses."""
+
+    feedback_context = _mapping(response_context.get("feedback_context"))
+    diagnostics = _feedback_diagnostics(feedback_context)
+    report_type = _reported_type(response_context)
+    if report_type in {None, "unknown"}:
+        return None
+
+    review_reason = _resolved_review_reason(response_context)
+    response_context_with_reason = dict(response_context)
+    if review_reason is not None:
+        response_context_with_reason["reason"] = review_reason
+    report_label = _REPORT_LABELS.get(report_type or "", "Report")
+    branch = _normalized_branch_from_any(
+        response_context.get("branch"),
+        feedback_context.get("branch"),
+        _branch_from_text(_raw_text(feedback_context)),
+    )
+    report_date = _normalized_report_date_from_any(
+        response_context.get("report_date"),
+        feedback_context.get("report_date"),
+        _report_date_from_text(_raw_text(feedback_context)),
+    )
+    acceptance = _mapping(feedback_context.get("acceptance"))
+    status = _resolved_feedback_status(response_context, feedback_context, acceptance) or "needs_review"
+    action_required = _generic_review_action(
+        response_reason=review_reason,
+        report_label=report_label,
+    )
+    return {
+        "report_type": report_type,
+        "branch": branch,
+        "report_date": report_date,
+        "route": _feedback_route(response_context=response_context, feedback_context=feedback_context),
+        "decision": "review",
+        "status": status,
+        "reason_codes": _feedback_reason_codes(
+            response_context=response_context_with_reason,
+            feedback_context=feedback_context,
+        ),
+        "confidence": _first_float(
+            feedback_context.get("confidence"),
+            acceptance.get("confidence"),
+        ),
+        "auto_accept_threshold": _float_or_none(_acceptance_thresholds(acceptance).get("auto_accept_min")),
+        "review_threshold": _float_or_none(_acceptance_thresholds(acceptance).get("review_min")),
+        "validation_results": _render_diagnostic_checks(diagnostics, report_label=report_label)
+        if diagnostics is not None
+        else _generic_validation_results(
+            report_label=report_label,
+            branch=branch,
+            report_date=report_date,
+            response_reason=review_reason,
+        ),
+        "issues_detected": _render_failed_rules(diagnostics)
+        if diagnostics is not None
+        else _generic_review_issues(
+            response_reason=review_reason,
+            feedback_context=feedback_context,
+            confidence=_first_float(
+                feedback_context.get("confidence"),
+                acceptance.get("confidence"),
+            ),
+            thresholds=_acceptance_thresholds(acceptance),
+        ),
+        "action_required": _diagnostic_resend_action(
+            diagnostics,
+            report_label=report_label,
+            response_type=_text(response_context_with_reason.get("response_type")),
+            response_reason=review_reason,
+        )
+        if diagnostics is not None
+        else action_required,
+        **({"diagnostics": diagnostics} if diagnostics is not None else {}),
+        "normalized_summary": None,
+        "response_text": build_review_feedback(response_context_with_reason),
+    }
+
+
+def _generic_rejection_feedback_payload(response_context: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return structured rejection feedback for non-bale responses."""
+
+    report_type = _reported_type(response_context)
+    if report_type in {None, "unknown"}:
+        return None
+
+    feedback_context = _mapping(response_context.get("feedback_context"))
+    diagnostics = _feedback_diagnostics(feedback_context)
+    report_label = _REPORT_LABELS.get(report_type or "", "Report")
+    branch = _normalized_branch_from_any(
+        response_context.get("branch"),
+        feedback_context.get("branch"),
+        _branch_from_text(_raw_text(feedback_context)),
+    )
+    report_date = _normalized_report_date_from_any(
+        response_context.get("report_date"),
+        feedback_context.get("report_date"),
+        _report_date_from_text(_raw_text(feedback_context)),
+    )
+    acceptance = _mapping(feedback_context.get("acceptance"))
+    status = _resolved_feedback_status(response_context, feedback_context, acceptance) or "rejected"
+    surfaced_reason = _generic_rejection_reason(_text(response_context.get("reason")))
+    action_required = _generic_rejection_action(
+        response_reason=_text(response_context.get("reason")),
+        report_label=report_label,
+        response_type=_text(response_context.get("response_type")),
+    )
+    return {
+        "report_type": report_type,
+        "branch": branch,
+        "report_date": report_date,
+        "route": _feedback_route(response_context=response_context, feedback_context=feedback_context),
+        "decision": "rejected",
+        "status": status,
+        "reason_codes": _feedback_reason_codes(response_context=response_context, feedback_context=feedback_context),
+        "confidence": _first_float(
+            feedback_context.get("confidence"),
+            acceptance.get("confidence"),
+        ),
+        "auto_accept_threshold": None,
+        "review_threshold": None,
+        "validation_results": _render_diagnostic_checks(diagnostics, report_label=report_label)
+        if diagnostics is not None
+        else _generic_validation_results(
+            report_label=report_label,
+            branch=branch,
+            report_date=report_date,
+            response_reason=_normalized_review_reason(_text(response_context.get("reason"))),
+        ),
+        "issues_detected": _render_failed_rules(diagnostics)
+        if diagnostics is not None
+        else [
+            "1. " + surfaced_reason.rstrip(".") + ".",
+            "2. TAOP could not approve this report with the current format.",
+        ],
+        "action_required": _diagnostic_resend_action(
+            diagnostics,
+            report_label=report_label,
+            response_type=_text(response_context.get("response_type")),
+            response_reason=_text(response_context.get("reason")),
+        )
+        if diagnostics is not None
+        else action_required,
+        **({"diagnostics": diagnostics} if diagnostics is not None else {}),
+        "normalized_summary": None,
+        "response_text": build_rejection_feedback(response_context),
+    }
+
+
+def _feedback_route(
+    *,
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+) -> str | None:
+    """Return the surfaced routing family when available."""
+
+    return (
+        _text(feedback_context.get("route"))
+        or _text(response_context.get("report_type"))
+        or _text(feedback_context.get("report_type"))
+    )
+
+
+def _feedback_reason_codes(
+    *,
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+) -> list[str]:
+    """Return surfaced outbound reason codes in stable order."""
+
+    candidates: list[str] = []
+    explicit_reason = _surface_reason_code(_text(response_context.get("reason")))
+    if explicit_reason is not None:
+        candidates.append(explicit_reason)
+
+    validation_codes = sorted(
+        {
+            surfaced
+            for surfaced in (
+                _surface_reason_code(code)
+                for code in _validation_reason_codes(
+                    _mapping(feedback_context.get("validation")),
+                    _mapping(feedback_context.get("candidate_validation")),
+                )
+            )
+            if surfaced is not None
+        }
+    )
+    candidates.extend(validation_codes)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        deduped.append(candidate)
+        seen.add(candidate)
+    return deduped
+
+
+def _surface_reason_code(reason: str | None) -> str | None:
+    """Map internal governance reasons onto outbound reason codes."""
+
+    normalized = _normalized_review_reason(reason)
+    if normalized is None:
+        return None
+    if normalized == "mixed_report_split_not_safe":
+        return "mixed_report_signals"
+    if normalized in {"validation_failed", "fallback_validation_failed", "invalid_input"}:
+        return "validation_failed"
+    return normalized
 
 
 def _unsupported_report_feedback() -> str:
@@ -735,10 +1412,11 @@ def _generic_issue_lines(*, feedback_context: Mapping[str, Any]) -> list[str]:
 
 def _generic_rejection_reason(reason: str | None) -> str:
     mapping = {
-        "validation_failed": "Required report fields were missing or invalid.",
+        "correction_request_requires_full_report": "Correction request detected, but full replacement report rows are required.",
+        "validation_failed": "Report format failed SOP validation. Recheck required fields and totals.",
         "confidence_below_reject_threshold": "Confidence was below the configured acceptance threshold.",
-        "fallback_validation_failed": "Required report fields were missing or invalid.",
-        "invalid_input": "Format does not match the expected SOP structure.",
+        "fallback_validation_failed": "Report format failed SOP validation. Recheck required fields and totals.",
+        "invalid_input": "Report format failed SOP validation. Recheck required fields and totals.",
         "unknown_report_type": "Format does not match any supported report type.",
     }
     if reason is None:
@@ -824,20 +1502,20 @@ def _known_review_issue_lines(response_reason: str | None) -> list[str]:
             "One split report still needs review before final processing.",
         ],
         "mixed_report_split_not_safe": [
-            "TAOP detected multiple report sections in one message.",
-            "The split was not safe enough to process automatically.",
+            "Mixed report types detected.",
+            "Send each report separately or use approved split format.",
         ],
         "missing_branch": [
-            "Branch is missing from the report text.",
-            "TAOP cannot route the report without a branch.",
+            "Branch missing or unclear.",
+            "Add Branch: <branch>.",
         ],
         "missing_date": [
-            "Report date is missing from the report text.",
-            "TAOP cannot process the report without a date.",
+            "Date missing or unclear.",
+            "Add Date: DD/MM/YY.",
         ],
         "supervisor_control_invalid_format": [
-            "Supervisor Control Report format did not match the expected structure.",
-            "Use the exact Supervisor Control Report fields before resending.",
+            "Supervisor Control Report format failed SOP validation.",
+            "Recheck required fields and totals.",
         ],
     }
     issues = mapping.get(response_reason)
@@ -847,63 +1525,79 @@ def _known_review_issue_lines(response_reason: str | None) -> list[str]:
 def _generic_review_action(*, response_reason: str | None, report_label: str) -> str:
     mapping = {
         "mixed_child_requires_review": "Please resend the report that still needs review as one report per message.",
-        "mixed_report_split_not_safe": "Please resend one report per message using the exact SOP report title.",
-        "missing_branch": "Add the Branch line and resend.",
-        "missing_date": "Add the Date line and resend.",
-        "supervisor_control_invalid_format": "Resend using the exact Supervisor Control Report format.",
+        "mixed_report_split_not_safe": "Mixed report types detected. Send each report separately or use approved split format.",
+        "missing_branch": "Branch missing or unclear. Add Branch: <branch>.",
+        "missing_date": "Date missing or unclear. Add Date: DD/MM/YY.",
+        "supervisor_control_invalid_format": "Report format failed SOP validation. Recheck required fields and totals.",
     }
     return mapping.get(response_reason, "Please correct the issues above and resend.")
 
 
+def _generic_rejection_action(
+    *,
+    response_reason: str | None,
+    report_label: str,
+    response_type: str | None,
+) -> str:
+    if response_type == "correction_repeat_fix_request":
+        return f"Resend using the exact SOP format for {report_label} with the missing corrections applied."
+    if response_reason == "correction_request_requires_full_report":
+        return "Resend the full replacement report with all bale item rows and totals."
+    if response_reason in {"validation_failed", "fallback_validation_failed", "invalid_input"}:
+        return f"Recheck required fields and totals, then resend using the exact SOP format for {report_label}."
+    return f"Resend using the exact SOP format for {report_label}."
+
+
 def _render_bale_summary_feedback_text(
     *,
-    response_type: str,
+    final_status: str | None,
     branch_display: str,
     date_display: str | None,
-    validation_results: list[dict[str, Any]],
     issues_detected: list[dict[str, Any]],
     action_required: str,
     normalized_summary: dict[str, Any],
     confidence: float | None,
     thresholds: Mapping[str, Any],
 ) -> str:
-    header = _bale_header(response_type=response_type, branch_display=branch_display)
+    display_status = _bale_display_status(final_status)
+    header = _bale_header(branch_display=branch_display, final_status=final_status)
     lines = [header]
     if date_display is not None:
         lines.append(f"Date: {date_display}")
-    lines.append("")
+    status_line = _bale_status_line(display_status)
+    if status_line is not None:
+        lines.extend(["", status_line])
 
-    if response_type in {"review_ack", "correction_review_ack"}:
-        lines.extend(["STATUS: ⚠️ REVIEW REQUIRED", ""])
-    elif response_type in {"rejected_fix_request", "correction_repeat_fix_request"}:
-        lines.extend(["STATUS: ❌ CORRECTION REQUIRED", ""])
+    lines.extend(
+        [
+            "",
+            "SUMMARY",
+            f"Items: {int(normalized_summary.get('items') or 0)}",
+            f"Total Qty: {_format_qty_value(normalized_summary.get('total_qty'))}",
+            f"Total Amount: {_format_money_value(normalized_summary.get('total_amount'))}",
+        ]
+    )
 
-    lines.append("VALIDATION RESULTS")
-    lines.extend(_render_validation_results(validation_results))
-
-    if response_type in {"accepted_ack", "correction_accepted_ack"}:
-        lines.extend(
-            [
-                "",
-                "SUMMARY",
-                f"Items: {int(normalized_summary.get('items') or 0)}",
-                f"Total Qty: {_format_qty_value(normalized_summary.get('total_qty'))}",
-                f"Total Amount: {_format_money_value(normalized_summary.get('total_amount'))}",
-                "",
-                "No correction required.",
-            ]
-        )
-        return "\n".join(lines)
-
-    lines.append("")
-    lines.append("ISSUES DETECTED")
-    if issues_detected:
+    if display_status == "accepted_with_warning" and issues_detected:
+        lines.extend(["", "WARNINGS"])
         lines.extend(_render_issues(issues_detected))
-    else:
-        lines.append("1. Review required:")
-        lines.append("- Operator review was triggered for this bale summary.")
+    elif display_status in {"needs_review", "rejected"}:
+        lines.extend(["", "ISSUES"])
+        if issues_detected:
+            lines.extend(_render_issues(issues_detected))
+        else:
+            lines.extend(
+                [
+                    "1. Governance review required:",
+                    "- The bale summary was held for review without specialist-agent issue detail.",
+                ]
+            )
 
-    lines.extend(["", "ACTION REQUIRED", action_required])
+    if display_status in {"accepted", "accepted_with_warning"}:
+        lines.extend(["", action_required])
+    else:
+        lines.extend(["", "ACTION REQUIRED", action_required])
+
     if confidence is not None:
         lines.extend(
             [
@@ -920,246 +1614,61 @@ def _render_bale_summary_feedback_text(
             lines.append(f"Review threshold: {review_min:.2f}")
     return "\n".join(lines)
 
-
-def _bale_validation_results(
+def _bale_issues_from_context(
     *,
-    decision: str,
-    branch: str | None,
-    structured_output_path: str | None,
-    declared_total_qty: float | None,
-    calculated_total_qty: float | None,
-    declared_total_amount: float | None,
-    calculated_total_amount: float | None,
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    if declared_total_qty is not None and calculated_total_qty is not None:
-        if _qty_matches(declared_total_qty, calculated_total_qty):
-            results.append(
-                {
-                    "status": "pass",
-                    "label": "Total Qty matches item sum",
-                    "details": _format_qty_value(calculated_total_qty),
-                }
-            )
-        else:
-            results.append(
-                {
-                    "status": "fail",
-                    "label": "Total Qty mismatch",
-                    "declared": _format_plain_number(declared_total_qty),
-                    "calculated": _format_plain_number(calculated_total_qty),
-                    "difference": _format_plain_number(abs(calculated_total_qty - declared_total_qty)),
-                }
-            )
-    elif calculated_total_qty is not None:
-        results.append(
-            {
-                "status": "pass",
-                "label": "Total Qty verified",
-                "details": _format_qty_value(calculated_total_qty),
-            }
-        )
-
-    if declared_total_amount is not None and calculated_total_amount is not None:
-        if _money_matches(declared_total_amount, calculated_total_amount):
-            results.append(
-                {
-                    "status": "pass",
-                    "label": "Total Amount matches item sum",
-                    "details": _format_money_value(calculated_total_amount),
-                }
-            )
-        else:
-            results.append(
-                {
-                    "status": "fail",
-                    "label": "Total Amount mismatch",
-                    "declared": _format_money_value(declared_total_amount),
-                    "calculated": _format_money_value(calculated_total_amount),
-                    "difference": _format_money_value(abs(calculated_total_amount - declared_total_amount)),
-                }
-            )
-    elif calculated_total_amount is not None:
-        results.append(
-            {
-                "status": "pass",
-                "label": "Total Amount verified",
-                "details": _format_money_value(calculated_total_amount),
-            }
-        )
-
-    if decision == "accepted" and branch is not None:
-        results.append({"status": "pass", "label": "Branch resolved", "details": None})
-    if decision == "accepted" and structured_output_path is not None:
-        results.append({"status": "pass", "label": "Report stored successfully", "details": None})
-    return results
-
-
-def _bale_issues(
-    *,
-    raw_text: str | None,
-    branch: str | None,
-    feedback_context: Mapping[str, Any],
-    confidence: float | None,
-    thresholds: Mapping[str, Any],
-    decision: str,
-    validation_results: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
     response_reason: str | None,
+    final_status: str | None,
 ) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
-    if raw_text:
-        day_match = _DAY_FIELD_PATTERN.search(raw_text)
-        if day_match is not None:
-            issues.append(
-                {
-                    "code": "non_standard_field_day",
-                    "title": "Non-standard field detected",
-                    "details": [f"\"Day: {day_match.group(1).strip()}\" is not required by SOP"],
-                }
-            )
-
-        currency_details = _currency_cleanup_details(raw_text)
-        if currency_details:
-            issues.append(
-                {
-                    "code": "currency_format_cleanup",
-                    "title": "Currency formatting needs cleanup",
-                    "details": currency_details,
-                }
-            )
-
-        qty_details = _qty_cleanup_details(raw_text)
-        if qty_details:
-            issues.append(
-                {
-                    "code": "qty_format_inconsistent",
-                    "title": "Quantity format inconsistent",
-                    "details": qty_details,
-                }
-            )
-
-        if not (_TOTAL_QTY_LINE_PATTERN.search(raw_text) and _TOTAL_AMOUNT_LINE_PATTERN.search(raw_text)):
-            issues.append(
-                {
-                    "code": "missing_total_section",
-                    "title": "Total section is incomplete",
-                    "details": ["Include both `Total Qty` and `Total Amount` lines in the bale summary."],
-                }
-            )
-
-        raw_branch = _branch_from_text(raw_text)
-        normalized_branch = _normalized_branch_from_any(raw_branch, branch)
-        if raw_branch is not None and normalized_branch is not None:
-            canonical_display = CANONICAL_BRANCHES.get(normalized_branch, normalized_branch.replace("_", " ").title())
-            if _text(raw_branch) != canonical_display and decision != "accepted":
-                issues.append(
-                    {
-                        "code": "branch_needs_normalization",
-                        "title": "Branch label needs cleanup",
-                        "details": [f"Use the canonical branch name for {canonical_display} in the bale summary."],
-                    }
-                )
-
-    warnings = _mapping_list(feedback_context.get("warnings"))
     for warning in warnings:
         code = _text(warning.get("code")) or "warning"
-        message = _text(warning.get("message"))
-        if code in {"data_mismatch", "missing_fields", "approval_backlog", "low_release_ratio", "financial_anomaly"} and message is not None:
-            issues.append(
-                {
-                    "code": code,
-                    "title": _warning_title(code),
-                    "details": [message],
-                }
-            )
-
-    validation = _mapping(feedback_context.get("validation"))
-    for rejection in _mapping_list(validation.get("rejections")):
-        code = _text(rejection.get("reason_code")) or _text(rejection.get("code"))
-        detail = _text(rejection.get("reason_detail")) or _text(rejection.get("message"))
-        if code in {"invalid_totals"}:
-            continue
-        if code is None or detail is None:
-            continue
+        message = _text(warning.get("message")) or "Specialist agent surfaced a warning."
         issues.append(
             {
                 "code": code,
-                "title": _validation_issue_title(code),
-                "details": [detail],
+                "title": _warning_title(code),
+                "details": [message],
+                "severity": _text(warning.get("severity")) or "warning",
             }
         )
 
-    if decision in {"review", "rejected"} and not issues and confidence is not None:
-        auto_accept_min = _float_or_none(thresholds.get("auto_accept_min"))
-        if auto_accept_min is not None and confidence < auto_accept_min:
+    if _bale_display_status(final_status) in {"needs_review", "rejected"}:
+        known_codes = {str(issue.get("code") or "") for issue in issues}
+        if response_reason is not None and response_reason not in known_codes:
             issues.append(
                 {
-                    "code": "confidence_below_auto_accept_threshold",
-                    "title": "Confidence below auto-accept threshold",
-                    "details": [f"Score {confidence:.2f} is below the auto-accept threshold of {auto_accept_min:.2f}."],
+                    "code": response_reason,
+                    "title": "Governance reason",
+                    "details": [_safe_reason_text(response_reason)],
+                    "severity": "error",
                 }
             )
-    if decision in {"review", "rejected"} and not issues and response_reason is not None:
-        issues.append(
-            {
-                "code": response_reason,
-                "title": "Review reason",
-                "details": [_safe_reason_text(response_reason)],
-            }
-        )
-
-    if any(result.get("status") == "fail" for result in validation_results):
-        issues = [issue for issue in issues if issue.get("code") != "data_mismatch"]
     return _dedupe_issues(issues)
 
 
-def _action_required(
-    *,
-    decision: str,
-    issues_detected: list[dict[str, Any]],
-    validation_results: list[dict[str, Any]],
-) -> str:
-    if decision == "accepted":
-        return "No correction required."
-    if decision == "duplicate":
-        return "No new processing was applied."
+def _split_display_issues(issues: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Separate sourced TAOP display issues into blocking errors and warnings."""
 
-    issue_codes = {str(issue.get("code")) for issue in issues_detected}
-    has_totals_failure = any(result.get("status") == "fail" for result in validation_results)
-    if has_totals_failure:
-        return "Please correct the totals and resend using the standard bale summary format."
-    if issue_codes & {"missing_fields", "missing_total_section"}:
-        return "Please resend with all required bale rows, branch, date, total quantity, and total amount."
-    if issue_codes:
-        return "Please resend using the standard bale summary format."
-    return "Please correct the flagged issues and resend using the standard bale summary format."
-
-
-def _render_validation_results(results: list[dict[str, Any]]) -> list[str]:
-    if not results:
-        return ["- No validation details were available."]
-
-    lines: list[str] = []
-    for index, result in enumerate(results):
-        status = result.get("status")
-        label = str(result.get("label") or "Validation check")
-        if status == "pass":
-            details = _text(result.get("details"))
-            lines.append(f"✔ {label}" + (f": {details}" if details is not None else ""))
+    blocking_issues: list[dict[str, Any]] = []
+    warning_issues: list[dict[str, Any]] = []
+    for issue in issues:
+        if _text(issue.get("severity")) == "error":
+            blocking_issues.append(issue)
         else:
-            lines.append(f"❌ {label}")
-            declared = _text(result.get("declared"))
-            calculated = _text(result.get("calculated"))
-            difference = _text(result.get("difference"))
-            if declared is not None:
-                lines.append(f"Declared: {declared}")
-            if calculated is not None:
-                lines.append(f"Calculated: {calculated}")
-            if difference is not None:
-                lines.append(f"Difference: {difference}")
-        if index < len(results) - 1 and status != "pass":
-            lines.append("")
-    return lines
+            warning_issues.append(issue)
+    return blocking_issues, warning_issues
+
+
+def _bale_action_required(*, final_status: str | None) -> str:
+    display_status = _bale_display_status(final_status)
+    if display_status == "accepted":
+        return "No correction required."
+    if display_status == "accepted_with_warning":
+        return "No resend required."
+    if display_status == "needs_review":
+        return "Follow the specialist-agent warnings and governance review outcome before resending."
+    return "Correct the blocking specialist-agent issues and resend."
 
 
 def _render_issues(issues: list[dict[str, Any]]) -> list[str]:
@@ -1174,15 +1683,18 @@ def _render_issues(issues: list[dict[str, Any]]) -> list[str]:
                 if detail_text is not None:
                     lines.append(f"- {detail_text}")
         else:
-            lines.append("- Review this bale summary and resend in the standard format.")
+            lines.append("- Review the specialist-agent output for this bale summary.")
     return lines
 
 
-def _bale_header(*, response_type: str, branch_display: str) -> str:
-    if response_type in {"accepted_ack", "correction_accepted_ack"}:
+def _bale_header(*, branch_display: str, final_status: str | None) -> str:
+    display_status = _bale_display_status(final_status)
+    if display_status == "accepted_with_warning":
+        return f"✅ TAOP BALE SUMMARY ACCEPTED WITH WARNING – {branch_display}"
+    if display_status == "accepted":
         return f"✅ TAOP BALE SUMMARY ACCEPTED – {branch_display}"
-    if response_type in {"review_ack", "correction_review_ack"}:
-        return f"📊 TAOP BALE SUMMARY REVIEW – {branch_display}"
+    if display_status == "needs_review":
+        return f"📊 TAOP BALE SUMMARY REVIEW REQUIRED – {branch_display}"
     return f"❌ TAOP BALE SUMMARY REJECTED – {branch_display}"
 
 
@@ -1210,14 +1722,123 @@ def _canonical_report_type(value: str | None) -> str | None:
     return normalized or None
 
 
-def _decision_for_response_type(response_type: str) -> str:
-    if response_type in {"accepted_ack", "correction_accepted_ack"}:
+def _resolved_bale_acceptance(
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    acceptance = _mapping(response_context.get("acceptance"))
+    if acceptance:
+        return acceptance
+    return _mapping(feedback_context.get("acceptance"))
+
+
+def _resolved_bale_metrics(
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    metrics = _mapping(response_context.get("metrics"))
+    if metrics:
+        return metrics
+    return _mapping(feedback_context.get("metrics"))
+
+
+def _resolved_bale_items(
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    items = _mapping_list(response_context.get("items"))
+    if items:
+        return items
+    return _mapping_list(feedback_context.get("items"))
+
+
+def _resolved_bale_warnings(
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    warnings = _mapping_list(response_context.get("warnings"))
+    if warnings:
+        return warnings
+    return _mapping_list(feedback_context.get("warnings"))
+
+
+def _resolved_feedback_status(
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+    acceptance: Mapping[str, Any],
+) -> str | None:
+    governance = _mapping(response_context.get("governance")) or _mapping(feedback_context.get("governance"))
+    return (
+        _text(response_context.get("governance_status"))
+        or _text(governance.get("status"))
+        or _text(feedback_context.get("governance_status"))
+        or _text(feedback_context.get("status"))
+        or _status_from_acceptance(acceptance)
+    )
+
+
+def _status_from_acceptance(acceptance: Mapping[str, Any]) -> str | None:
+    decision = _text(acceptance.get("decision")) or _text(acceptance.get("status"))
+    if decision == "accept":
         return "accepted"
-    if response_type in {"review_ack", "correction_review_ack"}:
+    if decision == "review":
+        return "needs_review"
+    if decision == "reject":
+        return "rejected"
+    return None
+
+
+def _bale_feedback_decision(final_status: str | None) -> str:
+    display_status = _bale_display_status(final_status)
+    if display_status in {"accepted", "accepted_with_warning"}:
+        return "accepted"
+    if display_status == "needs_review":
         return "review"
-    if response_type == "duplicate_notice":
-        return "duplicate"
     return "rejected"
+
+
+def _bale_display_status(final_status: str | None) -> str | None:
+    if final_status == "accepted_with_warning":
+        return "accepted_with_warning"
+    if final_status in {"accepted", "ready"}:
+        return "accepted"
+    if final_status in {"needs_review", "review", "conflict_blocked"}:
+        return "needs_review"
+    if final_status in {"rejected", "invalid_input"}:
+        return "rejected"
+    return None
+
+
+def _bale_status_line(display_status: str | None) -> str | None:
+    mapping = {
+        "accepted": "STATUS: ✅ ACCEPTED",
+        "accepted_with_warning": "STATUS: ⚠️ ACCEPTED WITH WARNING",
+        "needs_review": "STATUS: ⚠️ REVIEW REQUIRED",
+        "rejected": "STATUS: ❌ REJECTED",
+    }
+    return mapping.get(display_status)
+
+
+def _acceptance_thresholds(acceptance: Mapping[str, Any]) -> dict[str, float | None]:
+    thresholds = _mapping(acceptance.get("thresholds"))
+    return {
+        "auto_accept_min": _float_or_none(thresholds.get("auto_accept_min")),
+        "review_min": _float_or_none(thresholds.get("review_min")),
+        "reject_max": _float_or_none(thresholds.get("reject_max")),
+    }
+
+
+def _resolved_bale_reason(
+    response_context: Mapping[str, Any],
+    feedback_context: Mapping[str, Any],
+    acceptance: Mapping[str, Any],
+) -> str | None:
+    return (
+        _text(response_context.get("reason"))
+        or _text(_mapping(response_context.get("governance")).get("reason"))
+        or _text(_mapping(feedback_context.get("governance")).get("reason"))
+        or _text(acceptance.get("reason"))
+    )
 
 
 def _thresholds_for_report(report_type: str, feedback_context: Mapping[str, Any]) -> dict[str, float | None]:
@@ -1239,85 +1860,21 @@ def _thresholds_for_report(report_type: str, feedback_context: Mapping[str, Any]
 def _resolved_branch(
     response_context: Mapping[str, Any],
     feedback_context: Mapping[str, Any],
-    parsed: ParsedBaleSummary | None,
 ) -> str | None:
     return _normalized_branch_from_any(
         response_context.get("branch"),
         feedback_context.get("branch"),
-        parsed.branch if parsed is not None else None,
-        _branch_from_text(_raw_text(feedback_context)),
     )
 
 
 def _resolved_report_date(
     response_context: Mapping[str, Any],
     feedback_context: Mapping[str, Any],
-    parsed: ParsedBaleSummary | None,
 ) -> str | None:
     return _normalized_report_date_from_any(
         response_context.get("report_date"),
         feedback_context.get("report_date"),
-        parsed.report_date if parsed is not None else None,
-        _report_date_from_text(_raw_text(feedback_context)),
     )
-
-
-def _declared_total_qty(raw_text: str | None, parsed: ParsedBaleSummary | None) -> float | None:
-    del parsed
-    if raw_text is None:
-        return None
-    match = _TOTAL_QTY_LINE_PATTERN.search(raw_text)
-    if match is None:
-        return None
-    return _parse_loose_number(match.group(1))
-
-
-def _declared_total_amount(raw_text: str | None, parsed: ParsedBaleSummary | None) -> float | None:
-    del parsed
-    if raw_text is None:
-        return None
-    match = _TOTAL_AMOUNT_LINE_PATTERN.search(raw_text)
-    if match is None:
-        return None
-    return _parse_loose_money(match.group(1))
-
-
-def _calculated_total_qty(metrics: Mapping[str, Any], items: list[dict[str, Any]]) -> float | None:
-    metrics_value = _float_or_none(metrics.get("total_qty"))
-    if metrics_value is not None:
-        return metrics_value
-    total = 0.0
-    found = False
-    for item in items:
-        qty = _float_or_none(item.get("qty"))
-        if qty is None:
-            continue
-        total += qty
-        found = True
-    return total if found else None
-
-
-def _calculated_total_amount(metrics: Mapping[str, Any], items: list[dict[str, Any]]) -> float | None:
-    metrics_value = _float_or_none(metrics.get("total_amount"))
-    if metrics_value is not None:
-        return metrics_value
-    total = 0.0
-    found = False
-    for item in items:
-        amount = _float_or_none(item.get("amount"))
-        if amount is None:
-            continue
-        total += amount
-        found = True
-    return round(total, 2) if found else None
-
-
-def _item_count(items: list[dict[str, Any]], parsed: ParsedBaleSummary | None) -> int:
-    if items:
-        return len(items)
-    if parsed is not None:
-        return len(parsed.items)
-    return 0
 
 
 def _raw_text(feedback_context: Mapping[str, Any]) -> str | None:
@@ -1356,72 +1913,20 @@ def _load_json_mapping(path: Path) -> Mapping[str, Any]:
     return payload if isinstance(payload, Mapping) else {}
 
 
-def _parse_bale_summary(raw_text: str) -> ParsedBaleSummary | None:
-    try:
-        return parse_work_item(
-            WorkItem(
-                kind="raw_message",
-                payload={
-                    "classification": {"report_type": "bale_summary"},
-                    "raw_message": {"text": raw_text},
-                },
-            )
-        )
-    except Exception:
-        return None
-
-
-def _currency_cleanup_details(raw_text: str) -> list[str]:
-    details: list[str] = []
-    seen: set[str] = set()
-    for match in _CURRENCY_FRAGMENT_PATTERN.finditer(raw_text):
-        fragment = match.group("fragment").strip()
-        if fragment in seen or ", " not in fragment:
-            continue
-        normalized_amount = _parse_loose_money(fragment)
-        if normalized_amount is None:
-            continue
-        details.append(f"\"{fragment}\" should be \"{normalized_amount:.2f}\"")
-        seen.add(fragment)
-    return details
-
-
-def _qty_cleanup_details(raw_text: str) -> list[str]:
-    details: list[str] = []
-    seen: set[str] = set()
-    for match in _QTY_WITH_UNIT_PATTERN.finditer(raw_text):
-        fragment = match.group(0).strip()
-        if fragment in seen:
-            continue
-        qty = match.group("qty")
-        details.append(f"Use numbers only, e.g. \"{qty}\" not \"{fragment}\"")
-        seen.add(fragment)
-    return details[:3]
-
-
 def _warning_title(code: str) -> str:
     mapping = {
         "approval_backlog": "Approval backlog detected",
         "data_mismatch": "Totals or counts need review",
         "financial_anomaly": "Amount or quantity anomaly detected",
+        "format_cleanup": "Format cleanup applied",
+        "format_warning": "Format warning detected",
         "low_release_ratio": "Release ratio needs review",
         "missing_fields": "Required fields missing or incomplete",
+        "missing_provenance": "Prepared By details are incomplete",
+        "parser_failure": "Parser failure detected",
+        "totals_inferred": "Totals inferred from bale rows",
     }
-    return mapping.get(code, "Issue detected")
-
-
-def _validation_issue_title(code: str) -> str:
-    mapping = {
-        "missing_branch": "Branch is missing",
-        "missing_report_date": "Report date is missing",
-        "invalid_report_date": "Report date format is invalid",
-        "missing_metrics": "Metrics section is missing",
-        "missing_items": "Item list is missing",
-        "missing_required_field": "Required item field is missing",
-        "invalid_numeric_value": "Numeric value is invalid",
-        "invalid_count_mismatch": "Bale counts do not align",
-    }
-    return mapping.get(code, "Validation issue detected")
+    return mapping.get(code, code.replace("_", " ").capitalize() if code else "Issue detected")
 
 
 def _safe_reason_text(reason: str) -> str:
@@ -1429,6 +1934,10 @@ def _safe_reason_text(reason: str) -> str:
         return "Confidence is below the auto-accept threshold and needs review."
     if reason == "validation_failed":
         return "The bale summary did not satisfy the required validation checks."
+    if reason == "confidence_below_reject_threshold":
+        return "Confidence was below the rejection threshold."
+    if reason == "confidence_missing":
+        return "Confidence was missing, so governance held the bale summary for review."
     return reason.replace("_", " ")
 
 
@@ -1455,7 +1964,7 @@ def _infer_report_type_from_text(raw_text: str | None) -> str | None:
         return "staff_attendance"
     if "staff performance report" in normalized:
         return "staff_performance"
-    if "supervisor control report" in normalized:
+    if "supervisor control report" in normalized or "supervisor control summary" in normalized:
         return "supervisor_control"
     return None
 
@@ -1596,14 +2105,6 @@ def _normalized_by_taop_lines(human_tolerance: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _qty_matches(left: float, right: float) -> bool:
-    return abs(left - right) < 0.01
-
-
-def _money_matches(left: float, right: float) -> bool:
-    return abs(left - right) <= 0.01
-
-
 def _format_qty_value(value: object) -> str:
     numeric = _float_or_none(value)
     if numeric is None:
@@ -1618,36 +2119,6 @@ def _format_money_value(value: object) -> str:
     if numeric is None:
         return "unknown"
     return f"K{numeric:,.2f}"
-
-
-def _format_plain_number(value: object) -> str:
-    numeric = _float_or_none(value)
-    if numeric is None:
-        return "unknown"
-    if abs(numeric - round(numeric)) < 0.01:
-        return str(int(round(numeric)))
-    return f"{numeric:.2f}"
-
-
-def _parse_loose_money(raw_value: str) -> float | None:
-    normalized = normalize_money(raw_value)
-    if normalized.succeeded and normalized.normalized_value is not None:
-        return _float_or_none(normalized.normalized_value)
-
-    compact = re.sub(r",\s+", ",", raw_value)
-    normalized = normalize_money(compact)
-    if normalized.succeeded and normalized.normalized_value is not None:
-        return _float_or_none(normalized.normalized_value)
-    return None
-
-
-def _parse_loose_number(raw_value: str) -> float | None:
-    fragment_match = re.search(r"\d[\d,\s]*(?:\.\d+)?", raw_value)
-    if fragment_match is None:
-        return None
-    fragment = fragment_match.group(0)
-    compact = re.sub(r",\s+", ",", fragment)
-    return _float_or_none(compact.replace(",", "").replace(" ", ""))
 
 
 def _float_or_none(value: object) -> float | None:
@@ -1693,3 +2164,13 @@ def _text(value: object) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _normalize_text(value: str | None) -> str | None:
+    """Return a loose normalized text key for report-label comparisons."""
+
+    if value is None:
+        return None
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    collapsed = " ".join(re.sub(r"[^a-z0-9]+", " ", normalized).split())
+    return collapsed or None

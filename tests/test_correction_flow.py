@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from packages.record_store.automation import generate_whatsapp_conversation_reply
@@ -43,7 +44,10 @@ def test_correction_success_flow_uses_context_aware_reply(tmp_path: Path, monkey
     assert second is not None
     second_payload = _read_json(Path(second["json_path"]))
     assert second["response_type"] == "correction_accepted_ack"
-    assert second_payload["response_text"].startswith("✅ Corrected DAY-END SALES REPORT received")
+    if _taop_feedback_enabled():
+        assert second_payload["response_text"].startswith("✅ Corrected DAY-END SALES REPORT received")
+    else:
+        assert second_payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def test_repeat_failure_flow_uses_repeat_fix_request(tmp_path: Path, monkeypatch) -> None:
@@ -79,7 +83,10 @@ def test_repeat_failure_flow_uses_repeat_fix_request(tmp_path: Path, monkeypatch
     assert reply is not None
     payload = _read_json(Path(reply["json_path"]))
     assert reply["response_type"] == "correction_repeat_fix_request"
-    assert "missing corrections applied" in payload["response_text"]
+    if _taop_feedback_enabled():
+        assert "missing corrections applied" in payload["response_text"]
+    else:
+        assert payload["response_text"] == _TAOP_DISABLED_RESPONSE_TEXT
 
 
 def test_context_isolation_and_no_false_positives(tmp_path: Path, monkeypatch) -> None:
@@ -184,3 +191,10 @@ def _disable_llm_observability(monkeypatch) -> None:
 
     monkeypatch.setattr(response_worker, "record_conversation_llm_event", lambda **kwargs: None)
     response_worker._LLM_REWRITE_CACHE.clear()
+
+
+_TAOP_DISABLED_RESPONSE_TEXT = "[TAOP DISABLED - AGENT OUTPUT ONLY]"
+
+
+def _taop_feedback_enabled() -> bool:
+    return os.getenv("TAOP_FEEDBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}

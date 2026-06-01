@@ -123,7 +123,7 @@ def run_pricing_test() -> None:
         "role": "Supervisor",
     }
     assert len(payload["items"]) == 3
-    assert warning_codes == {"data_mismatch", "approval_backlog", "low_release_ratio"}
+    assert warning_codes == {"data_mismatch", "approval_backlog", "low_release_ratio", "missing_provenance"}
 
     print("PASS pricing_stock_release_agent")
 

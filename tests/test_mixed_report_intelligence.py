@@ -10,9 +10,57 @@ from apps.mixed_content_detector_agent.worker import BoundaryHint, MixedContentD
 from apps.orchestra.classifier import classify_work_item
 from apps.orchestra.intake import intake_raw_message
 from apps.orchestra.splitter import split_work_item as split_orchestra_work_item
-from apps.orchestrator_agent.worker import process_work_item
+from apps.orchestrator_agent.worker import _mixed_parent_decision, process_work_item
 from apps.report_splitter_agent.worker import split_report
 from packages.signal_contracts.work_item import WorkItem
+
+
+def test_mixed_parent_decision_accepts_sales_and_supervisor_pair_when_both_children_accept() -> None:
+    status, reason = _mixed_parent_decision(
+        child_results=[],
+        child_summaries=[
+            _mixed_child_summary("sales_income", "accepted"),
+            _mixed_child_summary("supervisor_control", "accepted"),
+        ],
+    )
+
+    assert (status, reason) == ("accepted", None)
+
+
+def test_mixed_parent_decision_keeps_sales_when_supervisor_child_needs_review() -> None:
+    status, reason = _mixed_parent_decision(
+        child_results=[],
+        child_summaries=[
+            _mixed_child_summary("sales_income", "accepted"),
+            _mixed_child_summary("supervisor_control", "needs_review"),
+        ],
+    )
+
+    assert (status, reason) == ("accepted_with_warning", None)
+
+
+def test_mixed_parent_decision_reviews_pair_when_sales_child_needs_review() -> None:
+    status, reason = _mixed_parent_decision(
+        child_results=[],
+        child_summaries=[
+            _mixed_child_summary("sales_income", "needs_review"),
+            _mixed_child_summary("supervisor_control", "accepted"),
+        ],
+    )
+
+    assert (status, reason) == ("needs_review", "mixed_child_requires_review")
+
+
+def test_mixed_parent_decision_preserves_warning_status_when_both_children_warn() -> None:
+    status, reason = _mixed_parent_decision(
+        child_results=[],
+        child_summaries=[
+            _mixed_child_summary("sales_income", "accepted_with_warning"),
+            _mixed_child_summary("supervisor_control", "accepted_with_warning"),
+        ],
+    )
+
+    assert (status, reason) == ("accepted_with_warning", None)
 
 
 def test_detector_identifies_sales_and_supervisor_control_as_mixed_report() -> None:
@@ -239,13 +287,13 @@ def test_orchestrator_accepts_split_for_sales_and_supervisor_control_summary(
     child_one, child_two = result.payload["fanout"]["children"]
     assert child_one["report_family"] == "sales_income"
     assert child_one["agent_name"] == "sales_income_agent"
-    assert child_one["status"] == "accepted"
+    assert child_one["status"] in {"accepted", "accepted_with_warning"}
     assert child_two["report_family"] == "supervisor_control"
     assert child_two["agent_name"] == "supervisor_control_agent"
     assert child_two["status"] == "accepted"
 
 
-def test_orchestrator_accepts_incomplete_supervisor_control_as_intelligence_warning(
+def test_orchestrator_keeps_incomplete_supervisor_control_as_non_blocking_warning(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -277,7 +325,7 @@ def test_orchestrator_accepts_incomplete_supervisor_control_as_intelligence_warn
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["status"] == "accepted_with_warning"
     assert result.payload["routing"]["review_reason"] is None
-    assert result.payload["governance"]["reasons"] == ["mixed_intelligence_warning"]
+    assert result.payload["governance"]["reasons"] == []
 
     sales_child, supervisor_child = result.payload["fanout"]["children"]
     assert sales_child["report_family"] == "sales_income"
@@ -293,6 +341,54 @@ def test_orchestrator_accepts_incomplete_supervisor_control_as_intelligence_warn
     assert supervisor_validation["validation"]["accepted"] is True
     assert supervisor_validation["validation"]["details"]["orchestrator_validation_bypassed"] is True
     assert "acceptance" not in supervisor_validation
+
+
+def test_orchestrator_reviews_truncated_supervisor_summary_without_blocking_accepted_sales(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_record_paths(monkeypatch, tmp_path)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {"text": _sales_and_truncated_supervisor_control_summary_text()},
+                "metadata": {
+                    "received_at": "2026-04-28T13:20:00Z",
+                    "sender": "mixed-truncated-supervisor",
+                    "branch_hint": "waigani",
+                },
+            },
+        )
+    )
+
+    sales_path = tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-28.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-04-28" / "waigani.json"
+
+    assert sales_path.exists()
+    assert not supervisor_path.exists()
+    assert result.agent_name == "orchestrator_agent"
+    assert result.payload["status"] == "accepted_with_warning"
+    assert result.payload["routing"]["review_reason"] is None
+    assert result.payload["governance"]["reasons"] == []
+
+    sales_child, supervisor_child = result.payload["fanout"]["children"]
+    assert sales_child["report_family"] == "sales_income"
+    assert sales_child["status"] == "accepted"
+    assert sales_child["child_index"] == 1
+    assert sales_child["response_report_type"] == "day_end_sales"
+    assert sales_child["reason"] == "totals_reconciled"
+
+    assert supervisor_child["report_family"] == "supervisor_control"
+    assert supervisor_child["status"] == "needs_review"
+    assert supervisor_child["child_index"] == 2
+    assert supervisor_child["response_report_type"] == "supervisor_control_summary"
+    assert supervisor_child["response_status"] == "review"
+    assert supervisor_child["validation_error_code"] == "child_report_incomplete_or_truncated"
+    assert supervisor_child["validation_error_message"] == 'incomplete after "Exceptions es\u2026"'
+    assert supervisor_child["output_paths"] == []
 
 
 def test_orchestrator_records_supervisor_control_date_mismatch_without_blocking_sales(
@@ -326,7 +422,7 @@ def test_orchestrator_records_supervisor_control_date_mismatch_without_blocking_
     assert result.agent_name == "orchestrator_agent"
     assert result.payload["status"] == "accepted_with_warning"
     assert result.payload["routing"]["review_reason"] is None
-    assert result.payload["governance"]["reasons"] == ["mixed_intelligence_warning"]
+    assert result.payload["governance"]["reasons"] == []
 
     sales_child, supervisor_child = result.payload["fanout"]["children"]
     assert sales_child["status"] == "accepted"
@@ -339,7 +435,7 @@ def test_orchestrator_records_supervisor_control_date_mismatch_without_blocking_
     assert "supervisor_control_date_mismatch" in stored_warning_codes
 
 
-def test_orchestrator_keeps_intelligence_child_when_transactional_child_fails(
+def test_orchestrator_reviews_mixed_pair_when_transactional_child_fails(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -404,6 +500,8 @@ def test_orchestrator_exposes_blocking_sales_child_details_for_mixed_review(
     assert not sales_path.exists()
     assert supervisor_path.exists()
     assert result.payload["status"] == "needs_review"
+    assert result.payload["routing"]["review_reason"] == "mixed_child_requires_review"
+    assert result.payload["governance"]["reasons"] == ["mixed_child_requires_review"]
 
     sales_child, supervisor_child = result.payload["fanout"]["children"]
     assert sales_child["report_type"] == "sales_income"
@@ -433,6 +531,16 @@ def _patch_record_paths(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(record_paths, "STRUCTURED_DIR", records_dir / "structured")
     monkeypatch.setattr(record_paths, "INTELLIGENCE_DIR", records_dir / "intelligence")
     monkeypatch.setattr(record_paths, "REJECTED_DIR", records_dir / "rejected" / "whatsapp")
+
+
+def _mixed_child_summary(report_family: str, status: str) -> dict[str, object]:
+    return {
+        "report_family": report_family,
+        "report_type": report_family,
+        "status": status,
+        "blocks_transactional_processing": report_family != "supervisor_control",
+        "payload": {"warnings": []},
+    }
 
 
 def _sales_report_text() -> str:
@@ -557,6 +665,29 @@ def _sales_and_mismatched_supervisor_control_text() -> str:
             "Date: 22/04/2026",
             "Cashier Reconciled: Yes",
             "Floor Check: Passed",
+        ]
+    )
+
+
+def _sales_and_truncated_supervisor_control_summary_text() -> str:
+    return "\n".join(
+        [
+            "Branch: Waigani Branch",
+            "Date: 28/04/2026",
+            "",
+            "DAY-END SALES REPORT",
+            "Gross Sales: 1200",
+            "Cash Sales: 700",
+            "Eftpos Sales: 500",
+            "Traffic: 12",
+            "Served: 9",
+            "",
+            "Supervisor Control Summary",
+            "Cash variance: No",
+            "Staffing issues: No",
+            "Stock issues affecting sales: No",
+            "Pricing or system issues: No",
+            "Exceptions es\u2026",
         ]
     )
 

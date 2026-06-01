@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from packages.branch_registry import canonical_branch_slug
+from packages.branch_registry import canonical_branch_slug_or_none
 from packages.common.paths import REPO_ROOT
 
 _CONFIG_PATH = REPO_ROOT / "config" / "supervisors.json"
@@ -116,7 +116,7 @@ def _branch_or_none(value: object) -> str | None:
     text = _text_or_none(value)
     if text is None:
         return None
-    return canonical_branch_slug(text)
+    return canonical_branch_slug_or_none(text)
 
 
 def _text_or_none(value: object) -> str | None:

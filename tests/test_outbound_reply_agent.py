@@ -172,6 +172,48 @@ def test_outbound_reply_agent_stores_provider_message_id_on_success(
     assert persisted["payload"]["provider_message_id"] == "wamid.provider.success-1"
 
 
+def test_outbound_reply_agent_derives_response_type_from_processing_status_without_duplicate_review_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(outbound_reply_worker, "REPO_ROOT", tmp_path)
+    artifact = _seed_response_artifact(
+        tmp_path,
+        response_type="success_ack",
+        governance_status="accepted",
+        source_message_id="wamid.processing-status-1",
+    )
+    sent_payload: dict[str, object] = {}
+
+    def fake_send_whatsapp_text(**kwargs):
+        sent_payload.update(kwargs)
+        return {
+            "dispatch_status": "sent",
+            "provider_message_id": "wamid.provider.processing-status-1",
+            "http_status": 200,
+            "error": None,
+        }
+
+    monkeypatch.setattr(outbound_reply_worker, "send_whatsapp_text", fake_send_whatsapp_text)
+
+    result = outbound_reply_worker.process_work_item(
+        WorkItem(
+            kind="outbound_reply",
+            payload={
+                "sender_phone": "67570000000",
+                "response_text": "accepted body",
+                "processing_status": "accepted",
+                "duplicate": True,
+                "source_message_id": "wamid.processing-status-1",
+                "response_id": artifact["response_id"],
+            },
+        )
+    )
+
+    assert result.payload["dispatch_status"] == "sent"
+    assert sent_payload["response_type"] == "success_ack"
+
+
 def _seed_response_artifact(
     root: Path,
     *,

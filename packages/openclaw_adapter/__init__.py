@@ -9,6 +9,7 @@ from .health import (
     get_gateway_url,
     is_openclaw_enabled,
 )
+from .runtime import get_runtime_status
 
 __all__ = [
     "DEFAULT_OPENCLAW_GATEWAY_URL",
@@ -16,6 +17,7 @@ __all__ = [
     "OPENCLAW_GATEWAY_URL_ENV_VAR",
     "check_gateway_health",
     "get_gateway_url",
+    "get_runtime_status",
     "is_openclaw_enabled",
     "send_advisory_prompt",
 ]

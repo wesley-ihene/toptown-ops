@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from apps.sales_income_agent.date_branch_resolver import normalize_report_date
-from packages.branch_registry import canonical_branch_slug
+from packages.branch_registry import canonical_branch_slug_or_none
 from packages.record_store.writer import write_governed_structured
 
 SIGNAL_TYPE = "sales_income"
@@ -36,25 +36,26 @@ def write_structured_record(
 
     canonical_branch = _canonical_branch_or_none(branch)
     iso_report_date = _iso_date_or_none(report_date)
-    if canonical_branch is None or iso_report_date is None:
+    if iso_report_date is None:
         return None
 
     persisted_payload = dict(payload)
-    persisted_payload["branch"] = canonical_branch
+    if canonical_branch is not None:
+        persisted_payload["branch"] = canonical_branch
     persisted_payload["report_date"] = iso_report_date
     return write_governed_structured(
         signal_type=SIGNAL_TYPE,
-        branch=canonical_branch,
+        branch=canonical_branch or branch.strip(),
         date=iso_report_date,
         payload=persisted_payload,
-        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
+        metadata=metadata if isinstance(metadata, dict) else dict(metadata) if isinstance(metadata, Mapping) else None,
     )
 
 
 def _canonical_branch_or_none(branch: str) -> str | None:
     """Return a canonical branch slug suitable for structured record paths."""
 
-    candidate = canonical_branch_slug(branch.strip())
+    candidate = canonical_branch_slug_or_none(branch.strip())
     if not candidate or not _CANONICAL_BRANCH_PATTERN.fullmatch(candidate):
         return None
     return candidate
