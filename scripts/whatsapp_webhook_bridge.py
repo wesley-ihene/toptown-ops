@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -48,6 +49,7 @@ from packages.response_store import load_response_artifact, write_response_artif
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
 from packages.taop_feedback import build_operational_query_response, detect_message_intent
+from scripts.whatsapp_webhook_signature import verify_meta_signature
 
 load_dotenv(REPO_ROOT / ".env.whatsapp_bridge", override=False)
 
@@ -178,7 +180,7 @@ def _handle_verification(query: str) -> BridgeHttpResponse:
                 "error": "WHATSAPP_VERIFY_TOKEN is not configured",
             },
         )
-    if supplied_token != expected_token:
+    if not hmac.compare_digest(supplied_token or "", expected_token or ""):
         return _json_response(
             HTTPStatus.FORBIDDEN,
             {
@@ -198,6 +200,17 @@ def _handle_verification(query: str) -> BridgeHttpResponse:
 
 def _handle_webhook_post(*, body: bytes, headers: Mapping[str, str]) -> BridgeHttpResponse:
     """Process one POST payload and return a structured JSON acknowledgement."""
+
+    if not verify_meta_signature(body, _header_value(headers, "X-Hub-Signature-256")):
+        return _json_response(
+            HTTPStatus.FORBIDDEN,
+            {
+                "ok": False,
+                "ingress": INGRESS_NAME,
+                "error_stage": "signature_verification",
+                "error": "invalid webhook signature",
+            },
+        )
 
     try:
         payload = json.loads(body.decode("utf-8"))
