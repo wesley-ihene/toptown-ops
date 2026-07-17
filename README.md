@@ -59,3 +59,32 @@ No production logic should be shared implicitly across this boundary. Integratio
 - TAOP is an integrated platform, not a merged codebase.
 
 Implementation details and current layer boundaries are documented in [docs/TOPTOWN_OPS_ARCHITECTURE.md](/home/clawadmin/.openclaw/workspace/toptown-ops/docs/TOPTOWN_OPS_ARCHITECTURE.md).
+
+## Authenticated Data Capture
+
+`apps/data_capture` provides branch-bound sales, supervisor-control, attendance,
+staff-performance, and bale-release forms. It stores attributable, append-only
+report versions in SQLite and uses its transactional signal outbox to materialize
+validated records at the existing upstream structured-record boundary. It does
+not connect to IOI Colony or reply to WhatsApp.
+
+Before first use, populate `STAFF/master_staff_list.md`, the branch files under
+`config/sections`, and `config/products.yaml`. Then set a persistent secret and
+bootstrap the first named administrator:
+
+```bash
+export TOPTOWN_CAPTURE_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+python3 -m flask --app apps.data_capture.app:create_app create-admin
+```
+
+Start the WSGI application with the deployment server of your choice. For local
+development only:
+
+```bash
+python3 -m flask --app apps.data_capture.app:create_app run --host 127.0.0.1 --port 5050
+```
+
+The default database is `data/capture.sqlite3` (runtime data and intentionally
+gitignored). Override it with `TOPTOWN_CAPTURE_DB`. Use `flask ... retry-outbox`
+to retry any structured-record materialization that failed after an authoritative
+submission committed.

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}TopTown Capture{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='capture.css') }}">
+  <script defer src="{{ url_for('static', filename='capture.js') }}"></script>
+</head>
+<body>
+  {% if g.user %}
+  <header class="site-header">
+    <a class="brand" href="{{ url_for('home') }}">TopTown Daily Capture</a>
+    <div class="identity"><strong>{{ g.user.full_name }}</strong><span>{{ g.user.role.replace('_', ' ') }}{% if g.user.branch %} · {{ g.user.branch.replace('_', ' ') }}{% endif %}</span></div>
+    <nav>
+      <a href="{{ url_for('history') }}">History</a>
+      {% if g.user.role == 'admin' %}<a href="{{ url_for('users') }}">Users</a><a href="{{ url_for('export') }}">Export</a>{% endif %}
+      <form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="_csrf" value="{{ g.csrf_token }}"><button class="link-button" type="submit">Sign out</button></form>
+    </nav>
+  </header>
+  {% endif %}
+  <main class="page">{% block content %}{% endblock %}</main>
+</body>
+</html>

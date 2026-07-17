@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">Branch fixed by your account</p>
+  <h1>Daily reports</h1>
+  <p>Totals are calculated from the rows you enter. Submitted records can only be corrected by creating a new version.</p>
+</section>
+{% if readiness %}
+<section class="warning-list panel"><h2>Master-data readiness</h2><ul>{% for item in readiness %}<li>{{ item }}</li>{% endfor %}</ul></section>
+{% endif %}
+<section class="form-grid">
+  {% if g.user.role in permissions['sales'] %}<a class="form-card" href="{{ url_for('form_route', form_type='sales') }}"><strong>Day-End Sales</strong><span>Sales + supervisor control</span></a>{% endif %}
+  {% if g.user.role in permissions['staff-performance'] %}<a class="form-card" href="{{ url_for('form_route', form_type='staff-performance') }}"><strong>Staff Performance</strong><span>Moved and assisting by section</span></a>{% endif %}
+  {% if g.user.role in permissions['attendance'] %}<a class="form-card" href="{{ url_for('form_route', form_type='attendance') }}"><strong>Attendance</strong><span>Complete active roster</span></a>{% endif %}
+  {% if g.user.role in permissions['bales'] %}<a class="form-card" href="{{ url_for('form_route', form_type='bales') }}"><strong>Bale Release</strong><span>Weight, quantity and amount</span></a>{% endif %}
+  {% if g.user.role == 'admin' %}<a class="form-card" href="{{ url_for('history') }}"><strong>Report history</strong><span>View and submit corrections</span></a>{% endif %}
+</section>
+{% endblock %}

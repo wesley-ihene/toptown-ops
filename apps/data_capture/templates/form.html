@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% set titles = {'sales':'Day-End Sales + Supervisor Control','staff-performance':'Staff Performance','attendance':'Attendance','bales':'Daily Bale Summary — Released to Rail'} %}
+{% block title %}{{ titles[form_type] }} · TopTown Capture{% endblock %}
+{% block content %}
+<section class="hero compact"><p class="eyebrow">{{ branch.replace('_', ' ') }}</p><h1>{{ titles[form_type] }}</h1>{% if correction %}<p class="correction">Correction of version {{ correction.version }} · {{ correction.report_id }}</p>{% endif %}</section>
+{% if errors %}<section class="error-list"><strong>Nothing was saved.</strong><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></section>{% endif %}
+{% if warnings %}<section class="warning-list"><ul>{% for warning in warnings %}<li>{{ warning }}</li>{% endfor %}</ul></section>{% endif %}
+<form method="post" class="capture-form" data-form-type="{{ form_type }}">
+  <input type="hidden" name="_csrf" value="{{ g.csrf_token }}">
+  {% if correct_report_id %}<input type="hidden" name="correct_report_id" value="{{ correct_report_id }}">{% endif %}
+  <section class="panel common-fields">
+    <label>Branch<input value="{{ branch.replace('_', ' ') }}" readonly></label>
+    <label>Report Date<input type="date" name="report_date" max="{{ today }}" value="{{ correction.report_date if correction else today }}" required></label>
+    <p class="date-warning warning-text" hidden>This report date is more than three days old.</p>
+    {% if correction %}<label class="wide">Correction reason<textarea name="change_reason" required placeholder="Explain exactly why this version is needed"></textarea></label>{% endif %}
+  </section>
+
+  {% if form_type == 'sales' %}
+  <section class="panel"><h2>Tills</h2><div class="repeat-list" data-list="tills">
+    <article class="repeat-row till-row">
+      <div class="row-heading"><strong>Till <span class="row-number">1</span></strong><button class="danger remove-row" type="button">Remove</button></div>
+      <label>Till Label<input name="till_label" placeholder="Till 1 – Main Shop" required></label>
+      <label>Cashier<select name="cashier" required><option value="">Select cashier</option>{% for person in roster %}<option>{{ person }}</option>{% endfor %}</select></label>
+      <label>Assistant (optional)<select name="assistant"><option value="">None</option>{% for person in roster %}<option>{{ person }}</option>{% endfor %}</select></label>
+      <label>T/Cash (K)<input class="money cash" name="cash" type="number" min="0" step="0.01" inputmode="decimal" required></label>
+      <label>T/Card (K)<input class="money card" name="card" type="number" min="0" step="0.01" inputmode="decimal" required></label>
+      <label>Z/Reading (K)<input class="money z-reading" name="z_reading" type="number" min="0" step="0.01" inputmode="decimal" required></label>
+      <p class="metric">Variance: <strong class="variance">K0.00</strong></p>
+      <label class="variance-reason wide">Over/Short Reason<input name="over_short_reason" placeholder="Required when variance exceeds K5.00"></label>
+    </article>
+  </div><button class="secondary add-row" type="button" data-target="tills">Add till</button></section>
+  <section class="panel"><h2>Calculated day totals</h2><div class="metrics"><div>Total Cash<strong data-total="cash">K0.00</strong></div><div>Total Card<strong data-total="card">K0.00</strong></div><div>Total Sales<strong data-total="sales">K0.00</strong></div><div>Total Variance<strong data-total="variance">K0.00</strong></div></div></section>
+  <section class="panel field-grid"><h2>Customers and labour</h2>
+    <label>Main Door<input name="main_door" type="number" min="0" step="1" inputmode="numeric" required></label>
+    <label>Guests / Customers Served<input name="served" type="number" min="0" step="1" inputmode="numeric" required></label>
+    <label>Staff on Duty<input name="staff_on_duty" type="number" min="0" step="1" inputmode="numeric" required></label>
+    <label>Labour Hours<input name="labour_hours" type="number" min="0" step="0.001" inputmode="decimal" required></label>
+    <div class="metrics wide"><div>Conversion Rate<strong data-derived="conversion">—</strong></div><div>Sale / Customer<strong data-derived="per-customer">—</strong></div><div>Sales / Labour Hour<strong data-derived="per-hour">—</strong></div></div>
+    <label>Balanced By<select name="balanced_by" required>{% for person in supervisors %}<option {% if person == g.user.full_name %}selected{% endif %}>{{ person }}</option>{% endfor %}</select></label>
+    <label class="wide">Notes<textarea name="notes"></textarea></label>
+  </section>
+  <section class="panel field-grid"><h2>Supervisor Control Summary</h2>
+    <p class="metric wide">Cash Variance carried from tills: <strong data-control-variance>K0.00</strong></p>
+    <label class="wide">Cash variance confirmation / explanation<input name="cash_variance_explanation" placeholder="Required whenever variance is not zero"></label>
+    {{ issue_field('staffing_issue', 'Staffing Issues', 'None') }}
+    {{ issue_field('stock_issue', 'Stock Issues Affecting Sales', 'No') }}
+    {{ issue_field('pricing_issue', 'Pricing or System Issues', 'No') }}
+    <label class="wide">Exceptions Escalated to Ops Manager<textarea name="exceptions_escalated" required placeholder="What was escalated, or none"></textarea></label>
+    <label class="checkbox wide"><input type="checkbox" name="supervisor_confirmation" required> All material issues have been escalated.</label>
+  </section>
+
+  {% elif form_type == 'staff-performance' %}
+  {% if not roster or not sections %}<div class="error-list">This form is disabled until both roster and canonical sections are populated.</div>{% endif %}
+  <section class="panel"><h2>Staff rows</h2><div class="repeat-list" data-list="staff">
+    <article class="repeat-row staff-row"><div class="row-heading"><strong>Staff <span class="row-number">1</span></strong><button class="danger remove-row" type="button">Remove</button></div>
+      <label>Staff Name<select name="staff_name" required><option value="">Select staff</option>{% for person in roster %}<option>{{ person }}</option>{% endfor %}</select></label>
+      <label>Section<select name="section" required><option value="">Select product section</option>{% for section in sections %}<option>{{ section }}</option>{% endfor %}</select></label>
+      <label>Role<select name="staff_role" required>{% for role in staff_roles %}<option>{{ role }}</option>{% endfor %}</select></label>
+      <label>Total Items Moved<input class="items-moved" name="items_moved" type="number" min="0" step="1" inputmode="numeric" required></label>
+      <label>Assisting<input class="assisting" name="assisting" type="number" min="0" step="1" inputmode="numeric" required></label>
+    </article>
+  </div><button class="secondary add-row" type="button" data-target="staff">Add staff</button></section>
+  <section class="panel"><h2>Calculated totals</h2><div class="metrics"><div>Total items moved<strong data-total="moved">0</strong></div><div>Total assisting<strong data-total="assisting">0</strong></div></div></section>
+
+  {% elif form_type == 'attendance' %}
+  {% if not roster %}<div class="error-list">Attendance is disabled until the active roster is populated.</div>{% endif %}
+  <section class="panel"><h2>Full active roster</h2><div class="attendance-list">
+    {% for person in roster %}<article class="attendance-row"><strong>{{ person }}</strong><input type="hidden" name="attendance_name" value="{{ person }}"><select name="attendance_status" required><option value="">Set status</option><option value="present">Present</option><option value="off">Off (day off)</option><option value="leave">Leave (annual)</option><option value="sick">Sick</option><option value="absent">Absent</option></select></article>{% endfor %}
+  </div></section>
+  <section class="panel"><h2>Calculated totals</h2><div class="metrics attendance-totals"><div>Present<strong data-status="present">0</strong></div><div>Leave<strong data-status="leave">0</strong></div><div>Day Off<strong data-status="off">0</strong></div><div>Sick<strong data-status="sick">0</strong></div><div>Absent<strong data-status="absent">0</strong></div><div>Roster<strong>{{ roster|length }}</strong></div></div></section>
+
+  {% elif form_type == 'bales' %}
+  <datalist id="products">{% for product in products %}<option value="{{ product }}">{% endfor %}</datalist>
+  <section class="panel"><h2>Bales</h2><p class="muted">Items outside the product master are accepted only with an unresolved warning.</p><div class="repeat-list" data-list="bales">
+    <article class="repeat-row bale-row"><div class="row-heading"><strong>Bale <span class="row-number">1</span></strong><button class="danger remove-row" type="button">Remove</button></div>
+      <label>Item<input name="item" list="products" required></label>
+      <label>Wt (kg)<input class="weight" name="weight" type="number" min="0" step="0.001" inputmode="decimal" required></label>
+      <label>Qty<input class="qty" name="qty" type="number" min="0" step="1" inputmode="numeric" required></label>
+      <label>Amount (K)<input class="amount" name="amount" type="number" min="0" step="0.01" inputmode="decimal" required></label>
+      <p class="metric">Unit price: <strong class="unit-price">—</strong></p>
+    </article>
+  </div><button class="secondary add-row" type="button" data-target="bales">Add bale</button></section>
+  <section class="panel"><h2>Calculated totals</h2><div class="metrics"><div>Bales Released<strong data-total="bales">1</strong></div><div>Total Wt<strong data-total="weight">0 kg</strong></div><div>Total Qty<strong data-total="qty">0</strong></div><div>Total Amount<strong data-total="amount">K0.00</strong></div></div></section>
+  {% endif %}
+  <section class="submit-panel"><p>Submitting creates an attributable, retained record. It cannot be edited in place.</p><button type="submit" {% if (form_type in ['staff-performance','attendance'] and not roster) or (form_type == 'staff-performance' and not sections) %}disabled{% endif %}>{{ 'Submit correction' if correction else 'Submit report' }}</button></section>
+</form>
+{% endblock %}
+
+{% macro issue_field(name, label, negative) %}
+<fieldset class="issue-field wide"><legend>{{ label }}</legend><label class="checkbox"><input type="radio" name="{{ name }}" value="{{ negative.casefold() }}" required> {{ negative }}</label><label class="checkbox"><input type="radio" name="{{ name }}" value="describe" required> Describe</label><input name="{{ name }}_detail" placeholder="Details when Describe is selected"></fieldset>
+{% endmacro %}

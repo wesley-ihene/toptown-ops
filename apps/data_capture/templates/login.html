@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Sign in · TopTown Capture{% endblock %}
+{% block content %}
+<section class="auth-card panel">
+  <p class="eyebrow">Authoritative daily records</p>
+  <h1>Sign in</h1>
+  <p class="muted">Use your named account. Activity is attributable and logged.</p>
+  {% if error %}<div class="error-list">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ url_for('login') }}">
+    <input type="hidden" name="_csrf" value="{{ login_csrf }}">
+    <label>Username<input name="username" autocomplete="username" required autofocus></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Sign in</button>
+  </form>
+</section>
+{% endblock %}
