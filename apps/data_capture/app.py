@@ -90,6 +90,15 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         )
         click.echo(f"Created administrator {username} ({user_id}).")
 
+    @app.cli.command("set-password")
+    @click.option("--username", required=True)
+    @click.password_option(confirmation_prompt=True)
+    def set_password(username: str, password: str) -> None:
+        """Set a temporary password for account recovery."""
+
+        store.set_password_from_cli(username, new_password=password)
+        click.echo(f"Set a temporary password for {username}.")
+
     @app.cli.command("retry-outbox")
     def retry_outbox() -> None:
         """Retry failed or pending structured-record materialization."""
@@ -111,6 +120,12 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             supplied = request.headers.get("X-CSRF-Token") or request.form.get("_csrf")
             if not supplied or not secrets.compare_digest(str(supplied), str(g.csrf_token)):
                 abort(400, "Invalid CSRF token.")
+        if (
+            g.user is not None
+            and g.user["must_change_password"]
+            and request.endpoint not in {"account_password", "logout", "health", "static"}
+        ):
+            return redirect(url_for("account_password"))
         return None
 
     @app.after_request
@@ -140,12 +155,52 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         if user is None:
             return make_response(render_template("login.html", login_csrf=_login_token(app), error="Invalid username or password."), 401)
         token, _ = store.create_session(user["user_id"], lifetime=timedelta(minutes=int(app.config["SESSION_LIFETIME_MINUTES"])))
-        response = make_response(redirect(url_for("home")))
+        destination = "account_password" if user["must_change_password"] else "home"
+        response = make_response(redirect(url_for(destination)))
         response.set_cookie(
             SESSION_COOKIE, token, max_age=int(app.config["SESSION_LIFETIME_MINUTES"]) * 60,
             secure=bool(app.config["SESSION_COOKIE_SECURE"]), httponly=True, samesite="Strict", path="/",
         )
         return response
+
+    @app.route("/account/password", methods=["GET", "POST"])
+    @_login_required
+    def account_password() -> str | Response:
+        error = None
+        if request.method == "POST":
+            new_password = request.form.get("new_password", "")
+            if new_password != request.form.get("confirm_password", ""):
+                error = "New passwords do not match."
+            else:
+                try:
+                    store.change_password(
+                        g.user["user_id"],
+                        current_password=request.form.get("current_password", ""),
+                        new_password=new_password,
+                    )
+                except ValueError as exc:
+                    error = str(exc)
+                else:
+                    token, _ = store.create_session(
+                        g.user["user_id"],
+                        lifetime=timedelta(minutes=int(app.config["SESSION_LIFETIME_MINUTES"])),
+                    )
+                    response = make_response(redirect(url_for("home")))
+                    response.set_cookie(
+                        SESSION_COOKIE, token,
+                        max_age=int(app.config["SESSION_LIFETIME_MINUTES"]) * 60,
+                        secure=bool(app.config["SESSION_COOKIE_SECURE"]), httponly=True,
+                        samesite="Strict", path="/",
+                    )
+                    return response
+        status = 400 if error else 200
+        return make_response(
+            render_template(
+                "password.html", error=error,
+                password_change_required=bool(g.user["must_change_password"]),
+            ),
+            status,
+        )
 
     @app.post("/logout")
     def logout() -> Response:
@@ -256,9 +311,16 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         error = None
         if request.method == "POST":
             try:
-                if request.form.get("action") == "deactivate":
+                action = request.form.get("action", "create_user")
+                if action == "deactivate":
                     store.deactivate_user(request.form.get("user_id", ""), actor_user_id=g.user["user_id"])
-                else:
+                elif action == "reset_password":
+                    store.reset_password(
+                        request.form.get("user_id", ""),
+                        new_password=request.form.get("password", ""),
+                        actor_user_id=g.user["user_id"],
+                    )
+                elif action == "create_user":
                     role = request.form.get("role", "")
                     branch = None if role == "admin" else request.form.get("branch")
                     if branch is not None and branch not in masters.branches():
@@ -267,8 +329,12 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                         full_name=request.form.get("full_name", ""), username=request.form.get("username", ""),
                         password=request.form.get("password", ""), role=role, branch=branch, actor_user_id=g.user["user_id"],
                     )
+                else:
+                    abort(400, "Unknown user action.")
                 return redirect(url_for("users"))
-            except ValueError as exc:
+            except PermissionError:
+                abort(403)
+            except (LookupError, ValueError) as exc:
                 error = str(exc)
         return render_template("users.html", users=store.list_users(), branches=masters.branches(), error=error)
 

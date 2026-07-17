@@ -14,6 +14,7 @@
     <div class="identity"><strong>{{ g.user.full_name }}</strong><span>{{ g.user.role.replace('_', ' ') }}{% if g.user.branch %} · {{ g.user.branch.replace('_', ' ') }}{% endif %}</span></div>
     <nav>
       <a href="{{ url_for('history') }}">History</a>
+      <a href="{{ url_for('account_password') }}">Change password</a>
       {% if g.user.role == 'admin' %}<a href="{{ url_for('users') }}">Users</a><a href="{{ url_for('export') }}">Export</a>{% endif %}
       <form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="_csrf" value="{{ g.csrf_token }}"><button class="link-button" type="submit">Sign out</button></form>
     </nav>

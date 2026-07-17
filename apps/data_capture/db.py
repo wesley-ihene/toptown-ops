@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL CHECK (role IN ('supervisor','acting_supervisor','pricing_clerk','admin')),
     branch TEXT,
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+    must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0,1)),
     created_at TEXT NOT NULL,
     deactivated_at TEXT,
     CHECK ((role = 'admin' AND branch IS NULL) OR (role <> 'admin' AND branch IS NOT NULL))
@@ -129,6 +130,11 @@ class CaptureStore:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
+            if "must_change_password" not in columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"
+                )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -148,8 +154,9 @@ class CaptureStore:
     ) -> str:
         full_name = full_name.strip()
         username = username.strip()
-        if not full_name or not username or len(password) < 12:
-            raise ValueError("Full name, username, and a password of at least 12 characters are required.")
+        if not full_name or not username:
+            raise ValueError("Full name and username are required.")
+        validate_password(password)
         if role not in {"supervisor", "acting_supervisor", "pricing_clerk", "admin"}:
             raise ValueError("Invalid role.")
         if (role == "admin") != (branch is None):
@@ -162,11 +169,87 @@ class CaptureStore:
             ).fetchone():
                 raise ValueError("Username is already in use.")
             connection.execute(
-                "INSERT INTO users VALUES (?,?,?,?,?,?,1,?,NULL)",
+                "INSERT INTO users "
+                "(user_id,full_name,username,password_hash,role,branch,is_active,must_change_password,created_at,deactivated_at) "
+                "VALUES (?,?,?,?,?,?,1,1,?,NULL)",
                 (user_id, full_name, username, generate_password_hash(password, method="scrypt"), role, branch, now),
             )
             self._audit(connection, actor_user_id, "user_created", None, {"user_id": user_id, "role": role, "branch": branch})
         return user_id
+
+    def change_password(self, user_id: str, *, current_password: str, new_password: str) -> None:
+        validate_password(new_password)
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT password_hash,is_active FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if row is None or not row["is_active"] or not check_password_hash(row["password_hash"], current_password):
+                raise ValueError("Current password is incorrect.")
+            if check_password_hash(row["password_hash"], new_password):
+                raise ValueError("New password must differ from the current password.")
+            connection.execute(
+                "UPDATE users SET password_hash=?,must_change_password=0 WHERE user_id=?",
+                (generate_password_hash(new_password, method="scrypt"), user_id),
+            )
+            connection.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            self._audit(
+                connection, user_id, "password_changed", None,
+                {"actor": "user", "target_user_id": user_id},
+            )
+
+    def reset_password(self, user_id: str, *, new_password: str, actor_user_id: str) -> None:
+        validate_password(new_password)
+        with self.transaction() as connection:
+            actor = connection.execute(
+                "SELECT role,is_active FROM users WHERE user_id=?", (actor_user_id,)
+            ).fetchone()
+            if actor is None or not actor["is_active"] or actor["role"] != "admin":
+                raise PermissionError("Administrator access is required.")
+            target = connection.execute(
+                "SELECT is_active FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if target is None:
+                raise LookupError("User not found.")
+            if not target["is_active"]:
+                raise ValueError("Cannot reset an inactive user.")
+            self._replace_password(connection, user_id, new_password)
+            self._audit(
+                connection, actor_user_id, "password_reset", None,
+                {"actor": "admin", "target_user_id": user_id},
+            )
+
+    def set_password_from_cli(self, username: str, *, new_password: str) -> str:
+        validate_password(new_password)
+        with self.transaction() as connection:
+            target = connection.execute(
+                "SELECT user_id,is_active FROM users WHERE username=? COLLATE NOCASE", (username.strip(),)
+            ).fetchone()
+            if target is None:
+                raise LookupError("User not found.")
+            if not target["is_active"]:
+                raise ValueError("Cannot reset an inactive user.")
+            user_id = str(target["user_id"])
+            self._replace_password(connection, user_id, new_password)
+            self._audit(
+                connection, None, "password_reset", None,
+                {"actor": "cli", "target_user_id": user_id},
+            )
+            return user_id
+
+    @staticmethod
+    def _replace_password(connection: sqlite3.Connection, user_id: str, password: str) -> None:
+        current = connection.execute(
+            "SELECT password_hash FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
+        if current is None:
+            raise LookupError("User not found.")
+        if check_password_hash(current["password_hash"], password):
+            raise ValueError("New password must differ from the current password.")
+        connection.execute(
+            "UPDATE users SET password_hash=?,must_change_password=1 WHERE user_id=?",
+            (generate_password_hash(password, method="scrypt"), user_id),
+        )
+        connection.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
 
     def deactivate_user(self, user_id: str, *, actor_user_id: str) -> None:
         with self.transaction() as connection:
@@ -182,7 +265,8 @@ class CaptureStore:
     def list_users(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
             return [dict(row) for row in connection.execute(
-                "SELECT user_id,full_name,username,role,branch,is_active,created_at,deactivated_at FROM users ORDER BY full_name"
+                "SELECT user_id,full_name,username,role,branch,is_active,must_change_password,created_at,deactivated_at "
+                "FROM users ORDER BY full_name"
             )]
 
     def active_supervisors(self, branch: str, *, include_user: str | None = None) -> list[str]:
@@ -221,7 +305,8 @@ class CaptureStore:
         now = utc_now()
         with self.transaction() as connection:
             row = connection.execute(
-                "SELECT s.*,u.full_name,u.username,u.role,u.branch,u.is_active FROM sessions s JOIN users u ON u.user_id=s.user_id WHERE s.session_id_hash=?",
+                "SELECT s.*,u.full_name,u.username,u.role,u.branch,u.is_active,u.must_change_password "
+                "FROM sessions s JOIN users u ON u.user_id=s.user_id WHERE s.session_id_hash=?",
                 (_hash_token(token),),
             ).fetchone()
             if row is None or not row["is_active"] or row["expires_at"] <= now:
@@ -446,6 +531,11 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def validate_password(password: str) -> None:
+    if len(password) < 12:
+        raise ValueError("Password must be at least 12 characters.")
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -457,7 +547,10 @@ def _hash_token(token: str) -> str:
 
 
 def _public_user(row: sqlite3.Row) -> dict[str, Any]:
-    return {key: row[key] for key in ("user_id", "full_name", "username", "role", "branch", "is_active")}
+    return {
+        key: row[key]
+        for key in ("user_id", "full_name", "username", "role", "branch", "is_active", "must_change_password")
+    }
 
 
 def _report_payload(row: sqlite3.Row) -> dict[str, Any]:

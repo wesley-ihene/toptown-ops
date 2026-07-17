@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+import json
 import re
+import sqlite3
 from zipfile import ZipFile
 from io import BytesIO
 
@@ -63,6 +65,9 @@ def capture_app(tmp_path):
         branch="waigani",
         actor_user_id=None,
     )
+    # These fixture accounts represent users that predate the additive migration.
+    with store.connect() as connection:
+        connection.execute("UPDATE users SET must_change_password=0")
     return app
 
 
@@ -259,3 +264,179 @@ def test_csrf_duplicate_user_cli_and_xlsx(capture_app):
     with ZipFile(BytesIO(content)) as archive:
         assert "xl/workbook.xml" in archive.namelist()
         assert len([name for name in archive.namelist() if name.startswith("xl/worksheets/")]) == 5
+
+
+def test_new_user_is_forced_to_change_password_and_old_sessions_die(capture_app):
+    store: CaptureStore = capture_app.extensions["capture_store"]
+    user_id = store.create_user(
+        full_name="New Pricing Clerk",
+        username="new-clerk",
+        password="temporary-pass-123",
+        role="pricing_clerk",
+        branch="waigani",
+        actor_user_id=None,
+    )
+    client = capture_app.test_client()
+    other_client = capture_app.test_client()
+    login = _login(client, "new-clerk", "temporary-pass-123")
+    assert login.headers["Location"].endswith("/account/password")
+    assert _login(other_client, "new-clerk", "temporary-pass-123").status_code == 302
+
+    blocked = client.get("/forms/bales")
+    assert blocked.status_code == 302
+    assert blocked.headers["Location"].endswith("/account/password")
+
+    token = _csrf(client, "/account/password")
+    wrong_current = client.post(
+        "/account/password",
+        data={
+            "_csrf": token,
+            "current_password": "incorrect-current-password",
+            "new_password": "replacement-pass-123",
+            "confirm_password": "replacement-pass-123",
+        },
+    )
+    assert wrong_current.status_code == 400
+    short = client.post(
+        "/account/password",
+        data={
+            "_csrf": token,
+            "current_password": "temporary-pass-123",
+            "new_password": "too-short",
+            "confirm_password": "too-short",
+        },
+    )
+    assert short.status_code == 400
+
+    changed = client.post(
+        "/account/password",
+        data={
+            "_csrf": token,
+            "current_password": "temporary-pass-123",
+            "new_password": "replacement-pass-123",
+            "confirm_password": "replacement-pass-123",
+        },
+        follow_redirects=False,
+    )
+    assert changed.status_code == 302
+    assert client.get("/forms/bales").status_code == 200
+    assert other_client.get("/").headers["Location"].startswith("/login")
+    assert store.authenticate("new-clerk", "temporary-pass-123") is None
+    assert store.authenticate("new-clerk", "replacement-pass-123")["must_change_password"] == 0
+    with store.connect() as connection:
+        audit = connection.execute(
+            "SELECT actor_user_id,detail_json FROM audit_log WHERE action='password_changed' ORDER BY at DESC LIMIT 1"
+        ).fetchone()
+    assert audit["actor_user_id"] == user_id
+    assert json.loads(audit["detail_json"])["target_user_id"] == user_id
+
+
+def test_admin_reset_is_authorized_temporary_and_audited(capture_app):
+    store: CaptureStore = capture_app.extensions["capture_store"]
+    admin_id = store.create_user(
+        full_name="Ops Admin",
+        username="ops-admin",
+        password="admin-initial-pass",
+        role="admin",
+        branch=None,
+        actor_user_id=None,
+    )
+    with store.connect() as connection:
+        connection.execute("UPDATE users SET must_change_password=0 WHERE user_id=?", (admin_id,))
+        target_id = connection.execute("SELECT user_id FROM users WHERE username='peter'").fetchone()["user_id"]
+
+    target_client = capture_app.test_client()
+    assert _login(target_client, "peter", "safe-password-456").status_code == 302
+    non_admin = capture_app.test_client()
+    assert _login(non_admin).status_code == 302
+    rejected = non_admin.post(
+        "/admin/users",
+        data={
+            "_csrf": _csrf(non_admin),
+            "action": "reset_password",
+            "user_id": target_id,
+            "password": "unauthorized-pass-123",
+        },
+    )
+    assert rejected.status_code == 403
+
+    admin = capture_app.test_client()
+    assert _login(admin, "ops-admin", "admin-initial-pass").status_code == 302
+    token = _csrf(admin, "/admin/users")
+    short = admin.post(
+        "/admin/users",
+        data={"_csrf": token, "action": "reset_password", "user_id": target_id, "password": "short"},
+    )
+    assert short.status_code == 200
+    reset = admin.post(
+        "/admin/users",
+        data={
+            "_csrf": token,
+            "action": "reset_password",
+            "user_id": target_id,
+            "password": "temporary-reset-123",
+        },
+        follow_redirects=False,
+    )
+    assert reset.status_code == 302
+    assert target_client.get("/").headers["Location"].startswith("/login")
+    assert store.authenticate("peter", "safe-password-456") is None
+    assert store.authenticate("peter", "temporary-reset-123")["must_change_password"] == 1
+    with store.connect() as connection:
+        audit = connection.execute(
+            "SELECT actor_user_id,detail_json FROM audit_log WHERE action='password_reset' ORDER BY at DESC LIMIT 1"
+        ).fetchone()
+    assert audit["actor_user_id"] == admin_id
+    assert json.loads(audit["detail_json"])["target_user_id"] == target_id
+
+
+def test_cli_set_password_invalidates_sessions_and_identifies_cli_actor(capture_app):
+    store: CaptureStore = capture_app.extensions["capture_store"]
+    client = capture_app.test_client()
+    assert _login(client, "peter", "safe-password-456").status_code == 302
+    runner = capture_app.test_cli_runner()
+    short = runner.invoke(args=["set-password", "--username", "peter"], input="short\nshort\n")
+    assert short.exit_code != 0
+    changed = runner.invoke(
+        args=["set-password", "--username", "peter"],
+        input="recovery-password-123\nrecovery-password-123\n",
+    )
+    assert changed.exit_code == 0
+    assert client.get("/").headers["Location"].startswith("/login")
+    assert store.authenticate("peter", "safe-password-456") is None
+    user = store.authenticate("peter", "recovery-password-123")
+    assert user["must_change_password"] == 1
+    with store.connect() as connection:
+        audit = connection.execute(
+            "SELECT actor_user_id,detail_json FROM audit_log WHERE action='password_reset' ORDER BY at DESC LIMIT 1"
+        ).fetchone()
+    detail = json.loads(audit["detail_json"])
+    assert audit["actor_user_id"] is None
+    assert detail == {"actor": "cli", "target_user_id": user["user_id"]}
+
+
+def test_password_flag_migration_is_idempotent_and_preserves_existing_users(tmp_path):
+    database = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE users (user_id TEXT PRIMARY KEY,full_name TEXT NOT NULL,username TEXT NOT NULL UNIQUE,"
+        "password_hash TEXT NOT NULL,role TEXT NOT NULL,branch TEXT,is_active INTEGER NOT NULL DEFAULT 1,"
+        "created_at TEXT NOT NULL,deactivated_at TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO users (user_id,full_name,username,password_hash,role,branch,is_active,created_at,deactivated_at) "
+        "VALUES ('legacy-admin','Legacy Admin','admin@taop','not-used','admin',NULL,1,'2026-01-01',NULL)"
+    )
+    connection.commit()
+    connection.close()
+
+    store = CaptureStore(database)
+    store.initialize()
+    store.initialize()
+    with store.connect() as migrated:
+        columns = [row["name"] for row in migrated.execute("PRAGMA table_info(users)")]
+        existing = migrated.execute(
+            "SELECT username,must_change_password FROM users WHERE user_id='legacy-admin'"
+        ).fetchone()
+    assert columns.count("must_change_password") == 1
+    assert tuple(existing) == ("admin@taop", 0)
