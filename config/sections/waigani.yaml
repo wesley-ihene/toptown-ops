@@ -1,4 +1,30 @@
 branch: waigani
 sections:
   hr_attendance: []
-  hr_performance: []
+  hr_performance:
+    - shoes_and_sandals
+    - childrens_shorts_boys_pants
+    - mens_tshirt
+    - mens_hawaiian_sports_tshirt
+    - mens_cotton_pants
+    - office_pants
+    - six_pockets
+    - mens_shorts
+    - mens_button_shirts
+    - beachwear_soccer_shorts
+    - ladies_skirts
+    - ladies_shorts
+    - ladies_skinny_jeans_cotton_pants
+    - long_skirts
+    - small_girls_shorts_pants
+    - ladies_dress
+    - ladies_blouse
+    - ladies_tshirt
+    - household_rummage
+    - ladies_sports_leggings
+    - beddings
+    - army_hardyaka_pants
+    - bra_sports_bra
+    - towels
+    - mens_jeans
+    - baby_light_rummage

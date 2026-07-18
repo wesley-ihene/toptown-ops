@@ -1,4 +1,27 @@
 branch: lae_malaita
 sections:
   hr_attendance: []
-  hr_performance: []
+  hr_performance:
+    - mens_shorts
+    - kids_shorts
+    - kids_boys_pants
+    - reflectors
+    - mens_button_flannel_shirts
+    - mens_tshirts
+    - jackets_mens_suit_coat
+    - mens_jeans
+    - kids_boys_polo_jersey
+    - kids_girls_tshirt_baby_overalls
+    - girls_dress_ladies_swimwear
+    - kids_girls_pants
+    - ladies_tshirt_hanger_items
+    - ladies_skirt_denim_skirt
+    - ladies_shorts
+    - ladies_long_teregal_mini_dress
+    - ladies_jeans
+    - ladies_cotton_capri_leggings
+    - ladies_color_jeans
+    - mens_cotton_pants
+    - household_rummage
+    - shoe_shop
+    - ladies_bra_underwear

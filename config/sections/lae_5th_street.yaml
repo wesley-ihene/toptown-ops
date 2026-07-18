@@ -1,4 +1,12 @@
 branch: lae_5th_street
 sections:
   hr_attendance: []
-  hr_performance: []
+  hr_performance:
+    - mens_tshirt_roundneck_collar
+    - kids_shorts
+    - ladies_silk_blouse_tshirt
+    - ladies_capri_colored_jeans
+    - shoes_sandals_toys
+    - baby_light_rummage
+    - beddings_kitchen_small
+    - mens_shorts

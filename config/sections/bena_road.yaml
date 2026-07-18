@@ -1,4 +1,12 @@
 branch: bena_road
 sections:
   hr_attendance: []
-  hr_performance: []
+  hr_performance:
+    - shoe_shop
+    - kids_girls_ladies_dresses_jackets
+    - creme_mens_tshirt_flannel_new_stock
+    - kids_boys_section
+    - beddings_section
+    - ladies_tops_jeans_section
+    - men_section
+    - ladies_bottoms_section
