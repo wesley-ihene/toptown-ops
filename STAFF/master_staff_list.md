@@ -51,7 +51,7 @@
 | Jennifer Golomb | yes |
 | Sheeba Ikiso | yes |
 | Liab Yawano | yes |
-| Hazel Arumbu | yes |
+| Hazel Arumbu | no |
 | Aunty Mina | yes |
 | Joyce Lovave | no |
 | Sandra Daniel | yes |
