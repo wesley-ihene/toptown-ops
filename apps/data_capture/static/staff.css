@@ -1,0 +1,16 @@
+.status.probation { background: var(--warn-bg); color: var(--warn); }
+.inactive-row { opacity: .72; }
+.staff-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+  gap: 8px;
+  min-width: 480px;
+}
+.staff-edit-grid label { font-size: .8rem; }
+.staff-edit-grid input,
+.staff-edit-grid select,
+.staff-edit-grid button { min-height: 38px; padding: 8px; }
+.inline-action { margin-top: 8px; }
+@media (max-width: 700px) {
+  .staff-edit-grid { grid-template-columns: 1fr; min-width: 260px; }
+}

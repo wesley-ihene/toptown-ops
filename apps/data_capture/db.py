@@ -79,6 +79,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
     report_id TEXT REFERENCES reports(report_id),
     detail_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS staff (
+    staff_id TEXT PRIMARY KEY,
+    full_name TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    role TEXT,
+    employee_number TEXT UNIQUE,
+    employment_status TEXT NOT NULL DEFAULT 'active'
+        CHECK (employment_status IN ('probation','active')),
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+    created_at TEXT NOT NULL,
+    deactivated_at TEXT,
+    UNIQUE(branch, full_name COLLATE NOCASE)
+);
 CREATE TABLE IF NOT EXISTS signal_outbox (
     outbox_id TEXT PRIMARY KEY,
     report_id TEXT NOT NULL UNIQUE REFERENCES reports(report_id),
@@ -101,6 +114,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS reports_lookup ON reports(report_type, branch, report_date, version DESC);
 CREATE INDEX IF NOT EXISTS reports_submitter ON reports(submitted_by, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS audit_at ON audit_log(at DESC);
+CREATE INDEX IF NOT EXISTS staff_roster ON staff(branch, is_active, full_name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS outbox_state ON signal_outbox(state, created_at);
 CREATE TRIGGER IF NOT EXISTS reports_no_update BEFORE UPDATE ON reports BEGIN SELECT RAISE(ABORT, 'reports are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS reports_no_delete BEFORE DELETE ON reports BEGIN SELECT RAISE(ABORT, 'reports are retained'); END;
@@ -111,6 +125,7 @@ CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log BEGIN SE
 CREATE TRIGGER IF NOT EXISTS status_no_update BEFORE UPDATE ON report_status_events BEGIN SELECT RAISE(ABORT, 'status events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS status_no_delete BEFORE DELETE ON report_status_events BEGIN SELECT RAISE(ABORT, 'status events are retained'); END;
 CREATE TRIGGER IF NOT EXISTS users_no_delete BEFORE DELETE ON users BEGIN SELECT RAISE(ABORT, 'users must be deactivated, not deleted'); END;
+CREATE TRIGGER IF NOT EXISTS staff_no_delete BEFORE DELETE ON staff BEGIN SELECT RAISE(ABORT, 'staff must be deactivated, not deleted'); END;
 """
 
 
@@ -276,6 +291,199 @@ class CaptureStore:
                 (branch, include_user),
             )
             return [row["full_name"] for row in rows]
+
+    def import_staff(self, rows: Sequence[tuple[str, str]], *, valid_branches: Sequence[str]) -> dict[str, int]:
+        """Insert active markdown-roster rows without overwriting later DB changes."""
+
+        allowed = set(valid_branches)
+        inserted = 0
+        existing = 0
+        with self.transaction() as connection:
+            for branch, raw_name in rows:
+                full_name = raw_name.strip()
+                if branch not in allowed:
+                    raise ValueError(f"Unknown branch in staff seed: {branch}.")
+                if not full_name:
+                    raise ValueError("Staff seed contains an empty name.")
+                found = connection.execute(
+                    "SELECT staff_id FROM staff WHERE branch=? AND full_name=? COLLATE NOCASE",
+                    (branch, full_name),
+                ).fetchone()
+                if found is not None:
+                    existing += 1
+                    continue
+                staff_id = str(uuid4())
+                after = {
+                    "staff_id": staff_id,
+                    "full_name": full_name,
+                    "branch": branch,
+                    "role": None,
+                    "employee_number": None,
+                    "employment_status": "active",
+                    "is_active": 1,
+                }
+                connection.execute(
+                    "INSERT INTO staff "
+                    "(staff_id,full_name,branch,role,employee_number,employment_status,is_active,created_at,deactivated_at) "
+                    "VALUES (?,?,?,?,?,'active',1,?,NULL)",
+                    (staff_id, full_name, branch, None, None, utc_now()),
+                )
+                self._audit(
+                    connection, None, "staff_imported", None,
+                    {"staff_id": staff_id, "before": None, "after": after, "source": "STAFF/master_staff_list.md"},
+                )
+                inserted += 1
+        return {"inserted": inserted, "existing": existing}
+
+    def active_staff(self, branch: str) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT full_name FROM staff WHERE branch=? AND is_active=1 ORDER BY full_name COLLATE NOCASE",
+                (branch,),
+            )
+            return [str(row["full_name"]) for row in rows]
+
+    def list_staff(self, *, branch: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            if branch:
+                rows = connection.execute(
+                    "SELECT * FROM staff WHERE branch=? "
+                    "ORDER BY is_active DESC,full_name COLLATE NOCASE",
+                    (branch,),
+                )
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM staff ORDER BY branch,is_active DESC,full_name COLLATE NOCASE"
+                )
+            return [dict(row) for row in rows]
+
+    def create_staff(
+        self, *, full_name: str, branch: str, role: str | None,
+        valid_branches: Sequence[str], actor_user_id: str,
+    ) -> str:
+        full_name = full_name.strip()
+        role = str(role or "").strip() or None
+        if not full_name:
+            raise ValueError("Full name is required.")
+        if branch not in set(valid_branches):
+            raise ValueError("Unknown branch.")
+        staff_id = str(uuid4())
+        now = utc_now()
+        after = {
+            "staff_id": staff_id,
+            "full_name": full_name,
+            "branch": branch,
+            "role": role,
+            "employee_number": None,
+            "employment_status": "probation",
+            "is_active": 1,
+        }
+        with self.transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM staff WHERE branch=? AND full_name=? COLLATE NOCASE",
+                (branch, full_name),
+            ).fetchone():
+                raise ValueError("A staff member with this name already exists in the branch.")
+            connection.execute(
+                "INSERT INTO staff "
+                "(staff_id,full_name,branch,role,employee_number,employment_status,is_active,created_at,deactivated_at) "
+                "VALUES (?,?,?,?,?,'probation',1,?,NULL)",
+                (staff_id, full_name, branch, role, None, now),
+            )
+            self._audit(
+                connection, actor_user_id, "staff_added", None,
+                {"staff_id": staff_id, "before": None, "after": after},
+            )
+        return staff_id
+
+    def update_staff(
+        self, staff_id: str, *, full_name: str, branch: str, role: str | None,
+        employment_status: str, employee_number: str | None,
+        valid_branches: Sequence[str], actor_user_id: str,
+    ) -> None:
+        full_name = full_name.strip()
+        role = str(role or "").strip() or None
+        employee_number = str(employee_number or "").strip() or None
+        if not full_name:
+            raise ValueError("Full name is required.")
+        if branch not in set(valid_branches):
+            raise ValueError("Unknown branch.")
+        if employment_status not in {"probation", "active"}:
+            raise ValueError("Invalid employment status.")
+        if employment_status == "probation" and employee_number is not None:
+            raise ValueError("A probationer cannot have an Able employee number.")
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM staff WHERE staff_id=?", (staff_id,)).fetchone()
+            if row is None:
+                raise LookupError("Staff member not found.")
+            if row["employment_status"] == "probation" and employment_status == "active" and not employee_number:
+                raise ValueError("An Able employee number is required to confirm a probationer.")
+            duplicate_name = connection.execute(
+                "SELECT 1 FROM staff WHERE branch=? AND full_name=? COLLATE NOCASE AND staff_id<>?",
+                (branch, full_name, staff_id),
+            ).fetchone()
+            if duplicate_name:
+                raise ValueError("A staff member with this name already exists in the branch.")
+            if employee_number and connection.execute(
+                "SELECT 1 FROM staff WHERE employee_number=? AND staff_id<>?",
+                (employee_number, staff_id),
+            ).fetchone():
+                raise ValueError("This Able employee number is already assigned to another staff member.")
+            before = _staff_snapshot(row)
+            after = {
+                **before,
+                "full_name": full_name,
+                "branch": branch,
+                "role": role,
+                "employee_number": employee_number,
+                "employment_status": employment_status,
+            }
+            changed = any(before[key] != after[key] for key in after if key != "staff_id")
+            if not changed:
+                return
+            connection.execute(
+                "UPDATE staff SET full_name=?,branch=?,role=?,employee_number=?,employment_status=? WHERE staff_id=?",
+                (full_name, branch, role, employee_number, employment_status, staff_id),
+            )
+            actions: list[str] = []
+            if before["full_name"] != full_name:
+                actions.append("staff_renamed")
+            if before["branch"] != branch:
+                actions.append("staff_transferred")
+            if before["role"] != role:
+                actions.append("staff_role_updated")
+            employment_changed = (
+                before["employment_status"] != employment_status
+                or before["employee_number"] != employee_number
+            )
+            if employment_changed:
+                if before["employment_status"] == "probation" and employment_status == "active" and employee_number:
+                    actions.append("staff_confirmed")
+                else:
+                    actions.append("staff_employment_updated")
+            detail = {"staff_id": staff_id, "before": before, "after": after}
+            for action in actions:
+                self._audit(connection, actor_user_id, action, None, detail)
+
+    def set_staff_active(self, staff_id: str, *, is_active: bool, actor_user_id: str) -> None:
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM staff WHERE staff_id=?", (staff_id,)).fetchone()
+            if row is None:
+                raise LookupError("Staff member not found.")
+            if bool(row["is_active"]) == is_active:
+                return
+            before = _staff_snapshot(row)
+            deactivated_at = None if is_active else utc_now()
+            connection.execute(
+                "UPDATE staff SET is_active=?,deactivated_at=? WHERE staff_id=?",
+                (int(is_active), deactivated_at, staff_id),
+            )
+            after = {**before, "is_active": int(is_active)}
+            self._audit(
+                connection, actor_user_id,
+                "staff_reactivated" if is_active else "staff_deactivated", None,
+                {"staff_id": staff_id, "before": before, "after": after},
+            )
 
     def authenticate(self, username: str, password: str) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -563,6 +771,16 @@ def _report_payload(row: sqlite3.Row) -> dict[str, Any]:
     result["details"] = json.loads(row["details_json"])
     result["warnings"] = json.loads(row["warnings_json"])
     return result
+
+
+def _staff_snapshot(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        key: row[key]
+        for key in (
+            "staff_id", "full_name", "branch", "role", "employee_number",
+            "employment_status", "is_active",
+        )
+    }
 
 
 def _minor_units(value: Any) -> int | None:

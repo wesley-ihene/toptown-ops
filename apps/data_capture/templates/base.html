@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{% block title %}TopTown Capture{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='capture.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='staff.css') }}">
   <script defer src="{{ url_for('static', filename='capture.js') }}"></script>
 </head>
 <body>
@@ -15,7 +16,7 @@
     <nav>
       <a href="{{ url_for('history') }}">History</a>
       <a href="{{ url_for('account_password') }}">Change password</a>
-      {% if g.user.role == 'admin' %}<a href="{{ url_for('users') }}">Users</a><a href="{{ url_for('export') }}">Export</a>{% endif %}
+      {% if g.user.role == 'admin' %}<a href="{{ url_for('users') }}">Users</a><a href="{{ url_for('admin_staff') }}">Staff</a><a href="{{ url_for('export') }}">Export</a>{% endif %}
       <form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="_csrf" value="{{ g.csrf_token }}"><button class="link-button" type="submit">Sign out</button></form>
     </nav>
   </header>

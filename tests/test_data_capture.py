@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 import json
+from pathlib import Path
 import re
 import sqlite3
 from zipfile import ZipFile
@@ -19,6 +20,7 @@ from apps.data_capture.domain import (
     validate_sales,
 )
 from apps.data_capture.exporter import tabular_reports, xlsx_workbook
+from apps.data_capture.master_data import MasterData
 
 
 @pytest.fixture()
@@ -26,7 +28,9 @@ def capture_app(tmp_path):
     (tmp_path / "config" / "sections").mkdir(parents=True)
     (tmp_path / "STAFF").mkdir()
     (tmp_path / "config" / "branches.yaml").write_text(
-        "branches:\n  - slug: waigani\n    name: Waigani\n", encoding="utf-8"
+        "branches:\n  - slug: waigani\n    name: Waigani\n"
+        "  - slug: bena_road\n    name: Bena Road\n",
+        encoding="utf-8",
     )
     (tmp_path / "config" / "products.yaml").write_text(
         "products:\n  - name: Premium Bale\n", encoding="utf-8"
@@ -84,6 +88,21 @@ def _login(client, username="alice", password="safe-password-123"):
 def _csrf(client, path="/"):
     page = client.get(path)
     return re.search(rb'name="_csrf" value="([^"]+)"', page.data).group(1).decode()
+
+
+def _create_admin(app, *, username="ops-admin"):
+    store: CaptureStore = app.extensions["capture_store"]
+    admin_id = store.create_user(
+        full_name="Ops Admin",
+        username=username,
+        password="admin-initial-pass",
+        role="admin",
+        branch=None,
+        actor_user_id=None,
+    )
+    with store.connect() as connection:
+        connection.execute("UPDATE users SET must_change_password=0 WHERE user_id=?", (admin_id,))
+    return admin_id
 
 
 def test_sales_validation_reconciles_totals_and_control_record():
@@ -440,3 +459,240 @@ def test_password_flag_migration_is_idempotent_and_preserves_existing_users(tmp_
         ).fetchone()
     assert columns.count("must_change_password") == 1
     assert tuple(existing) == ("admin@taop", 0)
+
+
+def test_staff_import_is_idempotent_and_db_roster_is_authoritative(capture_app):
+    runner = capture_app.test_cli_runner()
+    first = runner.invoke(args=["import-staff"])
+    second = runner.invoke(args=["import-staff"])
+    assert first.exit_code == second.exit_code == 0
+    assert "Imported 2 staff; 0 already existed." in first.output
+    assert "Imported 0 staff; 2 already existed." in second.output
+
+    store: CaptureStore = capture_app.extensions["capture_store"]
+    masters: MasterData = capture_app.extensions["capture_masters"]
+    with store.connect() as connection:
+        rows = connection.execute(
+            "SELECT full_name,employment_status,employee_number,is_active FROM staff ORDER BY full_name"
+        ).fetchall()
+    assert [row["full_name"] for row in rows] == ["Alice Supervisor", "Bob Cashier"]
+    assert all(tuple(row)[1:] == ("active", None, 1) for row in rows)
+
+    bob_id = next(item["staff_id"] for item in store.list_staff() if item["full_name"] == "Bob Cashier")
+    store.set_staff_active(bob_id, is_active=False, actor_user_id=None)
+    assert masters.staff("waigani") == ["Alice Supervisor"]
+    assert masters.staff("bena_road") == []
+
+    third = runner.invoke(args=["import-staff"])
+    assert third.exit_code == 0
+    assert masters.staff("waigani") == ["Alice Supervisor"]
+
+
+def test_current_staff_seed_counts_match_reconciled_rosters(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    store = CaptureStore(tmp_path / "staff-counts.sqlite3")
+    store.initialize()
+    masters = MasterData(root, store.path)
+    first = store.import_staff(masters.staff_seed(), valid_branches=masters.branches())
+    second = store.import_staff(masters.staff_seed(), valid_branches=masters.branches())
+    assert first["inserted"] == 98
+    assert second == {"inserted": 0, "existing": 98}
+    assert {branch: len(store.active_staff(branch)) for branch in masters.branches()} == {
+        "waigani": 26,
+        "bena_road": 27,
+        "lae_malaita": 27,
+        "lae_5th_street": 18,
+    }
+
+
+def test_admin_staff_add_confirm_rename_transfer_and_audit(capture_app):
+    assert capture_app.test_cli_runner().invoke(args=["import-staff"]).exit_code == 0
+    store: CaptureStore = capture_app.extensions["capture_store"]
+    masters: MasterData = capture_app.extensions["capture_masters"]
+    admin_id = _create_admin(capture_app)
+    admin = capture_app.test_client()
+    assert _login(admin, "ops-admin", "admin-initial-pass").status_code == 302
+    token = _csrf(admin, "/admin/staff")
+
+    user = store.authenticate("alice", "safe-password-123")
+    historical = validate_attendance(
+        {
+            "report_date": date.today().isoformat(),
+            "statuses": {"Alice Supervisor": "present", "Bob Cashier": "off"},
+        },
+        roster=masters.staff("waigani"),
+    )
+    report_id = store.submit([historical], branch="waigani", submitted_by=user["user_id"])[0]
+
+    added = admin.post(
+        "/admin/staff",
+        data={
+            "_csrf": token,
+            "action": "add",
+            "full_name": "Carol New",
+            "branch": "waigani",
+            "role": "",
+        },
+    )
+    assert added.status_code == 302
+    carol = next(item for item in store.list_staff() if item["full_name"] == "Carol New")
+    assert (carol["employment_status"], carol["employee_number"], carol["is_active"]) == (
+        "probation", None, 1,
+    )
+    assert "Carol New" in masters.staff("waigani")
+
+    missing_number = admin.post(
+        "/admin/staff",
+        data={
+            "_csrf": token,
+            "action": "update",
+            "staff_id": carol["staff_id"],
+            "full_name": "Carol New",
+            "branch": "waigani",
+            "role": "",
+            "employment_status": "active",
+            "employee_number": "",
+        },
+    )
+    assert missing_number.status_code == 200
+    assert b"required to confirm" in missing_number.data
+
+    duplicate = admin.post(
+        "/admin/staff",
+        data={
+            "_csrf": token,
+            "action": "add",
+            "full_name": "alice supervisor",
+            "branch": "waigani",
+            "role": "",
+        },
+    )
+    assert duplicate.status_code == 200
+    assert b"already exists" in duplicate.data
+
+    confirmed = admin.post(
+        "/admin/staff",
+        data={
+            "_csrf": token,
+            "action": "update",
+            "staff_id": carol["staff_id"],
+            "full_name": "Carol New",
+            "branch": "waigani",
+            "role": "",
+            "employment_status": "active",
+            "employee_number": "ABLE-001",
+        },
+    )
+    assert confirmed.status_code == 302
+
+    admin.post(
+        "/admin/staff",
+        data={
+            "_csrf": token,
+            "action": "add",
+            "full_name": "Dana New",
+            "branch": "waigani",
+            "role": "",
+        },
+    )
+    dana = next(item for item in store.list_staff() if item["full_name"] == "Dana New")
+    duplicate_number = admin.post(
+        "/admin/staff",
+        data={
+            "_csrf": token,
+            "action": "update",
+            "staff_id": dana["staff_id"],
+            "full_name": "Dana New",
+            "branch": "waigani",
+            "role": "",
+            "employment_status": "active",
+            "employee_number": "ABLE-001",
+        },
+    )
+    assert duplicate_number.status_code == 200
+    assert b"already assigned" in duplicate_number.data
+
+    alice = next(item for item in store.list_staff() if item["full_name"] == "Alice Supervisor")
+    changed = admin.post(
+        "/admin/staff",
+        data={
+            "_csrf": token,
+            "action": "update",
+            "staff_id": alice["staff_id"],
+            "full_name": "Alicia Supervisor",
+            "branch": "bena_road",
+            "role": "Store Lead",
+            "employment_status": "active",
+            "employee_number": "",
+        },
+    )
+    assert changed.status_code == 302
+    assert "Alicia Supervisor" in masters.staff("bena_road")
+    assert "Alice Supervisor" not in masters.staff("waigani")
+
+    with store.connect() as connection:
+        old_names = [
+            json.loads(row["payload_json"])["staff_name"]
+            for row in connection.execute(
+                "SELECT payload_json FROM report_lines WHERE report_id=? ORDER BY sequence_no", (report_id,)
+            )
+        ]
+        audits = connection.execute(
+            "SELECT actor_user_id,action,detail_json FROM audit_log WHERE action LIKE 'staff_%'"
+        ).fetchall()
+    assert "Alice Supervisor" in old_names
+    actions = {row["action"] for row in audits if row["actor_user_id"] == admin_id}
+    assert {"staff_added", "staff_confirmed", "staff_renamed", "staff_transferred"} <= actions
+    for row in audits:
+        if row["actor_user_id"] == admin_id:
+            detail = json.loads(row["detail_json"])
+            assert detail["staff_id"]
+            assert "before" in detail and "after" in detail
+    assert len(store.pending_outbox()) == 1
+
+
+def test_staff_retention_toggle_and_non_admin_authorization(capture_app):
+    capture_app.test_cli_runner().invoke(args=["import-staff"])
+    store: CaptureStore = capture_app.extensions["capture_store"]
+    staff_id = store.list_staff(branch="waigani")[0]["staff_id"]
+    admin_id = _create_admin(capture_app)
+
+    with store.connect() as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="must be deactivated"):
+            connection.execute("DELETE FROM staff WHERE staff_id=?", (staff_id,))
+
+    for username, password in (
+        ("alice", "safe-password-123"),
+        ("peter", "safe-password-456"),
+    ):
+        client = capture_app.test_client()
+        assert _login(client, username, password).status_code == 302
+        assert client.get("/admin/staff").status_code == 403
+        token = _csrf(client)
+        for action in ("add", "update", "deactivate", "reactivate"):
+            assert client.post(
+                "/admin/staff",
+                data={"_csrf": token, "action": action, "staff_id": staff_id},
+            ).status_code == 403
+
+    admin = capture_app.test_client()
+    _login(admin, "ops-admin", "admin-initial-pass")
+    token = _csrf(admin, "/admin/staff")
+    assert admin.post(
+        "/admin/staff",
+        data={"_csrf": token, "action": "deactivate", "staff_id": staff_id},
+    ).status_code == 302
+    assert next(row for row in store.list_staff(branch="waigani") if row["staff_id"] == staff_id)["is_active"] == 0
+    assert admin.post(
+        "/admin/staff",
+        data={"_csrf": token, "action": "reactivate", "staff_id": staff_id},
+    ).status_code == 302
+    assert next(row for row in store.list_staff(branch="waigani") if row["staff_id"] == staff_id)["is_active"] == 1
+    with store.connect() as connection:
+        actions = {
+            row["action"]
+            for row in connection.execute(
+                "SELECT action FROM audit_log WHERE actor_user_id=?", (admin_id,)
+            )
+        }
+    assert {"staff_deactivated", "staff_reactivated"} <= actions

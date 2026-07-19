@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Staff administration · TopTown Capture{% endblock %}
+{% block content %}
+<section class="hero compact">
+  <p class="eyebrow">Retained and audited identity master</p>
+  <h1>Staff administration</h1>
+  <p>Renames affect future dropdowns only. Historical submitted report lines keep the name captured at submission time.</p>
+</section>
+{% if error %}<div class="error-list">{{ error }}</div>{% endif %}
+<section class="panel">
+  <h2>Add probationary staff member</h2>
+  <form method="post" class="field-grid">
+    <input type="hidden" name="_csrf" value="{{ g.csrf_token }}">
+    <input type="hidden" name="action" value="add">
+    <input type="hidden" name="branch_filter" value="{{ selected_branch }}">
+    <label>Full name<input name="full_name" required></label>
+    <label>Branch<select name="branch" required>{% for branch in branches %}<option value="{{ branch }}"{% if branch == selected_branch %} selected{% endif %}>{{ branch.replace('_', ' ') }}</option>{% endfor %}</select></label>
+    <label>Role (optional)<input name="role"></label>
+    <button type="submit">Add to working roster</button>
+  </form>
+</section>
+<section class="panel">
+  <form method="get" class="filters">
+    <label>Branch
+      <select name="branch_filter">
+        <option value="">All branches</option>
+        {% for branch in branches %}<option value="{{ branch }}"{% if branch == selected_branch %} selected{% endif %}>{{ branch.replace('_', ' ') }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit">Filter</button>
+  </form>
+</section>
+<section class="panel table-wrap">
+  <table>
+    <thead><tr><th>Staff</th><th>Roster</th><th>Employment</th><th>Manage</th></tr></thead>
+    <tbody>
+      {% for person in staff %}
+      <tr class="{% if not person.is_active %}inactive-row{% endif %}">
+        <td><strong>{{ person.full_name }}</strong><small>{{ person.branch.replace('_', ' ') }}{% if person.role %} · {{ person.role }}{% endif %}</small></td>
+        <td><span class="status{% if not person.is_active %} superseded{% endif %}">{{ 'active roster' if person.is_active else 'deactivated' }}</span></td>
+        <td>
+          <span class="status{% if person.employment_status == 'probation' %} probation{% endif %}">{{ person.employment_status }}</span>
+          <small>Able: {{ person.employee_number or 'not linked' }}</small>
+          {% if person.employment_status == 'active' and not person.employee_number %}<small class="warning-text">Confirmed staff is missing an Able employee number.</small>{% endif %}
+        </td>
+        <td>
+          <form method="post" class="staff-edit-grid">
+            <input type="hidden" name="_csrf" value="{{ g.csrf_token }}">
+            <input type="hidden" name="action" value="update">
+            <input type="hidden" name="staff_id" value="{{ person.staff_id }}">
+            <input type="hidden" name="branch_filter" value="{{ selected_branch }}">
+            <label>Full name<input name="full_name" value="{{ person.full_name }}" required></label>
+            <label>Branch<select name="branch" required>{% for branch in branches %}<option value="{{ branch }}"{% if branch == person.branch %} selected{% endif %}>{{ branch.replace('_', ' ') }}</option>{% endfor %}</select></label>
+            <label>Role<input name="role" value="{{ person.role or '' }}"></label>
+            <label>Status<select name="employment_status"><option value="probation"{% if person.employment_status == 'probation' %} selected{% endif %}>Probation</option><option value="active"{% if person.employment_status == 'active' %} selected{% endif %}>Active / confirmed</option></select></label>
+            <label>Able employee number<input name="employee_number" value="{{ person.employee_number or '' }}"></label>
+            <button type="submit">Save changes</button>
+          </form>
+          <form method="post" class="inline-action">
+            <input type="hidden" name="_csrf" value="{{ g.csrf_token }}">
+            <input type="hidden" name="action" value="{{ 'deactivate' if person.is_active else 'reactivate' }}">
+            <input type="hidden" name="staff_id" value="{{ person.staff_id }}">
+            <input type="hidden" name="branch_filter" value="{{ selected_branch }}">
+            <button class="{{ 'danger' if person.is_active else 'secondary' }}" type="submit">{{ 'Deactivate' if person.is_active else 'Reactivate' }}</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}<tr><td colspan="4">No staff records for this filter.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

@@ -67,7 +67,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     store = CaptureStore(app.config["DATABASE"])
     store.initialize()
-    masters = MasterData(Path(app.config["REPO_ROOT"]))
+    masters = MasterData(Path(app.config["REPO_ROOT"]), store.path)
     dispatcher = PipelineDispatcher(store, repo_root=app.config["REPO_ROOT"])
     app.extensions["capture_store"] = store
     app.extensions["capture_masters"] = masters
@@ -109,6 +109,16 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         )
         if summary["failed"]:
             raise click.ClickException("One or more outbox records remain failed.")
+
+    @app.cli.command("import-staff")
+    def import_staff() -> None:
+        """Seed the staff master from active markdown roster rows."""
+
+        try:
+            summary = store.import_staff(masters.staff_seed(), valid_branches=masters.branches())
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Imported {summary['inserted']} staff; {summary['existing']} already existed.")
 
     @app.before_request
     def load_identity_and_check_csrf() -> Response | None:
@@ -337,6 +347,55 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             except (LookupError, ValueError) as exc:
                 error = str(exc)
         return render_template("users.html", users=store.list_users(), branches=masters.branches(), error=error)
+
+    @app.route("/admin/staff", methods=["GET", "POST"])
+    @_role_required("admin")
+    def admin_staff() -> str | Response:
+        branches = masters.branches()
+        selected_branch = request.values.get("branch_filter", "")
+        if selected_branch and selected_branch not in branches:
+            abort(400, "Unknown branch filter.")
+        error = None
+        if request.method == "POST":
+            try:
+                action = request.form.get("action", "")
+                if action == "add":
+                    store.create_staff(
+                        full_name=request.form.get("full_name", ""),
+                        branch=request.form.get("branch", ""),
+                        role=request.form.get("role"),
+                        valid_branches=branches,
+                        actor_user_id=g.user["user_id"],
+                    )
+                elif action == "update":
+                    store.update_staff(
+                        request.form.get("staff_id", ""),
+                        full_name=request.form.get("full_name", ""),
+                        branch=request.form.get("branch", ""),
+                        role=request.form.get("role"),
+                        employment_status=request.form.get("employment_status", ""),
+                        employee_number=request.form.get("employee_number"),
+                        valid_branches=branches,
+                        actor_user_id=g.user["user_id"],
+                    )
+                elif action in {"deactivate", "reactivate"}:
+                    store.set_staff_active(
+                        request.form.get("staff_id", ""),
+                        is_active=action == "reactivate",
+                        actor_user_id=g.user["user_id"],
+                    )
+                else:
+                    abort(400, "Unknown staff action.")
+                return redirect(url_for("admin_staff", branch_filter=selected_branch or None))
+            except (LookupError, ValueError) as exc:
+                error = str(exc)
+        return render_template(
+            "staff.html",
+            staff=store.list_staff(branch=selected_branch or None),
+            branches=branches,
+            selected_branch=selected_branch,
+            error=error,
+        )
 
     @app.get("/export")
     @_role_required("admin")
