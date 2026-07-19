@@ -153,6 +153,65 @@ def test_valid_single_sales_report_still_writes_structured_output(
     assert (tmp_path / "records" / "structured" / "sales_income" / "waigani" / "2026-04-28.json").exists()
 
 
+def test_mixed_report_with_5th_street_item_return_sales_still_splits_safely(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "source": "whatsapp",
+                "raw_message": {
+                    "text": "\n".join(
+                        [
+                            "Branch: Lae 5th Street Branch",
+                            "Date: 01/06/2026",
+                            "",
+                            "DAY-END SALES REPORT",
+                            "T/Cash: K2,785.00",
+                            "T/Card: K1,072.00",
+                            "Z/Reading: K3,857.00",
+                            "Items Return: K32.00",
+                            "TOTALS:",
+                            "Total Cash: K2,753.00",
+                            "Total Card: K1,072.00",
+                            "Total Sales: K3,857.00",
+                            "Traffic: 326",
+                            "Served: 143",
+                            "Supervisor Confirmation: YES",
+                            "Return Type: Cash refund",
+                            "",
+                            "SUPERVISOR CONTROL SUMMARY",
+                            "Cash variance: No",
+                            "Staffing issues: No",
+                            "Stock issues affecting sales: No",
+                            "Pricing or system issues: No",
+                            "Supervisor confirmation: Checked and closed.",
+                        ]
+                    )
+                },
+                "metadata": {
+                    "received_at": "2026-06-01T12:00:00Z",
+                    "sender": "mixed-5th-street-item-return",
+                    "branch_hint": "lae_5th_street",
+                },
+            },
+        )
+    )
+
+    sales_path = tmp_path / "records" / "structured" / "sales_income" / "lae_5th_street" / "2026-06-01.json"
+    supervisor_path = tmp_path / "records" / "intelligence" / "supervisor_control" / "2026-06-01" / "lae_5th_street.json"
+
+    assert result.payload["classification"]["report_type"] == "mixed"
+    assert result.payload["status"] in {"accepted", "accepted_with_warning"}
+    assert result.payload["routing"]["review_reason"] is None
+    assert sales_path.exists()
+    assert supervisor_path.exists()
+
+
 def _patch_output_paths(tmp_path: Path, monkeypatch) -> None:
     records_dir = tmp_path / "records"
     colony_root = tmp_path / "ioi-colony"

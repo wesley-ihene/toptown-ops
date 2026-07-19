@@ -548,6 +548,67 @@ def test_pricing_stock_release_agent_parses_checked_by_without_missing_provenanc
     }
 
 
+def test_pricing_stock_release_agent_accepts_zero_bale_waigani_daily_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        WorkItem(
+            kind="raw_message",
+            payload={
+                "classification": {"report_type": "bale_summary"},
+                "raw_message": {
+                    "text": "\n".join(
+                        [
+                            "DAILY BALE SUMMARY - RELEASED TO RAIL",
+                            "Branch: WAIGANI",
+                            "Date: 04/06/26",
+                            "",
+                            "TOTAL",
+                            "Total Qty: 0",
+                            "Total Amount: K0.00",
+                            "",
+                            "Bale Release To Rail Count: 0",
+                            "Pending Count: 0",
+                            "",
+                            "Note:",
+                            "No bales were broken today because stock was not available during operating hours.",
+                        ]
+                    )
+                },
+            },
+        )
+    )
+
+    assert result.payload["status"] == "accepted_with_warning"
+    assert result.payload["branch"] == "waigani"
+    assert result.payload["report_date"] == "2026-06-04"
+    assert result.payload["items"] == []
+    assert result.payload["metrics"] == {
+        "bales_processed": 0,
+        "bales_released": 0,
+        "bales_pending_approval": 0,
+        "total_qty": 0,
+        "total_amount": 0.0,
+        "release_ratio": 0.0,
+    }
+    assert result.payload["warnings"] == [
+        {
+            "code": "no_bale_activity",
+            "severity": "warning",
+            "message": "Report declares no bale activity for the reporting day.",
+        },
+        {
+            "code": "missing_provenance",
+            "severity": "warning",
+            "message": "Prepared By or Checked By could not be fully extracted from the bale summary.",
+        },
+    ]
+    assert "no_bale_activity" in result.metadata["validation"]["details"]["validation_reasons"]
+
+
 def test_pricing_stock_release_agent_supersedes_existing_bale_record_for_full_correction(
     tmp_path: Path,
     monkeypatch,

@@ -44,3 +44,4 @@ analytics/branch_comparison/
 analytics/branch_daily/
 analytics/section_daily/
 analytics/staff_daily/
+STAFF/*.bak.*

@@ -33,6 +33,7 @@ class SalesFigures:
             "cash_sales": self.cash_sales,
             "eftpos_sales": self.eftpos_sales,
             "item_returns": self.item_returns,
+            "cash_adjustment_return": self.item_returns,
             "item_returns_total": self.item_returns,
             "total_returns": self.item_returns,
             "cash_over": self.cash_over,

@@ -40,6 +40,9 @@ def render_dashboard_response(
     action_summary = operator_action_state.get("summary") or {}
     pending_actions = operator_action_state.get("pending_actions") or []
     openclaw_runtime = (bundle.get("openclaw_runtime") or {}).get("openclaw") or {}
+    advisory_sandbox = bundle.get("openclaw_advisory_sandbox") or {}
+    advisory_status = advisory_sandbox.get("status") or {}
+    advisory_sample = advisory_sandbox.get("sample") or {}
     branch_options = catalog.get("available_branches") or []
     date_options = catalog.get("available_dates") or []
     branch_query = urlencode({"branch": selected_branch, "date": selected_date})
@@ -203,6 +206,27 @@ def render_dashboard_response(
             </tbody>
           </table>
           <p class="subtle">Config-only adapter visibility. No gateway connectivity check is performed from the dashboard.</p>
+        </article>
+        <article class="panel">
+          <h3>OpenClaw Advisory Sandbox</h3>
+          <table>
+            <tbody>
+              {_summary_row("Status", _advisory_status_label(advisory_status))}
+              {_summary_row("Sandbox Only", advisory_status.get("sandbox_only"))}
+              {_summary_row("Mock Output", advisory_status.get("mock_output"))}
+              {_summary_row("Gateway URL", advisory_status.get("gateway_url"))}
+            </tbody>
+          </table>
+          <h3>Mock Advisory</h3>
+          <table>
+            <tbody>
+              {_summary_row("Headline", _nested(advisory_sample, "advisory", "headline"))}
+              {_summary_row("Summary", _nested(advisory_sample, "advisory", "summary"))}
+              {_summary_row("Recommended Action", _nested(advisory_sample, "advisory", "recommended_action"))}
+              {_summary_row("Context", advisory_sample.get("context"))}
+            </tbody>
+          </table>
+          <p class="subtle">Sandbox-only mock advisory content. No prompts are sent, no records are written, and no automatic actions are created.</p>
         </article>
       </div>
     </section>
@@ -712,6 +736,13 @@ def _openclaw_status_label(payload: Mapping[str, Any]) -> str | None:
     status = payload.get("status")
     if isinstance(status, str) and status.strip():
         return status.strip()
+    return None
+
+
+def _advisory_status_label(payload: Mapping[str, Any]) -> str | None:
+    status = payload.get("status")
+    if isinstance(status, str) and status.strip():
+        return status.strip().replace("_", " ").title()
     return None
 
 

@@ -16,6 +16,7 @@ class StockFlowInterpretation:
     bales_released: int = 0
     bales_pending_approval: int = 0
     total_qty: int | float = 0
+    zero_bale_activity: bool = False
     warnings: list[WarningEntry] = field(default_factory=list)
 
 
@@ -86,5 +87,6 @@ def interpret_stock_flow(parsed: ParsedBaleSummary) -> StockFlowInterpretation:
         bales_released=bales_released,
         bales_pending_approval=bales_pending_approval,
         total_qty=normalized_total_qty,
+        zero_bale_activity=parsed.zero_bale_activity,
         warnings=warnings,
     )

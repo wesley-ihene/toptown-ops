@@ -515,12 +515,28 @@ def _has_meaningful_structure(*, signal_type: str, payload: Mapping[str, Any]) -
     if signal_type == "sales_income":
         return isinstance(metrics, Mapping) and any(_is_nonzero(metrics.get(field)) for field in ("gross_sales", "cash_sales", "eftpos_sales"))
     if signal_type == "pricing_stock_release":
-        return isinstance(items, Sequence) and any(isinstance(item, Mapping) for item in items)
+        if isinstance(items, Sequence) and any(isinstance(item, Mapping) for item in items):
+            return True
+        return _is_zero_bale_pricing_payload(payload, metrics)
     if signal_type in {"hr_attendance", "hr_performance"}:
         return isinstance(items, Sequence) and len([item for item in items if isinstance(item, Mapping)]) > 0
     if signal_type == "supervisor_control":
         return bool(_sequence_size(items)) or bool(_mapping(payload.get("metrics")))
     return bool(_mapping(metrics)) or bool(_sequence_size(items))
+
+
+def _is_zero_bale_pricing_payload(payload: Mapping[str, Any], metrics: Any) -> bool:
+    """Return whether one bale payload is an explicit zero-activity summary."""
+
+    if "no_bale_activity" not in _warning_codes(payload):
+        return False
+    metric_map = _mapping(metrics)
+    return (
+        metric_map.get("bales_processed") == 0
+        and metric_map.get("bales_released") == 0
+        and metric_map.get("total_qty") == 0
+        and float(metric_map.get("total_amount") or 0.0) == 0.0
+    )
 
 
 def _scope(*, report_family: str, branch: str | None, report_date: str | None) -> str | None:

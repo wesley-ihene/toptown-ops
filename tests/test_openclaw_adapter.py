@@ -5,6 +5,8 @@ from __future__ import annotations
 from packages.openclaw_adapter import (
     DEFAULT_OPENCLAW_GATEWAY_URL,
     check_gateway_health,
+    generate_advisory,
+    get_advisory_status,
     get_gateway_url,
     get_runtime_status,
     is_openclaw_enabled,
@@ -93,3 +95,45 @@ def test_send_advisory_prompt_returns_disabled_status(monkeypatch) -> None:
         "reason": "TAOP OpenClaw integration is disabled",
         "prompt": "Check branch staffing risk.",
     }
+
+
+def test_get_advisory_status_reports_sandbox_only_mode(monkeypatch) -> None:
+    monkeypatch.setenv("TAOP_OPENCLAW_ENABLED", "0")
+    monkeypatch.setenv("OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:19999")
+
+    payload = get_advisory_status()
+
+    assert payload == {
+        "enabled": False,
+        "sandbox_only": True,
+        "gateway_url": "ws://127.0.0.1:19999",
+        "status": "sandbox_only",
+        "reason": "OpenClaw advisory sandbox only; no gateway calls or external prompt delivery",
+        "mock_output": True,
+    }
+
+
+def test_generate_advisory_returns_mock_sandbox_content(monkeypatch) -> None:
+    monkeypatch.delenv("OPENCLAW_GATEWAY_URL", raising=False)
+
+    payload = generate_advisory(
+        "Branch Risk Check",
+        {
+            "branch": "waigani",
+            "report_date": "2026-04-07",
+        },
+    )
+
+    assert payload["title"] == "Branch Risk Check"
+    assert payload["context"] == "branch=waigani, report_date=2026-04-07"
+    assert payload["status"]["status"] == "sandbox_only"
+    assert payload["status"]["sandbox_only"] is True
+    assert payload["status"]["gateway_url"] == DEFAULT_OPENCLAW_GATEWAY_URL
+    assert payload["advisory"]["headline"] == "Sandbox advisory: Branch Risk Check"
+    assert payload["advisory"]["summary"] == "Mock advisory only for Branch Risk Check. Human review remains required before any action."
+    assert payload["advisory"]["signals"] == [
+        "Sandbox-only advisory response generated locally.",
+        "No OpenClaw gateway call was performed.",
+        "No prompts were sent outside TAOP.",
+    ]
+    assert payload["advisory"]["recommended_action"] == "No automatic action. Escalate through normal governance if review is needed."

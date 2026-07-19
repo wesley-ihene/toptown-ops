@@ -309,7 +309,7 @@ def _collect_embedded_adjustments(cleaned_lines: list[str]) -> dict[str, float |
 
     for line in cleaned_lines:
         normalized = " ".join(line.casefold().replace("_", " ").replace("/", " ").split())
-        if "item return" in normalized:
+        if _mentions_item_return(normalized):
             amounts = _extract_money_values(line)
             if amounts:
                 item_returns = round(sum(abs(amount) for amount in amounts), 2)
@@ -357,6 +357,19 @@ def _mentions_cash_down(normalized_line: str) -> bool:
         "cash down" in normalized_line
         or "c down" in normalized_line
         or ("cash variance" in normalized_line and "down" in normalized_line)
+    )
+
+
+def _mentions_item_return(normalized_line: str) -> bool:
+    return any(
+        token in normalized_line
+        for token in (
+            "item return",
+            "items return",
+            "returned item",
+            "refund amount",
+            "refund",
+        )
     )
 
 

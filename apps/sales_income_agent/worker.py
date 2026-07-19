@@ -29,7 +29,7 @@ from packages.data_governance import build_governance_context
 from packages.signal_contracts.agent_result import AgentResult
 from packages.signal_contracts.work_item import WorkItem
 from packages.validation import ValidationMetadata, normalize_rejections
-from packages.validation.sales_reconciliation import build_sales_reconciliation, empty_sales_reconciliation
+from packages.validation.sales_reconciliation import TOLERANCE, build_sales_reconciliation, empty_sales_reconciliation
 
 AGENT_NAME = "sales_income_agent"
 SIGNAL_TYPE = "sales_income"
@@ -68,7 +68,6 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             return result
 
         parsed = parse_work_item(work_item)
-        _derive_retail_adjustment_metrics(parsed.figures)
         parsed.warnings.extend(_retail_adjustment_warnings(parsed=parsed))
         gross_sales_derivation_warning = derive_gross_sales_from_payment_components(parsed.figures)
         if gross_sales_derivation_warning is not None:
@@ -85,6 +84,7 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
             metrics=parsed.figures.to_payload(),
             raw_text=_raw_sales_text(payload),
         )
+        _derive_retail_adjustment_metrics(parsed.figures, reconciliation=sales_reconciliation)
         totals_validation = validate_totals(
             parsed.figures,
             reconciliation=None if candidate_only and sales_reconciliation.diagnostics_present else sales_reconciliation,
@@ -142,6 +142,10 @@ def process_work_item(work_item: WorkItem) -> AgentResult:
                     "cash_sales": _candidate_metric_value(parsed.figures.cash_sales, candidate_only=candidate_only),
                     "eftpos_sales": _candidate_metric_value(parsed.figures.eftpos_sales, candidate_only=candidate_only),
                     "item_returns": _candidate_metric_value(parsed.figures.item_returns, candidate_only=candidate_only),
+                    "cash_adjustment_return": _candidate_metric_value(
+                        parsed.figures.item_returns,
+                        candidate_only=candidate_only,
+                    ),
                     "item_returns_total": _candidate_metric_value(parsed.figures.item_returns, candidate_only=candidate_only),
                     "total_returns": _candidate_metric_value(parsed.figures.item_returns, candidate_only=candidate_only),
                     "cash_over": _candidate_metric_value(parsed.figures.cash_over, candidate_only=candidate_only),
@@ -251,6 +255,7 @@ def _failure_result(
                 "cash_sales": 0.0,
                 "eftpos_sales": 0.0,
                 "item_returns": 0.0,
+                "cash_adjustment_return": 0.0,
                 "item_returns_total": 0.0,
                 "total_returns": 0.0,
                 "cash_over": 0.0,
@@ -398,15 +403,21 @@ def _raw_sales_text(payload: Mapping[str, object]) -> str | None:
     return None
 
 
-def _derive_retail_adjustment_metrics(figures) -> None:
+def _derive_retail_adjustment_metrics(figures, *, reconciliation) -> None:
     """Populate adjustment-derived sales figures when enough information is present."""
 
-    if (
-        figures.net_sales is None
-        and figures.gross_sales is not None
-        and figures.item_returns is not None
-    ):
-        figures.net_sales = round(figures.gross_sales - figures.item_returns, 2)
+    if figures.gross_sales is None or figures.item_returns is None:
+        return
+
+    derived_net_sales = round(figures.gross_sales - figures.item_returns, 2)
+    if figures.net_sales is not None and abs(figures.net_sales - derived_net_sales) > TOLERANCE:
+        return
+
+    expected_total_sales = reconciliation.expected_total_sales
+    if expected_total_sales is not None and abs(expected_total_sales - figures.gross_sales) <= TOLERANCE:
+        figures.net_sales = figures.gross_sales
+        return
+    figures.net_sales = derived_net_sales
 
 
 def _retail_adjustment_warnings(*, parsed) -> list[WarningEntry]:
@@ -424,7 +435,10 @@ def _retail_adjustment_warnings(*, parsed) -> list[WarningEntry]:
             make_warning(
                 code="item_returns_present",
                 severity="warning",
-                message=f"Item returns of {item_returns:.2f} were included in the retail reconciliation.",
+                message=(
+                    f"Item returns of {item_returns:.2f} were accepted as a reconciliation adjustment "
+                    "because Total Cash + Total Card + Items Return matched Total Sales."
+                ),
             )
         )
     if cash_over > 0.0:

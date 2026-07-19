@@ -171,6 +171,7 @@ def test_dashboard_surface_registry_does_not_change_runtime_behavior(tmp_path: P
 
     assert dashboard_api_response.status_code == 200
     assert dashboard_api_body["datasets"]["openclaw_runtime"]["openclaw"]["status"] == "disabled"
+    assert dashboard_api_body["datasets"]["openclaw_advisory_sandbox"]["status"]["status"] == "sandbox_only"
 
     dashboard_response = phase4_portal.dispatch_http_request(
         method="GET",
@@ -182,6 +183,8 @@ def test_dashboard_surface_registry_does_not_change_runtime_behavior(tmp_path: P
     assert dashboard_response.status_code == 200
     assert "TopTown Operational Dashboard" in html
     assert "OpenClaw Runtime" in html
+    assert "OpenClaw Advisory Sandbox" in html
+    assert "Sandbox Only" in html
     assert "Standby" in html
     assert dashboard_surface("taop_operational_dashboard").route == "/dashboard"
 

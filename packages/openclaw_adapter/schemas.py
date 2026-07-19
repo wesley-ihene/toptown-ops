@@ -7,6 +7,7 @@ from typing import Literal, TypedDict
 
 HealthStatus = Literal["disabled", "configured", "unavailable"]
 AdvisoryStatus = Literal["disabled", "not_implemented"]
+AdvisorySandboxStatus = Literal["sandbox_only"]
 
 
 class GatewayHealthPayload(TypedDict):
@@ -32,3 +33,23 @@ class AdvisoryPromptPayload(TypedDict):
     status: AdvisoryStatus
     reason: str
     prompt: str
+
+
+class AdvisorySandboxStatusPayload(TypedDict):
+    """Structured status payload for sandbox-only advisory visibility."""
+
+    enabled: bool
+    sandbox_only: bool
+    gateway_url: str
+    status: AdvisorySandboxStatus
+    reason: str
+    mock_output: bool
+
+
+class AdvisorySandboxPayload(TypedDict):
+    """Structured sandbox advisory payload with mock-only content."""
+
+    title: str
+    context: str
+    status: AdvisorySandboxStatusPayload
+    advisory: dict[str, object]

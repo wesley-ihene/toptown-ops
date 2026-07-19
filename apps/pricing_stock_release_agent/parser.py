@@ -69,6 +69,13 @@ _PROCESSED_COUNT_PATTERNS = (
         flags=re.IGNORECASE,
     ),
 )
+_ZERO_BALE_ACTIVITY_PHRASES = (
+    "no bales",
+    "no bale released",
+    "no stock",
+    "did not break bales",
+    "bales received late",
+)
 
 _WORD_NUMBERS: dict[str, int] = {
     "zero": 0,
@@ -113,6 +120,7 @@ class ParsedBaleSummary:
     declared_bales_pending_approval: int | None = None
     declared_total_qty: int | float | None = None
     declared_total_amount: float | None = None
+    zero_bale_activity: bool = False
     warnings: list[WarningEntry] = field(default_factory=list)
     source_text: str = ""
 
@@ -193,10 +201,24 @@ def parse_work_item(work_item: WorkItem) -> ParsedBaleSummary:
             )
         )
 
+    parsed.zero_bale_activity = _is_zero_bale_activity(parsed)
+    if parsed.zero_bale_activity:
+        parsed.declared_bales_processed = 0
+        parsed.declared_bales_released = 0
+        if parsed.declared_bales_pending_approval is None:
+            parsed.declared_bales_pending_approval = 0
+        parsed.warnings.append(
+            make_warning(
+                code="no_bale_activity",
+                severity="warning",
+                message="Report declares no bale activity for the reporting day.",
+            )
+        )
+
     if (
         not parsed.branch
         or not parsed.report_date
-        or not parsed.items
+        or (not parsed.items and not parsed.zero_bale_activity)
         or parsed.declared_total_qty is None
         or parsed.declared_total_amount is None
     ):
@@ -207,7 +229,7 @@ def parse_work_item(work_item: WorkItem) -> ParsedBaleSummary:
                 message="Branch, date, bale items, total quantity, or total amount could not be fully extracted.",
             )
         )
-    if parsed.branch and parsed.report_date and parsed.items and (
+    if parsed.branch and parsed.report_date and (parsed.items or parsed.zero_bale_activity) and (
         parsed.prepared_by is None or parsed.checked_by is None
     ):
         parsed.warnings.append(
@@ -255,6 +277,7 @@ def _parse_metadata_line(line: str) -> tuple[str, Any] | None:
     raw_key = _sanitize_label_key(match.group(1))
     raw_value = match.group(2).strip()
     field_name = internal_field_name(raw_key, report_family="bale_summary")
+    normalized_key = _normalize_key(raw_key)
 
     if field_name == "branch":
         branch_result = normalize_branch(raw_value)
@@ -265,9 +288,25 @@ def _parse_metadata_line(line: str) -> tuple[str, Any] | None:
         return "prepared_by_role", _split_person_role(raw_value)
     if field_name == "checked_by":
         return "checked_by_role", _split_person_role(raw_value)
-    if _normalize_key(raw_key) in {"total bales on rail", "total bales", "bales processed"}:
+    if normalized_key in {"total bales on rail", "total bales", "bales processed"}:
         count = _parse_count_phrase(raw_value)
         return ("declared_bales_processed", count) if count is not None else None
+    if normalized_key in {
+        "bale release to rail count",
+        "bales released",
+        "bales released for sales",
+        "released bale count",
+    }:
+        count = _parse_count_phrase(raw_value)
+        return ("declared_bales_released", count) if count is not None else None
+    if normalized_key in {
+        "pending count",
+        "bales pending approval",
+        "pending approval count",
+        "bales waiting for approval",
+    }:
+        count = _parse_count_phrase(raw_value)
+        return ("declared_bales_pending_approval", count) if count is not None else None
     if field_name == "total_qty":
         quantity_count = _parse_count_phrase(raw_value)
         if quantity_count is not None:
@@ -655,3 +694,34 @@ def _extract_count_from_patterns(line: str, patterns: tuple[re.Pattern[str], ...
         if count is not None:
             return count
     return None
+
+
+def _is_zero_bale_activity(parsed: ParsedBaleSummary) -> bool:
+    """Return True when the report explicitly declares a valid zero-bale day."""
+
+    total_qty = parsed.declared_total_qty
+    total_amount = parsed.declared_total_amount
+    released = parsed.declared_bales_released
+    processed = parsed.declared_bales_processed
+    if total_qty is None or float(total_qty) != 0.0:
+        return False
+    if total_amount is None or float(total_amount) != 0.0:
+        return False
+    if released != 0:
+        return False
+    if processed not in {None, 0}:
+        return False
+    return _contains_zero_bale_phrase(parsed.source_text)
+
+
+def _contains_zero_bale_phrase(raw_text: str) -> bool:
+    """Return True when the source text contains a supported no-activity phrase."""
+
+    normalized = _normalize_free_text(raw_text)
+    return any(phrase in normalized for phrase in _ZERO_BALE_ACTIVITY_PHRASES)
+
+
+def _normalize_free_text(raw_text: str) -> str:
+    """Collapse punctuation and whitespace for safe phrase matching."""
+
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", raw_text.casefold()).split())

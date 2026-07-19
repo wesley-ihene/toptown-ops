@@ -1034,6 +1034,7 @@ def _patch_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(record_paths, "PROVENANCE_DIR", records_dir / "provenance")
     monkeypatch.setattr(record_paths, "OBSERVABILITY_DIR", records_dir / "observability")
     monkeypatch.setattr(bridge, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(bridge, "verify_meta_signature", lambda body, signature: True)
 
 
 def _paths(directory: Path, pattern: str) -> list[Path]:

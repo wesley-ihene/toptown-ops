@@ -341,6 +341,59 @@ def test_sales_income_waigani_returns_preserve_gross_and_net_sales(
     assert result.payload["metrics"]["z_reading"] == 6521.20
 
 
+def test_sales_income_5th_street_item_return_reconciles_cash_and_total_sales(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_output_paths(tmp_path, monkeypatch)
+
+    result = process_work_item(
+        _sales_work_item(
+            [
+                "DAY-END SALES REPORT",
+                "Branch: Lae 5th Street Branch",
+                "Date: 01/06/2026",
+                "T/Cash: K2,785.00",
+                "T/Card: K1,072.00",
+                "Z/Reading: K3,857.00",
+                "Items Return: K32.00",
+                "TOTALS:",
+                "Total Cash: K2,753.00",
+                "Total Card: K1,072.00",
+                "Total Sales: K3,857.00",
+                "Traffic: 326",
+                "Served: 143",
+                "Supervisor Confirmation: YES",
+                "Return Type: Cash refund",
+            ]
+        )
+    )
+
+    warning_codes = {warning["code"] for warning in result.payload["warnings"]}
+    warning_messages = [warning["message"] for warning in result.payload["warnings"]]
+
+    assert result.payload["status"] == "accepted_with_warning"
+    assert result.payload["branch"] == "lae_5th_street"
+    assert result.payload["report_date"] == "2026-06-01"
+    assert result.payload["metrics"]["cash_sales"] == 2753.0
+    assert result.payload["metrics"]["eftpos_sales"] == 1072.0
+    assert result.payload["metrics"]["gross_sales"] == 3857.0
+    assert result.payload["metrics"]["item_returns"] == 32.0
+    assert result.payload["metrics"]["cash_adjustment_return"] == 32.0
+    assert result.payload["metrics"]["traffic"] == 326
+    assert result.payload["metrics"]["served"] == 143
+    assert "invalid_totals" not in warning_codes
+    assert "item_returns_present" in warning_codes
+    assert any("Total Cash + Total Card + Items Return matched Total Sales" in message for message in warning_messages)
+    assert result.payload["reconciliation"]["declared_total_cash"] == 2753.0
+    assert result.payload["reconciliation"]["expected_total_cash"] == 2753.0
+    assert result.payload["reconciliation"]["declared_total_sales"] == 3857.0
+    assert result.payload["reconciliation"]["expected_total_sales"] == 3857.0
+    assert result.payload["reconciliation"]["declared_z_reading"] == 3857.0
+    assert result.payload["reconciliation"]["expected_z_reading"] == 3857.0
+    assert result.payload["reconciliation"]["unexplained_variance"] == 0.0
+
+
 def _patch_output_paths(tmp_path: Path, monkeypatch) -> None:
     records_dir = tmp_path / "records"
     colony_root = tmp_path / "ioi-colony"

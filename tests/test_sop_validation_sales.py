@@ -218,6 +218,55 @@ def test_validate_sales_accepts_waigani_returns_when_total_sales_is_net_sales() 
     assert payload["reconciliation"]["item_return_adjustment"] == -46.0
 
 
+def test_validate_sales_accepts_5th_street_cash_return_reconciliation() -> None:
+    payload = {
+        "branch": "lae_5th_street",
+        "report_date": "2026-06-01",
+        "raw_text": "\n".join(
+            [
+                "DAY-END SALES REPORT",
+                "Branch: Lae 5th Street Branch",
+                "Date: 01/06/2026",
+                "T/Cash: K2,785.00",
+                "T/Card: K1,072.00",
+                "Z/Reading: K3,857.00",
+                "Items Return: K32.00",
+                "TOTALS:",
+                "Total Cash: K2,753.00",
+                "Total Card: K1,072.00",
+                "Total Sales: K3,857.00",
+                "Traffic: 326",
+                "Served: 143",
+            ]
+        ),
+        "metrics": {
+            "gross_sales": 3857.0,
+            "cash_sales": 2753.0,
+            "eftpos_sales": 1072.0,
+            "item_returns": 32.0,
+            "cash_adjustment_return": 32.0,
+            "z_reading": 3857.0,
+            "traffic": 326,
+            "served": 143,
+        },
+    }
+
+    result = validate_sales(payload)
+
+    assert result.accepted is True
+    assert result.rejection_codes == []
+    assert payload["reconciliation"]["declared_total_cash"] == 2753.0
+    assert payload["reconciliation"]["expected_total_cash"] == 2753.0
+    assert payload["reconciliation"]["declared_total_card"] == 1072.0
+    assert payload["reconciliation"]["expected_total_card"] == 1072.0
+    assert payload["reconciliation"]["declared_total_sales"] == 3857.0
+    assert payload["reconciliation"]["expected_total_sales"] == 3857.0
+    assert payload["reconciliation"]["declared_z_reading"] == 3857.0
+    assert payload["reconciliation"]["expected_z_reading"] == 3857.0
+    assert payload["reconciliation"]["item_return_adjustment"] == -32.0
+    assert payload["reconciliation"]["unexplained_variance"] == 0.0
+
+
 def test_validate_sales_accepts_eftpos_card_split_reconciliation() -> None:
     payload = {
         "branch": "waigani",

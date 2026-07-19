@@ -347,7 +347,7 @@ def _compute_confidence(
 def _determine_status(*, parsed: ParsedBaleSummary, warnings: list[WarningEntry]) -> str:
     """Return the final bale-summary status from critical vs non-critical warnings."""
 
-    if not parsed.branch or not parsed.report_date or not parsed.items:
+    if not parsed.branch or not parsed.report_date or (not parsed.items and not parsed.zero_bale_activity):
         return "needs_review"
 
     critical_warning_codes = {"missing_fields", "data_mismatch", "financial_anomaly"}
@@ -413,6 +413,7 @@ def _validation_metadata(
     """Return sidecar validation metadata for pricing-stock-release records."""
 
     correction_metadata = dict(correction_context) if isinstance(correction_context, Mapping) else {}
+    validation_reasons = [warning.code for warning in warnings]
     governance_context = {
         **build_governance_context(work_item_payload),
         **_correction_governance_context(correction_metadata),
@@ -427,6 +428,7 @@ def _validation_metadata(
                 "final_status": status,
                 "parser_failure": parser_failure,
                 "correction_intent_detected": correction_metadata.get("requested") is True,
+                "validation_reasons": validation_reasons,
             },
         ).to_payload(),
         "governance_context": governance_context,
@@ -466,7 +468,7 @@ def _preserves_auto_accept_confidence(
         status in {"accepted", "accepted_with_warning"}
         and parsed.branch is not None
         and parsed.report_date is not None
-        and bool(parsed.items)
+        and (bool(parsed.items) or parsed.zero_bale_activity)
         and parsed.declared_total_qty is not None
         and parsed.declared_total_amount is not None
         and "totals_inferred" not in warning_codes

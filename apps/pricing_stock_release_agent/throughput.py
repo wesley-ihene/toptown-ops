@@ -22,6 +22,13 @@ class ThroughputInterpretation:
 def interpret_throughput(stock_flow: StockFlowInterpretation) -> ThroughputInterpretation:
     """Return release ratio and a conservative readiness status."""
 
+    if stock_flow.zero_bale_activity:
+        return ThroughputInterpretation(
+            release_ratio=0.0,
+            readiness_status="accepted",
+            warnings=[],
+        )
+
     if stock_flow.bales_processed <= 0:
         return ThroughputInterpretation(
             release_ratio=0.0,

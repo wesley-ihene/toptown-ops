@@ -163,6 +163,11 @@ def test_dashboard_renders_required_operational_views(tmp_path: Path) -> None:
     assert "Pending Actions" in html
     assert "Acknowledged" in html
     assert "OpenClaw Runtime" in html
+    assert "OpenClaw Advisory Sandbox" in html
+    assert "Sandbox Only" in html
+    assert "Mock Advisory" in html
+    assert "Sandbox advisory: Branch Advisory Sandbox" in html
+    assert "No prompts are sent, no records are written, and no automatic actions are created." in html
     assert "Standby" in html
     assert "ws://127.0.0.1:18789" in html
     assert "Alice Demo" in html
@@ -191,6 +196,16 @@ def test_dashboard_json_includes_openclaw_runtime_status(tmp_path: Path) -> None
             "reason": "TAOP_OPENCLAW_ENABLED is disabled",
         }
     }
+    assert body["datasets"]["openclaw_advisory_sandbox"]["status"] == {
+        "enabled": False,
+        "sandbox_only": True,
+        "gateway_url": "ws://127.0.0.1:18789",
+        "status": "sandbox_only",
+        "reason": "OpenClaw advisory sandbox only; no gateway calls or external prompt delivery",
+        "mock_output": True,
+    }
+    assert body["datasets"]["openclaw_advisory_sandbox"]["sample"]["title"] == "Branch Advisory Sandbox"
+    assert body["datasets"]["openclaw_advisory_sandbox"]["sample"]["context"] == "branch=waigani, report_date=2026-04-07"
 
 
 def test_dashboard_branch_and_date_filters_handle_partial_and_missing_data(tmp_path: Path) -> None:

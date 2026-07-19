@@ -24,7 +24,7 @@ from analytics.phase5_executive import (
     build_ceo_dashboard,
 )
 from packages.feedback_store import build_action_feedback_state
-from packages.openclaw_adapter import get_runtime_status
+from packages.openclaw_adapter import generate_advisory, get_advisory_status, get_runtime_status
 from packages.common.analytics_loader import (
     build_catalog,
     canonical_branch_or_none,
@@ -358,6 +358,16 @@ def _load_bundle(
             output_root=root,
         ),
         "openclaw_runtime": get_runtime_status(),
+        "openclaw_advisory_sandbox": {
+            "status": get_advisory_status(),
+            "sample": generate_advisory(
+                "Branch Advisory Sandbox",
+                {
+                    "branch": branch,
+                    "report_date": report_date,
+                },
+            ),
+        },
     }
 
 

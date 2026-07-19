@@ -24,14 +24,20 @@ _CASH_OVER_LABELS = frozenset({"cash over", "c over"})
 _CASH_DOWN_LABELS = frozenset({"cash down", "c down"})
 _ITEM_RETURN_LABELS = frozenset(
     {
+        "items return",
+        "items returns",
         "item return",
         "item returns",
+        "returned item",
+        "returned items",
         "return",
         "returns",
         "return adjustment",
         "item return adjustment",
         "refund",
         "refunds",
+        "refund amount",
+        "refund amounts",
     }
 )
 _EFTPOS_RECONCILIATION_LABELS = frozenset(
@@ -143,9 +149,9 @@ def build_sales_reconciliation(
     declared_total_sales = _coalesce(raw_evidence.declared_total_sales, metric_evidence.declared_total_sales)
     declared_z_reading = _coalesce(raw_evidence.z_reading_total, metric_evidence.declared_z_reading)
 
-    expected_total_cash = _coalesce(raw_evidence.till_cash_total, metric_evidence.declared_total_cash)
-    expected_total_card = _coalesce(raw_evidence.till_card_total, metric_evidence.declared_total_card)
-    operational_sales = _sum_money(expected_total_cash, expected_total_card)
+    baseline_total_cash = _coalesce(raw_evidence.till_cash_total, metric_evidence.declared_total_cash)
+    baseline_total_card = _coalesce(raw_evidence.till_card_total, metric_evidence.declared_total_card)
+    operational_sales = _sum_money(baseline_total_cash, baseline_total_card)
 
     cash_over = _money_or_zero(_coalesce(raw_evidence.cash_over, metric_evidence.cash_over))
     cash_down = _money_or_zero(_coalesce(raw_evidence.cash_down, metric_evidence.cash_down))
@@ -158,16 +164,24 @@ def build_sales_reconciliation(
 
     expected_z_reading = None
     expected_total_sales = None
+    expected_total_cash = baseline_total_cash
+    expected_total_card = baseline_total_card
     if operational_sales is not None:
         policy = _select_reconciliation_policy(
             operational_sales=operational_sales,
+            declared_total_cash=declared_total_cash,
+            declared_total_card=declared_total_card,
             declared_total_sales=declared_total_sales,
             declared_z_reading=declared_z_reading,
+            baseline_total_cash=baseline_total_cash,
+            baseline_total_card=baseline_total_card,
             cash_over=cash_over,
             cash_down=cash_down,
             item_return_adjustment=item_return_adjustment,
             eftpos_reconciliation_adjustment=eftpos_reconciliation_adjustment,
         )
+        expected_total_cash = policy["expected_total_cash"]
+        expected_total_card = policy["expected_total_card"]
         expected_z_reading = policy["expected_z_reading"]
         expected_total_sales = policy["expected_total_sales"]
 
@@ -353,6 +367,8 @@ def _extract_metric_evidence(metrics: Mapping[str, Any] | None) -> _MetricEviden
         "return",
         "refund",
         "refunds",
+        "refund_amount",
+        "cash_adjustment_return",
     )
     if item_return_adjustment is not None and item_return_adjustment > 0:
         item_return_adjustment = -item_return_adjustment
@@ -442,8 +458,12 @@ def _abs_or_none(value: float | None) -> float | None:
 def _select_reconciliation_policy(
     *,
     operational_sales: float,
+    declared_total_cash: float | None,
+    declared_total_card: float | None,
     declared_total_sales: float | None,
     declared_z_reading: float | None,
+    baseline_total_cash: float | None,
+    baseline_total_card: float | None,
     cash_over: float,
     cash_down: float,
     item_return_adjustment: float,
@@ -475,19 +495,37 @@ def _select_reconciliation_policy(
 
     policies = (
         {
+            "expected_total_cash": baseline_total_cash,
+            "expected_total_card": baseline_total_card,
             "expected_total_sales": legacy_expected_total_sales,
             "expected_z_reading": legacy_expected_z_reading,
         },
         {
+            "expected_total_cash": baseline_total_cash,
+            "expected_total_card": baseline_total_card,
             "expected_total_sales": z_includes_returns_expected_total_sales,
             "expected_z_reading": z_includes_returns_expected_z_reading,
         },
     )
+    if baseline_total_cash is not None and abs(item_return_adjustment) > TOLERANCE:
+        policies = (
+            *policies,
+            {
+                "expected_total_cash": round(baseline_total_cash + item_return_adjustment, 2),
+                "expected_total_card": baseline_total_card,
+                "expected_total_sales": z_includes_returns_expected_total_sales,
+                "expected_z_reading": round(operational_sales + cash_down - cash_over, 2),
+            },
+        )
     return min(
         policies,
         key=lambda policy: _policy_distance(
+            declared_total_cash=declared_total_cash,
+            declared_total_card=declared_total_card,
             declared_total_sales=declared_total_sales,
             declared_z_reading=declared_z_reading,
+            expected_total_cash=policy["expected_total_cash"],
+            expected_total_card=policy["expected_total_card"],
             expected_total_sales=policy["expected_total_sales"],
             expected_z_reading=policy["expected_z_reading"],
         ),
@@ -496,14 +534,20 @@ def _select_reconciliation_policy(
 
 def _policy_distance(
     *,
+    declared_total_cash: float | None,
+    declared_total_card: float | None,
     declared_total_sales: float | None,
     declared_z_reading: float | None,
+    expected_total_cash: float | None,
+    expected_total_card: float | None,
     expected_total_sales: float,
     expected_z_reading: float,
 ) -> float:
+    cash_distance = abs((declared_total_cash or expected_total_cash or 0.0) - (expected_total_cash or 0.0))
+    card_distance = abs((declared_total_card or expected_total_card or 0.0) - (expected_total_card or 0.0))
     sales_distance = abs((declared_total_sales or expected_total_sales) - expected_total_sales)
     z_distance = abs((declared_z_reading or expected_z_reading) - expected_z_reading)
-    return round(sales_distance + z_distance, 2)
+    return round(cash_distance + card_distance + sales_distance + z_distance, 2)
 
 
 def _embedded_adjustment_amount(line: str) -> tuple[str, float] | None:
@@ -518,7 +562,10 @@ def _embedded_adjustment_amount(line: str) -> tuple[str, float] | None:
     if _mentions_cash_down(line):
         return ("cash down", amount)
     normalized = _normalize_key(line)
-    if "item return" in normalized:
+    if any(
+        token in normalized
+        for token in ("item return", "items return", "returned item", "refund amount", "refund")
+    ):
         return ("item return", amount)
     return None
 
