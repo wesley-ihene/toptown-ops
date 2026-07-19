@@ -88,3 +88,12 @@ The default database is `data/capture.sqlite3` (runtime data and intentionally
 gitignored). Override it with `TOPTOWN_CAPTURE_DB`. Use `flask ... retry-outbox`
 to retry any structured-record materialization that failed after an authoritative
 submission committed.
+
+## CEO Dashboard Phase 1
+
+The exception-first, read-only CEO KPI surface is available at
+`/ceo/vital-few`, with its versioned JSON contract at
+`/api/ceo/vital-few?date=YYYY-MM-DD`. It presents operational and people facts
+without writing back or making decisions. See
+[docs/CEO_DASHBOARD_PHASE1.md](docs/CEO_DASHBOARD_PHASE1.md) for the metric,
+threshold, completeness, and boundary contract.

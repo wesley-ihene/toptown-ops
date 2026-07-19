@@ -16,13 +16,17 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from apps.ceo_api.routes import route_request as ceo_route_request
+from apps.ceo_api.vital_few import ROUTE as VITAL_FEW_API_ROUTE
+from apps.ceo_api.vital_few import route_request as vital_few_route_request
 from apps.ceo_dashboard_ui.routes import render_ceo_dashboard_response
+from apps.ceo_dashboard_ui.vital_few import render_vital_few_dashboard
 from apps.dashboard_api.routes import route_request as dashboard_route_request
 from apps.taop_ops_api.routes import route_request as taop_ops_route_request
 from apps.dashboard_ui.routes import render_dashboard_response, render_not_found_page
 from analytics.phase5_executive import (
     build_ceo_dashboard,
 )
+from analytics.ceo_vital_few import build_phase1_dashboard
 from packages.feedback_store import build_action_feedback_state
 from packages.openclaw_adapter import generate_advisory, get_advisory_status, get_runtime_status
 from packages.common.analytics_loader import (
@@ -39,6 +43,7 @@ HEALTH_ROUTE = "/health"
 OPERATOR_DASHBOARD_ROUTES = {"/", "/dashboard"}
 DEPRECATED_EXECUTIVE_DASHBOARD_ROUTES = {"/ceo", "/ceo/dashboard"}
 DEPRECATED_EXECUTIVE_API_PREFIXES = ("/api/ceo", "/api/executive")
+VITAL_FEW_DASHBOARD_ROUTE = "/ceo/vital-few"
 COMPATIBILITY_QUERY_PARAM = "compat"
 RUNTIME_STATUS = "LIVE_RUNTIME"
 RUNTIME_OWNER = "phase4_portal"
@@ -92,6 +97,11 @@ def dispatch_http_request(
             },
         )
 
+    result = vital_few_route_request(path, params, root=str(root) if root is not None else None)
+    if result is not None:
+        status_code, payload = result
+        return _json_response(status_code, payload)
+
     if _is_hidden_deprecated_surface(path) and not compatibility_mode:
         return _deprecated_surface_hidden_response(path=path)
 
@@ -116,6 +126,8 @@ def dispatch_http_request(
         return _ceo_dashboard_json_response(params=params, root=root)
     if path in OPERATOR_DASHBOARD_ROUTES:
         return _dashboard_response(path=path, params=params, root=root)
+    if path == VITAL_FEW_DASHBOARD_ROUTE:
+        return _vital_few_dashboard_response(params=params, root=root)
     if path in DEPRECATED_EXECUTIVE_DASHBOARD_ROUTES:
         return _ceo_dashboard_response(path=path, params=params, root=root)
 
@@ -309,6 +321,45 @@ def _ceo_dashboard_response(
     return _html_response(HTTPStatus.OK, html)
 
 
+def _vital_few_dashboard_response(
+    *,
+    params: Mapping[str, list[str]],
+    root: str | Path | None = None,
+) -> PortalHttpResponse:
+    catalog = build_catalog(root=root)
+    report_date = _query_value(params, "date")
+    if report_date is None:
+        dates = catalog["available_comparison_dates"] or catalog["available_dates"]
+        report_date = dates[0] if dates else None
+    if report_date is None:
+        return _html_response(
+            HTTPStatus.NOT_FOUND,
+            render_not_found_page(path=VITAL_FEW_DASHBOARD_ROUTE, branch=None, report_date=None),
+        )
+    try:
+        dashboard = build_phase1_dashboard(
+            report_date,
+            branch=_query_value(params, "branch"),
+            root=root,
+        )
+    except ValueError:
+        return _html_response(
+            HTTPStatus.BAD_REQUEST,
+            render_not_found_page(
+                path=VITAL_FEW_DASHBOARD_ROUTE,
+                branch=_query_value(params, "branch"),
+                report_date=report_date,
+            ),
+        )
+    dates = list(dict.fromkeys([*catalog["available_comparison_dates"], *catalog["available_dates"]]))
+    html = render_vital_few_dashboard(
+        dashboard=dashboard,
+        available_dates=dates,
+        show_all=(_query_value(params, "show") or "").lower() == "all",
+    )
+    return _html_response(HTTPStatus.OK, html)
+
+
 def _resolve_selection(
     *,
     params: Mapping[str, list[str]],
@@ -397,6 +448,8 @@ def _compatibility_mode_requested_from_query(query: str) -> bool:
 
 
 def _is_hidden_deprecated_surface(path: str) -> bool:
+    if path in {VITAL_FEW_DASHBOARD_ROUTE, VITAL_FEW_API_ROUTE}:
+        return False
     if path in DEPRECATED_EXECUTIVE_DASHBOARD_ROUTES:
         return True
     if path.startswith(DEPRECATED_EXECUTIVE_API_PREFIXES):
