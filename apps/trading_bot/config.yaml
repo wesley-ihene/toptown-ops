@@ -23,7 +23,7 @@ strategy:
   require_macd_above_zero_for_long: true
 
 session:
-  trade_only_during_overlap: true
+  trade_only_during_overlap: false
   overlap_utc_start: "12:00"
   overlap_utc_end: "16:00"
 
